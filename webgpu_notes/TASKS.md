@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 10, 2026 (Phase 1: Task 1.3 DONE; Task 1.4 clear-screen path implemented, pending browser test)
+> **Last Updated**: March 10, 2026 (Phase 1 COMPLETE — Tasks 1.1–1.4 all DONE. Engine boots in browser, reaches PCK load stage. Phase 2 next.)
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -357,11 +357,18 @@ Reference: `drivers/metal/rendering_context_driver_metal.h` and `.mm`
 ---
 
 ### Task 1.4: Minimal Device Driver — Clear Screen `[SERIAL, after 1.3]`
-**Status**: `IN_PROGRESS`
+**Status**: `DONE`
 **Effort**: 8-12 hours
 **Dependencies**: Task 1.3
 
-**In-Progress Notes** (March 10, 2026 — second pass):
+**Completion Notes** (March 10, 2026):
+- Browser test PASSED in Chrome. godot.wasm (35MB) compiled and ran. Engine reached `main.cpp:2051` (PCK load stage) with **zero WebGPU errors**.
+- JS side: Apple GPU adapter found, device created with BC/ETC2/depth32float-stencil8/depth-clip-control features. Pre-initialized device passed to engine via `Module["preinitializedWebGPUDevice"]`.
+- C++ side: `initialize()`, `swap_chain_create()`, `swap_chain_resize()` all ran without crashing. Driver init fully completes before the PCK check.
+- Only error logged is the expected PCK-not-found; no WebGPU crashes or warnings from the driver.
+- Phase 1 is fully complete. Phase 2 (resources) is next.
+
+**Previous In-Progress Notes** (March 10, 2026 — second pass):
 - **All clear-screen path methods now fully implemented and compiling clean.**
 - `swap_chain_create()`: retrieves `WGPUSurface` via `context_driver->surface_get_handle()`, stores `surface_id`, creates a `WGRenderPass` describing the swap chain attachment (BGRA8Unorm, CLEAR/STORE).
 - `swap_chain_resize()`: calls `wgpuSurfaceConfigure()` with `WGPUSurfaceConfiguration` (device, format, width/height from context driver, presentMode=Fifo, alphaMode=Opaque).
