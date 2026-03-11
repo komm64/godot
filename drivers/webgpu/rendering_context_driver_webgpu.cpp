@@ -192,4 +192,10 @@ bool RenderingContextDriverWebGPU::is_debug_utils_enabled() const {
 	return false; // No debug utils in browser WebGPU.
 }
 
+WGPUSurface RenderingContextDriverWebGPU::surface_get_handle(SurfaceID p_surface) const {
+	const Surface *s = surfaces.getptr(p_surface);
+	ERR_FAIL_COND_V(s == nullptr, nullptr);
+	return s->handle;
+}
+
 #endif // WEBGPU_ENABLED

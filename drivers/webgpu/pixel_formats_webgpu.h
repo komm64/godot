@@ -616,14 +616,14 @@ static inline bool has_stencil_wgpu(WGPUTextureFormat p_format) {
 // ============================================================================
 
 static inline WGPUTextureAspect texture_aspect_to_wgpu(
-		RenderingDeviceCommons::TextureAspect p_aspect) {
-	using TA = RenderingDeviceCommons::TextureAspect;
+		RenderingDeviceDriver::TextureAspect p_aspect) {
+	using TA = RenderingDeviceDriver::TextureAspect;
 	switch (p_aspect) {
 		case TA::TEXTURE_ASPECT_COLOR:
 			return WGPUTextureAspect_All;
-		case TA::TEXTURE_ASPECT_DEPTH_ONLY:
+		case TA::TEXTURE_ASPECT_DEPTH:
 			return WGPUTextureAspect_DepthOnly;
-		case TA::TEXTURE_ASPECT_STENCIL_ONLY:
+		case TA::TEXTURE_ASPECT_STENCIL:
 			return WGPUTextureAspect_StencilOnly;
 		default:
 			return WGPUTextureAspect_All;

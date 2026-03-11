@@ -33,6 +33,7 @@
 #include "rendering_device_driver_webgpu.h"
 #include "rendering_context_driver_webgpu.h"
 #include "rendering_shader_container_webgpu.h"
+#include "pixel_formats_webgpu.h"
 
 #include <webgpu/webgpu.h>
 
@@ -775,19 +776,64 @@ void RenderingDeviceDriverWebGPU::command_buffer_execute_secondary(CommandBuffer
 
 RDD::SwapChainID RenderingDeviceDriverWebGPU::swap_chain_create(RenderingContextDriver::SurfaceID p_surface) {
 	WGSwapChain *sc = new WGSwapChain();
-	// TODO: Retrieve WGPUSurface from context driver's surface map.
-	sc->format = WGPUTextureFormat_BGRA8Unorm;
+	sc->surface = context_driver->surface_get_handle(p_surface);
+	sc->surface_id = p_surface;
+	sc->format = WGPUTextureFormat_BGRA8Unorm; // Standard format for browser canvas.
+
+	// Create a render pass descriptor for this swap chain.
+	// Used by swap_chain_get_render_pass() so the RD layer can create compatible pipelines.
+	WGRenderPass *rp = new WGRenderPass();
+	RDD::Attachment att;
+	att.format = DATA_FORMAT_B8G8R8A8_UNORM;
+	att.samples = TEXTURE_SAMPLES_1;
+	att.load_op = ATTACHMENT_LOAD_OP_CLEAR;
+	att.store_op = ATTACHMENT_STORE_OP_STORE;
+	att.stencil_load_op = ATTACHMENT_LOAD_OP_DONT_CARE;
+	att.stencil_store_op = ATTACHMENT_STORE_OP_DONT_CARE;
+	att.initial_layout = TEXTURE_LAYOUT_UNDEFINED;
+	att.final_layout = TEXTURE_LAYOUT_UNDEFINED;
+	rp->attachments.push_back(att);
+
+	WGRenderPass::SubpassInfo subpass;
+	RDD::AttachmentReference color_ref;
+	color_ref.attachment = 0;
+	color_ref.layout = TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	subpass.color_references.push_back(color_ref);
+	rp->subpasses.push_back(subpass);
+	sc->render_pass = rp;
+
 	return SwapChainID(sc);
 }
 
 Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, uint32_t p_desired_framebuffer_count) {
 	WGSwapChain *sc = (WGSwapChain *)(p_swap_chain.id);
 	ERR_FAIL_NULL_V(sc, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(sc->surface == nullptr, ERR_INVALID_PARAMETER);
 
-	// TODO: Get width/height from context driver surface.
-	// TODO: Call wgpuSurfaceConfigure() with device, format, usage, alphaMode, width, height.
-	// TODO: Create render pass for swap chain if not already created.
+	uint32_t width = context_driver->surface_get_width(sc->surface_id);
+	uint32_t height = context_driver->surface_get_height(sc->surface_id);
+	if (width == 0 || height == 0) {
+		return ERR_SKIP; // Canvas not yet sized.
+	}
 
+	// If previously configured, unconfigure first to reconfigure with new dimensions.
+	if (sc->configured) {
+		wgpuSurfaceUnconfigure(sc->surface);
+		sc->configured = false;
+	}
+
+	WGPUSurfaceConfiguration config = {};
+	config.device = device;
+	config.format = sc->format;
+	config.usage = WGPUTextureUsage_RenderAttachment;
+	config.alphaMode = WGPUCompositeAlphaMode_Opaque;
+	config.presentMode = WGPUPresentMode_Fifo; // Browser always vsyncs via requestAnimationFrame.
+	config.width = width;
+	config.height = height;
+	wgpuSurfaceConfigure(sc->surface, &config);
+
+	sc->width = width;
+	sc->height = height;
 	sc->configured = true;
 	return OK;
 }
@@ -795,13 +841,63 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) {
 	WGSwapChain *sc = (WGSwapChain *)(p_swap_chain.id);
 	ERR_FAIL_NULL_V(sc, FramebufferID());
+	ERR_FAIL_COND_V(!sc->configured, FramebufferID());
 
-	// TODO: Call wgpuSurfaceGetCurrentTexture().
-	// TODO: Check status, set r_resize_required if needed.
-	// TODO: Create texture view and framebuffer.
+	// Release resources from the previous frame.
+	if (sc->current_framebuffer) {
+		delete sc->current_framebuffer;
+		sc->current_framebuffer = nullptr;
+	}
+	if (sc->current_view) {
+		wgpuTextureViewRelease(sc->current_view);
+		sc->current_view = nullptr;
+	}
+	if (sc->current_texture) {
+		wgpuTextureRelease(sc->current_texture);
+		sc->current_texture = nullptr;
+	}
+
+	// Acquire the next swap chain texture.
+	WGPUSurfaceTexture surface_texture = {};
+	wgpuSurfaceGetCurrentTexture(sc->surface, &surface_texture);
+
+	if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal ||
+			surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated ||
+			surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
+		r_resize_required = true;
+		return FramebufferID();
+	}
+	ERR_FAIL_COND_V_MSG(
+			surface_texture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal,
+			FramebufferID(),
+			"WebGPU: wgpuSurfaceGetCurrentTexture failed with unexpected status.");
+
+	sc->current_texture = surface_texture.texture;
+
+	// Create a view for this frame's swap chain texture.
+	WGPUTextureViewDescriptor view_desc = {};
+	view_desc.format = sc->format;
+	view_desc.dimension = WGPUTextureViewDimension_2D;
+	view_desc.baseMipLevel = 0;
+	view_desc.mipLevelCount = 1;
+	view_desc.baseArrayLayer = 0;
+	view_desc.arrayLayerCount = 1;
+	view_desc.aspect = WGPUTextureAspect_All;
+	sc->current_view = wgpuTextureCreateView(sc->current_texture, &view_desc);
+	ERR_FAIL_COND_V(sc->current_view == nullptr, FramebufferID());
+
+	// Wrap in a WGFramebuffer. The WGTexture pointer is null since we manage
+	// the texture lifetime through the swap chain, not the framebuffer.
+	WGFramebuffer *fb = new WGFramebuffer();
+	fb->render_pass = sc->render_pass;
+	fb->width = sc->width;
+	fb->height = sc->height;
+	fb->attachments.push_back(nullptr);
+	fb->attachment_views.push_back(sc->current_view);
+	sc->current_framebuffer = fb;
 
 	r_resize_required = false;
-	return FramebufferID(); // TODO: Return actual framebuffer.
+	return FramebufferID(fb);
 }
 
 RDD::RenderPassID RenderingDeviceDriverWebGPU::swap_chain_get_render_pass(SwapChainID p_swap_chain) {
@@ -819,6 +915,18 @@ RDD::DataFormat RenderingDeviceDriverWebGPU::swap_chain_get_format(SwapChainID p
 void RenderingDeviceDriverWebGPU::swap_chain_free(SwapChainID p_swap_chain) {
 	WGSwapChain *sc = (WGSwapChain *)(p_swap_chain.id);
 	ERR_FAIL_NULL(sc);
+	if (sc->current_framebuffer) {
+		delete sc->current_framebuffer;
+	}
+	if (sc->current_view) {
+		wgpuTextureViewRelease(sc->current_view);
+	}
+	if (sc->current_texture) {
+		wgpuTextureRelease(sc->current_texture);
+	}
+	if (sc->render_pass) {
+		delete sc->render_pass;
+	}
 	if (sc->surface && sc->configured) {
 		wgpuSurfaceUnconfigure(sc->surface);
 	}
@@ -1187,19 +1295,129 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	cmd->render_state.framebuffer = fb;
 	cmd->render_state.current_subpass = 0;
 
-	// Build render pass descriptor from first subpass.
 	ERR_FAIL_COND(rp->subpasses.size() == 0);
 	const WGRenderPass::SubpassInfo &subpass = rp->subpasses[0];
 
-	// TODO: Build WGPURenderPassDescriptor from subpass color/depth references + framebuffer texture views.
-	// TODO: Set load/store ops from attachment descriptions.
-	// TODO: Set clear values.
-	// TODO: Call wgpuCommandEncoderBeginRenderPass().
-	// TODO: Store the WGPURenderPassEncoder.
-	// For now, create a minimal render pass descriptor.
+	// --- Helper lambdas for op mapping ---
+	auto map_load_op = [](AttachmentLoadOp op) -> WGPULoadOp {
+		switch (op) {
+			case ATTACHMENT_LOAD_OP_LOAD: return WGPULoadOp_Load;
+			case ATTACHMENT_LOAD_OP_CLEAR: return WGPULoadOp_Clear;
+			default: return WGPULoadOp_Load; // DONT_CARE → Load (safer than Undefined)
+		}
+	};
+	auto map_store_op = [](AttachmentStoreOp op) -> WGPUStoreOp {
+		switch (op) {
+			case ATTACHMENT_STORE_OP_STORE: return WGPUStoreOp_Store;
+			default: return WGPUStoreOp_Discard; // DONT_CARE
+		}
+	};
 
+	// --- Build color attachments ---
+	// clear_values is indexed by attachment index, matching Vulkan/Godot convention.
+	LocalVector<WGPURenderPassColorAttachment> color_attachments;
+	for (uint32_t i = 0; i < subpass.color_references.size(); i++) {
+		const RDD::AttachmentReference &ref = subpass.color_references[i];
+
+		WGPURenderPassColorAttachment att = {};
+		att.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+
+		if (ref.attachment == RDD::AttachmentReference::UNUSED) {
+			// Unused attachment slot: provide a dummy null entry.
+			att.view = nullptr;
+			att.loadOp = WGPULoadOp_Load;
+			att.storeOp = WGPUStoreOp_Discard;
+			color_attachments.push_back(att);
+			continue;
+		}
+
+		// Attachment view from framebuffer.
+		if (ref.attachment < fb->attachment_views.size()) {
+			att.view = fb->attachment_views[ref.attachment];
+		}
+
+		// Resolve target (MSAA).
+		if (i < subpass.resolve_references.size()) {
+			const RDD::AttachmentReference &res_ref = subpass.resolve_references[i];
+			if (res_ref.attachment != RDD::AttachmentReference::UNUSED &&
+					res_ref.attachment < fb->attachment_views.size()) {
+				att.resolveTarget = fb->attachment_views[res_ref.attachment];
+			}
+		}
+
+		// Load/store ops and clear value from attachment description.
+		if (ref.attachment < rp->attachments.size()) {
+			const RDD::Attachment &attach_desc = rp->attachments[ref.attachment];
+			att.loadOp = map_load_op(attach_desc.load_op);
+			att.storeOp = map_store_op(attach_desc.store_op);
+			if (att.loadOp == WGPULoadOp_Clear && ref.attachment < p_clear_values.size()) {
+				const Color &c = p_clear_values[ref.attachment].color;
+				att.clearValue = { c.r, c.g, c.b, c.a };
+			}
+		} else {
+			att.loadOp = WGPULoadOp_Load;
+			att.storeOp = WGPUStoreOp_Store;
+		}
+
+		color_attachments.push_back(att);
+	}
+
+	// --- Build depth/stencil attachment ---
+	WGPURenderPassDepthStencilAttachment ds_att = {};
+	WGPURenderPassDepthStencilAttachment *ds_att_ptr = nullptr;
+
+	const RDD::AttachmentReference &ds_ref = subpass.depth_stencil_reference;
+	if (ds_ref.attachment != RDD::AttachmentReference::UNUSED &&
+			ds_ref.attachment < fb->attachment_views.size()) {
+		ds_att.view = fb->attachment_views[ds_ref.attachment];
+
+		if (ds_ref.attachment < rp->attachments.size()) {
+			const RDD::Attachment &attach_desc = rp->attachments[ds_ref.attachment];
+			WGPUTextureFormat wgpu_fmt = _data_format_to_wgpu(attach_desc.format);
+			bool has_depth = is_depth_format_wgpu(wgpu_fmt);
+			bool has_stencil = has_stencil_wgpu(wgpu_fmt);
+
+			if (has_depth) {
+				ds_att.depthLoadOp = map_load_op(attach_desc.load_op);
+				ds_att.depthStoreOp = map_store_op(attach_desc.store_op);
+				if (ds_att.depthLoadOp == WGPULoadOp_Clear && ds_ref.attachment < p_clear_values.size()) {
+					ds_att.depthClearValue = p_clear_values[ds_ref.attachment].depth;
+				} else {
+					ds_att.depthClearValue = 1.0f;
+				}
+			} else {
+				ds_att.depthLoadOp = WGPULoadOp_Undefined;
+				ds_att.depthStoreOp = WGPUStoreOp_Undefined;
+				ds_att.depthReadOnly = true;
+			}
+
+			if (has_stencil) {
+				ds_att.stencilLoadOp = map_load_op(attach_desc.stencil_load_op);
+				ds_att.stencilStoreOp = map_store_op(attach_desc.stencil_store_op);
+				if (ds_att.stencilLoadOp == WGPULoadOp_Clear && ds_ref.attachment < p_clear_values.size()) {
+					ds_att.stencilClearValue = p_clear_values[ds_ref.attachment].stencil;
+				}
+			} else {
+				ds_att.stencilLoadOp = WGPULoadOp_Undefined;
+				ds_att.stencilStoreOp = WGPUStoreOp_Undefined;
+				ds_att.stencilReadOnly = true;
+			}
+		} else {
+			// Fallback: load and store everything.
+			ds_att.depthLoadOp = WGPULoadOp_Load;
+			ds_att.depthStoreOp = WGPUStoreOp_Store;
+			ds_att.depthClearValue = 1.0f;
+			ds_att.stencilLoadOp = WGPULoadOp_Load;
+			ds_att.stencilStoreOp = WGPUStoreOp_Store;
+		}
+		ds_att_ptr = &ds_att;
+	}
+
+	// --- Begin render pass ---
 	WGPURenderPassDescriptor pass_desc = {};
-	// TODO: Fill in color attachments and depth attachment from references.
+	pass_desc.colorAttachmentCount = color_attachments.size();
+	pass_desc.colorAttachments = color_attachments.ptr();
+	pass_desc.depthStencilAttachment = ds_att_ptr;
 
 	cmd->render_encoder = wgpuCommandEncoderBeginRenderPass(cmd->encoder, &pass_desc);
 	cmd->active_encoder = WGCommandBuffer::RENDER;

@@ -180,6 +180,10 @@ struct WGSwapChain {
 	WGPUTextureFormat format = WGPUTextureFormat_BGRA8Unorm;
 	uint32_t width = 0, height = 0;
 	WGRenderPass *render_pass = nullptr;
+	uint64_t surface_id = 0; // Context driver SurfaceID — used to look up size on resize.
+	WGPUTexture current_texture = nullptr; // Released after each frame.
+	WGPUTextureView current_view = nullptr;
+	WGFramebuffer *current_framebuffer = nullptr;
 	bool configured = false;
 };
 

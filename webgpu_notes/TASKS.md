@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 10, 2026 (Phase 1 build compiles clean — Emscripten 5.x fixes applied)
+> **Last Updated**: March 10, 2026 (Phase 1: Task 1.3 DONE; Task 1.4 clear-screen path implemented, pending browser test)
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -302,16 +302,19 @@
 ---
 
 ### Task 1.3: Context Driver Implementation `[SERIAL, after 1.1 + 1.2]`
-**Status**: `IN_PROGRESS`
+**Status**: `DONE`
 **Effort**: 4-6 hours
 **Dependencies**: Tasks 1.1, 1.2
 
-**In-Progress Notes** (March 10, 2026):
-- Stub implementation exists in `drivers/webgpu/rendering_context_driver_webgpu.cpp` — COMPILES CLEAN.
-- Device acquisition uses `EM_ASM_PTR` + `WebGPU["importJsDevice"]` pattern
-- Canvas surface uses renamed `WGPUEmscriptenSurfaceSourceCanvasHTMLSelector` struct
-- NOT YET TESTED in browser (requires next session)
-- Next: run in actual browser to verify surface creation and device initialization
+**Completion Notes** (March 10, 2026):
+- All pure virtual methods implemented and compiling clean.
+- `initialize()`: device acquired via `EM_ASM_PTR` + `WebGPU["importJsDevice"]`, queue obtained, device info populated.
+- `surface_create()`: uses `WGPUEmscriptenSurfaceSourceCanvasHTMLSelector` with `WGPUStringView` selector. Creates a minimal `WGPUInstance` lazily if needed.
+- `surface_get_handle()` accessor added (used by device driver for swap chain setup).
+- `surface_set/get_size()`, `surface_set/get_vsync_mode()`, `surface_set/get_needs_resize()`, `surface_destroy()`: all implemented.
+- `device_get_count()` returns 1. `device_supports_present()` returns true. `is_debug_utils_enabled()` returns false.
+- `driver_create()` / `driver_free()`: create/delete `RenderingDeviceDriverWebGPU`.
+- Build: compiles clean as part of `bin/godot.web.template_debug.wasm32.zip` (exit 0).
 
 **Instructions**:
 
@@ -358,11 +361,15 @@ Reference: `drivers/metal/rendering_context_driver_metal.h` and `.mm`
 **Effort**: 8-12 hours
 **Dependencies**: Task 1.3
 
-**In-Progress Notes** (March 10, 2026):
-- Full stub implementation exists in `drivers/webgpu/rendering_device_driver_webgpu.cpp` — COMPILES CLEAN.
-- All 126 override finals defined (vs 121 pure virtuals in base class).
-- Most methods are stubs returning safe defaults. Needs real implementation.
-- Next: implement enough to see something in browser (swap chain, clear render pass)
+**In-Progress Notes** (March 10, 2026 — second pass):
+- **All clear-screen path methods now fully implemented and compiling clean.**
+- `swap_chain_create()`: retrieves `WGPUSurface` via `context_driver->surface_get_handle()`, stores `surface_id`, creates a `WGRenderPass` describing the swap chain attachment (BGRA8Unorm, CLEAR/STORE).
+- `swap_chain_resize()`: calls `wgpuSurfaceConfigure()` with `WGPUSurfaceConfiguration` (device, format, width/height from context driver, presentMode=Fifo, alphaMode=Opaque).
+- `swap_chain_acquire_framebuffer()`: calls `wgpuSurfaceGetCurrentTexture()`, checks status (resize if Outdated/Lost), creates `WGPUTextureView` and a transient `WGFramebuffer`. Releases previous frame's texture/view/framebuffer.
+- `swap_chain_free()`: properly releases current texture/view/framebuffer and the render pass before unconfiguring.
+- `command_begin_render_pass()`: fully implemented — loops over subpass color references, maps Godot `ATTACHMENT_LOAD_OP_*`/`ATTACHMENT_STORE_OP_*` to `WGPULoadOp`/`WGPUStoreOp`, sets clear values from `p_clear_values[ref.attachment]`, builds `WGPURenderPassDepthStencilAttachment` respecting depth-only vs stencil-only formats via `is_depth_format_wgpu()` / `has_stencil_wgpu()`.
+- Fixed `pixel_formats_webgpu.h`: `RenderingDeviceCommons::TextureAspect` → `RenderingDeviceDriver::TextureAspect`, `TEXTURE_ASPECT_DEPTH_ONLY` → `TEXTURE_ASPECT_DEPTH`, `TEXTURE_ASPECT_STENCIL_ONLY` → `TEXTURE_ASPECT_STENCIL`.
+- **NEXT**: Deploy `bin/godot.web.template_debug.wasm32.zip` + `misc/dist/html/webgpu-full-size.html` to a local HTTP server, open in Chrome, and verify a solid color clear appears.
 
 **Instructions**:
 
