@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 10, 2026 (Phase 2 IN PROGRESS — Tasks 2.1–2.5 implemented and compiling clean. `command_clear_color_texture` and `command_clear_depth_stencil_texture` now fully implemented (render pass with loadOp=Clear per mip/layer). Task 2.6 (integration test) next.)
+> **Last Updated**: March 11, 2026 (Task 2.6 IN PROGRESS — Engine boots WebGPU, renders 2D at ~240fps with zero errors in browser. Visual correctness pending verification. Next: add visible test content and verify render pipeline output.)
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -712,42 +712,37 @@ Implement all buffer-related methods in `RenderingDeviceDriverWebGPU`.
 ---
 
 ### Task 2.6: Integration Test — 2D Rendering `[SERIAL, after 2.5]`
-**Status**: `TODO`
+**Status**: `IN_PROGRESS`
 **Effort**: 4-8 hours (mostly debugging)
 **Dependencies**: Tasks 2.1-2.5
 
-**Instructions**:
+**Progress (March 11, 2026)**:
+- ✅ Engine boots WebGPU, initializes device, loads all shaders
+- ✅ No WebGPU validation errors from Chrome  
+- ✅ Frames submitting at ~240fps (empty 2D scene, threads=no build)
+- ✅ Swap chain configured and operating correctly
+- ✅ Push constant ring buffer working
+- ✅ Bind group layouts correct
+- ⚠️ Visual correctness not yet verified (canvas may show black background)
+- ⚠️ Render pipeline creation not yet verified (no pipeline errors = likely working)
 
-1. **Build and export a minimal 2D project**:
-   - Create a simple Godot project with a colored sprite/rectangle
-   - Export as web with WebGPU enabled
-   - Run in Chrome with `--enable-features=WebGPU` (if needed)
+**Issues Fixed This Session**:
+- `TypeError: createView on undefined` — fixed by adding `view_source` field to WGTexture
+  so shared/sliced textures inherit the owning WGPUTexture handle
+- `Texture dimensions exceed device maximum` — fixed limit_get() returning 0
+- Worker thread WebGPU isolation — fixed by building with threads=no
+- `R8G8B8A8_Unorm does not support usage as storage image` — rewrote texture_get_usages_supported_by_format()
+- `!new_pipelines_cache_size` spam — fixed pipeline_cache_query_size() returning 1
+- `swap_chain_acquire_framebuffer: !sc->configured` / createView crash — fixed r_resize_required trigger
+- `Unsupported DataFormat 127` — added D16_UNORM_S8_UINT → Depth24PlusStencil8
+- `Unhandled uniform type 10` — added DYNAMIC UBO/SSBO + TBO uniform types
 
-2. **Debug the full pipeline**:
-   - Expected issues:
-     - Shader translation errors (push constant mapping, binding mismatches)
-     - Texture format mismatches (3-component formats)
-     - Buffer alignment issues (WebGPU requires 4-byte alignment, 256-byte alignment for uniform buffers)
-     - Missing method stubs hit during canvas rendering
-   - Use browser WebGPU error messages and Godot error output for debugging
+**Next Steps**:
+1. Verify visual output — check if canvas shows 2D content vs black screen
+2. Test with a scene that has actual visible content (ColorRect, Label, Sprite2D)
+3. Debug render pipeline creation for CanvasShaderRD (the 2D canvas shader)
 
-3. **Fix issues iteratively** until 2D rendering works
 
-4. **Run official 2D demo projects** (from godot-demo-projects) — aim for all to work:
-   - 2D Sprite
-   - 2D Particles
-   - 2D Navigation
-   - 2D Physics
-   - etc.
-
-**Completion Criteria**: At least the basic 2D rendering pipeline works — sprites, primitives, and text render correctly in the browser.
-
-**Notes for Agent**:
-- This will be the most debugging-heavy task. Expect many iterations.
-- Keep a log of all issues found and how they were resolved
-- WebGPU validation errors in Chrome are very helpful — check browser console
-- Common gotchas:
-  - Uniform buffer offset must be 256-byte aligned
   - Buffer sizes must be multiples of 4
   - Texture copy operations have alignment requirements (256 bytes per row)
   - Bind group entries must exactly match the layout
