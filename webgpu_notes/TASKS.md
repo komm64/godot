@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 10, 2026 (Phase 2 IN PROGRESS — Tasks 2.1–2.5 implemented and compiling clean. Task 2.6 (integration test) next.)
+> **Last Updated**: March 10, 2026 (Phase 2 IN PROGRESS — Tasks 2.1–2.5 implemented and compiling clean. `command_clear_color_texture` and `command_clear_depth_stencil_texture` now fully implemented (render pass with loadOp=Clear per mip/layer). Task 2.6 (integration test) next.)
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria

@@ -1519,14 +1519,99 @@ void RenderingDeviceDriverWebGPU::command_resolve_texture(CommandBufferID p_cmd_
 }
 
 void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, const Color &p_color, const TextureSubresourceRange &p_subresources) {
-	// TODO: Create a render pass with loadOp=Clear and the clear color.
-	// Begin and immediately end it. Iterate over layers/mips in the subresource range.
-	WARN_PRINT_ONCE("WebGPU: command_clear_color_texture not yet implemented.");
+	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
+	WGTexture *tex = (WGTexture *)(p_texture.id);
+	ERR_FAIL_NULL(cmd);
+	ERR_FAIL_NULL(tex);
+
+	cmd->end_active_encoder();
+
+	for (uint32_t mip = p_subresources.base_mipmap; mip < p_subresources.base_mipmap + p_subresources.mipmap_count; mip++) {
+		for (uint32_t layer = p_subresources.base_layer; layer < p_subresources.base_layer + p_subresources.layer_count; layer++) {
+			WGPUTextureViewDescriptor view_desc = {};
+			view_desc.format = tex->format;
+			view_desc.dimension = WGPUTextureViewDimension_2D;
+			view_desc.baseMipLevel = mip;
+			view_desc.mipLevelCount = 1;
+			view_desc.baseArrayLayer = layer;
+			view_desc.arrayLayerCount = 1;
+			view_desc.aspect = WGPUTextureAspect_All;
+
+			WGPUTextureView view = wgpuTextureCreateView(tex->handle, &view_desc);
+
+			WGPURenderPassColorAttachment color_att = {};
+			color_att.view = view;
+			color_att.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+			color_att.loadOp = WGPULoadOp_Clear;
+			color_att.storeOp = WGPUStoreOp_Store;
+			color_att.clearValue = { p_color.r, p_color.g, p_color.b, p_color.a };
+
+			WGPURenderPassDescriptor rp_desc = {};
+			rp_desc.colorAttachmentCount = 1;
+			rp_desc.colorAttachments = &color_att;
+
+			WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(cmd->encoder, &rp_desc);
+			wgpuRenderPassEncoderEnd(pass);
+			wgpuRenderPassEncoderRelease(pass);
+			wgpuTextureViewRelease(view);
+		}
+	}
 }
 
 void RenderingDeviceDriverWebGPU::command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) {
-	// TODO: Same as above but with depth/stencil attachment.
-	WARN_PRINT_ONCE("WebGPU: command_clear_depth_stencil_texture not yet implemented.");
+	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
+	WGTexture *tex = (WGTexture *)(p_texture.id);
+	ERR_FAIL_NULL(cmd);
+	ERR_FAIL_NULL(tex);
+
+	cmd->end_active_encoder();
+
+	bool has_depth = is_depth_format_wgpu(tex->format);
+	bool has_stencil = has_stencil_wgpu(tex->format);
+
+	for (uint32_t mip = p_subresources.base_mipmap; mip < p_subresources.base_mipmap + p_subresources.mipmap_count; mip++) {
+		for (uint32_t layer = p_subresources.base_layer; layer < p_subresources.base_layer + p_subresources.layer_count; layer++) {
+			WGPUTextureViewDescriptor view_desc = {};
+			view_desc.format = tex->format;
+			view_desc.dimension = WGPUTextureViewDimension_2D;
+			view_desc.baseMipLevel = mip;
+			view_desc.mipLevelCount = 1;
+			view_desc.baseArrayLayer = layer;
+			view_desc.arrayLayerCount = 1;
+			view_desc.aspect = WGPUTextureAspect_All;
+
+			WGPUTextureView view = wgpuTextureCreateView(tex->handle, &view_desc);
+
+			WGPURenderPassDepthStencilAttachment ds_att = {};
+			ds_att.view = view;
+			if (has_depth) {
+				ds_att.depthLoadOp = WGPULoadOp_Clear;
+				ds_att.depthStoreOp = WGPUStoreOp_Store;
+				ds_att.depthClearValue = p_depth;
+			} else {
+				ds_att.depthLoadOp = WGPULoadOp_Undefined;
+				ds_att.depthStoreOp = WGPUStoreOp_Undefined;
+				ds_att.depthReadOnly = true;
+			}
+			if (has_stencil) {
+				ds_att.stencilLoadOp = WGPULoadOp_Clear;
+				ds_att.stencilStoreOp = WGPUStoreOp_Store;
+				ds_att.stencilClearValue = p_stencil;
+			} else {
+				ds_att.stencilLoadOp = WGPULoadOp_Undefined;
+				ds_att.stencilStoreOp = WGPUStoreOp_Undefined;
+				ds_att.stencilReadOnly = true;
+			}
+
+			WGPURenderPassDescriptor rp_desc = {};
+			rp_desc.depthStencilAttachment = &ds_att;
+
+			WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(cmd->encoder, &rp_desc);
+			wgpuRenderPassEncoderEnd(pass);
+			wgpuRenderPassEncoderRelease(pass);
+			wgpuTextureViewRelease(view);
+		}
+	}
 }
 
 void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) {
