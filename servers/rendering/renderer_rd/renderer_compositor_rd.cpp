@@ -39,9 +39,10 @@
 void RendererCompositorRD::blit_render_targets_to_screen(DisplayServer::WindowID p_screen, const BlitToScreen *p_render_targets, int p_amount) {
 	Error err = RD::get_singleton()->screen_prepare_for_drawing(p_screen);
 	if (err != OK) {
-		// Window is minimized and does not have valid swapchain, skip drawing without printing errors.
+		WARN_PRINT_ONCE(vformat("WebGPU: screen_prepare_for_drawing failed (err=%d) — blit skipped", (int)err));
 		return;
 	}
+	WARN_PRINT_ONCE("WebGPU: blit_render_targets_to_screen: screen_prepare_for_drawing OK!");
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin_for_screen(p_screen);
 	ERR_FAIL_COND(draw_list == RD::INVALID_ID);

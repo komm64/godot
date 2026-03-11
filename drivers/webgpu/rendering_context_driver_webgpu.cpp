@@ -34,7 +34,7 @@
 #include "rendering_device_driver_webgpu.h"
 
 // html5_webgpu.h was removed in Emscripten 5.x when USE_WEBGPU was dropped.
-// Device is now imported via the emdawnwebgpu port using WebGPU.importJsDevice().
+// Device is now created from C++ using the emdawnwebgpu port's Dawn API.
 #include <emscripten/emscripten.h>
 
 RenderingContextDriverWebGPU::RenderingContextDriverWebGPU() {
@@ -62,7 +62,9 @@ RenderingContextDriverWebGPU::~RenderingContextDriverWebGPU() {
 Error RenderingContextDriverWebGPU::initialize() {
 	// The HTML shell pre-initializes a GPUDevice and stores it in Module.preinitializedWebGPUDevice.
 	// We use the emdawnwebgpu port's WebGPU.importJsDevice() to wrap it in a C WGPUDevice handle.
-	// Note: WebGPU is the global JS library object injected by --use-port=emdawnwebgpu.
+	// Note: emdawnwebgpu is a thin JS wrapper around the browser's WebGPU API.
+	// SPIR-V is NOT supported — we use naga (WASM) for SPIR-V → WGSL conversion
+	// in shader_create_from_container() instead.
 	device = (WGPUDevice)(uintptr_t)EM_ASM_PTR({
 		var d = Module["preinitializedWebGPUDevice"];
 		if (!d) { return 0; }
@@ -78,6 +80,7 @@ Error RenderingContextDriverWebGPU::initialize() {
 	device_info.vendor = Vendor::VENDOR_UNKNOWN;
 	device_info.type = DEVICE_TYPE_INTEGRATED_GPU;
 
+	print_verbose("WebGPU: Device imported from JS successfully.");
 	return OK;
 }
 

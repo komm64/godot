@@ -718,7 +718,7 @@ Implement all buffer-related methods in `RenderingDeviceDriverWebGPU`.
 
 **Progress (March 11, 2026)**:
 - ✅ Engine boots WebGPU, initializes device, loads all shaders
-- ✅ No WebGPU validation errors from Chrome  
+- ✅ No WebGPU validation errors from Chrome
 - ✅ Frames submitting at ~240fps (empty 2D scene, threads=no build)
 - ✅ Swap chain configured and operating correctly
 - ✅ Push constant ring buffer working

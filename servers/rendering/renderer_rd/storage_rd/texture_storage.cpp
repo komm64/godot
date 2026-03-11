@@ -548,7 +548,9 @@ TextureStorage::TextureStorage() {
 		tformat.format = vrs_supported ? RD::get_singleton()->vrs_get_format() : RD::DATA_FORMAT_R8_UINT;
 		tformat.width = 4;
 		tformat.height = 4;
-		tformat.usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | (vrs_supported ? RD::TEXTURE_USAGE_VRS_ATTACHMENT_BIT : 0);
+		// STORAGE_BIT is only valid when VRS is actually supported (some platforms, e.g. WebGPU,
+		// do not support storage for R8_UINT used as the fallback format).
+		tformat.usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | (vrs_supported ? (RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_VRS_ATTACHMENT_BIT) : 0);
 		tformat.texture_type = RD::TEXTURE_TYPE_2D;
 
 		uint32_t pixel_size = RD::get_image_format_pixel_size(tformat.format);

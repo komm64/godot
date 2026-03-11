@@ -227,6 +227,8 @@ struct WGCommandBuffer {
 		WGFramebuffer *framebuffer = nullptr;
 		uint32_t current_subpass = 0;
 		WGPipelineWrapper *current_pipeline = nullptr;
+		uint32_t render_area_width = 0;
+		uint32_t render_area_height = 0;
 	} render_state;
 
 	// Helpers.
