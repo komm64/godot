@@ -292,6 +292,7 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 
 	tex->handle = wgpuDeviceCreateTexture(device, &desc);
 	ERR_FAIL_COND_V(tex->handle == nullptr, TextureID());
+	tex->view_source = tex->handle; // Always the owning WGPUTexture; inherited by shared/sliced textures.
 
 	// Create default view.
 	WGPUTextureViewDescriptor view_desc = {};
@@ -335,7 +336,9 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared(TextureID p_or
 	view_desc.arrayLayerCount = tex->layers;
 	view_desc.aspect = WGPUTextureAspect_All;
 
-	tex->default_view = wgpuTextureCreateView(orig->handle, &view_desc);
+	// view_source was already inherited from orig via *tex = *orig.
+	ERR_FAIL_COND_V_MSG(tex->view_source == nullptr, TextureID(), "WebGPU: texture_create_shared: original texture has no GPU handle (view_source is null).");
+	tex->default_view = wgpuTextureCreateView(tex->view_source, &view_desc);
 	tex->handle = nullptr; // Shared texture does not own the WGPUTexture.
 
 	return TextureID(tex);
@@ -374,7 +377,9 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared_from_slice(Tex
 			break;
 	}
 
-	tex->default_view = wgpuTextureCreateView(orig->handle, &view_desc);
+	// view_source was already inherited from orig via *tex = *orig.
+	ERR_FAIL_COND_V_MSG(tex->view_source == nullptr, TextureID(), "WebGPU: texture_create_shared_from_slice: original texture has no GPU handle (view_source is null).");
+	tex->default_view = wgpuTextureCreateView(tex->view_source, &view_desc);
 	tex->handle = nullptr;
 	tex->layers = p_layers;
 	tex->mipmaps = p_mipmaps;
@@ -424,11 +429,135 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 }
 
 BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) {
-	// TODO: Check per-format capabilities. For now, return common usages.
+	// If there's no WebGPU equivalent, the format is unsupported.
+	if (_data_format_to_wgpu(p_format) == WGPUTextureFormat_Undefined) {
+		return 0;
+	}
+
+	// These bits apply to every supported format.
 	BitField<TextureUsageBits> flags = TEXTURE_USAGE_SAMPLING_BIT | TEXTURE_USAGE_CAN_UPDATE_BIT | TEXTURE_USAGE_CAN_COPY_FROM_BIT | TEXTURE_USAGE_CAN_COPY_TO_BIT;
-	// Most color formats support render attachment.
-	// TODO: Check if format is depth/stencil and add appropriate flags.
+
+	// Classify the format into depth/stencil, compressed, or plain color.
+	bool is_depth_stencil = false;
+	bool is_compressed = false;
+
+	switch (p_format) {
+		// Depth and depth/stencil formats.
+		case DATA_FORMAT_D16_UNORM:
+		case DATA_FORMAT_X8_D24_UNORM_PACK32:
+		case DATA_FORMAT_D32_SFLOAT:
+		case DATA_FORMAT_S8_UINT:
+		case DATA_FORMAT_D16_UNORM_S8_UINT:
+		case DATA_FORMAT_D24_UNORM_S8_UINT:
+		case DATA_FORMAT_D32_SFLOAT_S8_UINT:
+			is_depth_stencil = true;
+			break;
+
+		// BC compressed formats.
+		case DATA_FORMAT_BC1_RGB_UNORM_BLOCK:
+		case DATA_FORMAT_BC1_RGB_SRGB_BLOCK:
+		case DATA_FORMAT_BC1_RGBA_UNORM_BLOCK:
+		case DATA_FORMAT_BC1_RGBA_SRGB_BLOCK:
+		case DATA_FORMAT_BC2_UNORM_BLOCK:
+		case DATA_FORMAT_BC2_SRGB_BLOCK:
+		case DATA_FORMAT_BC3_UNORM_BLOCK:
+		case DATA_FORMAT_BC3_SRGB_BLOCK:
+		case DATA_FORMAT_BC4_UNORM_BLOCK:
+		case DATA_FORMAT_BC4_SNORM_BLOCK:
+		case DATA_FORMAT_BC5_UNORM_BLOCK:
+		case DATA_FORMAT_BC5_SNORM_BLOCK:
+		case DATA_FORMAT_BC6H_UFLOAT_BLOCK:
+		case DATA_FORMAT_BC6H_SFLOAT_BLOCK:
+		case DATA_FORMAT_BC7_UNORM_BLOCK:
+		case DATA_FORMAT_BC7_SRGB_BLOCK:
+		// ETC2 compressed formats.
+		case DATA_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+		case DATA_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+		case DATA_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+		case DATA_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+		case DATA_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+		case DATA_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+		case DATA_FORMAT_EAC_R11_UNORM_BLOCK:
+		case DATA_FORMAT_EAC_R11_SNORM_BLOCK:
+		case DATA_FORMAT_EAC_R11G11_UNORM_BLOCK:
+		case DATA_FORMAT_EAC_R11G11_SNORM_BLOCK:
+		// ASTC compressed formats.
+		case DATA_FORMAT_ASTC_4x4_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_4x4_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_5x4_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_5x4_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_5x5_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_5x5_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_6x5_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_6x5_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_6x6_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_6x6_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_8x5_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_8x5_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_8x6_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_8x6_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_8x8_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_8x8_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_10x5_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_10x5_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_10x6_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_10x6_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_10x8_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_10x8_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_10x10_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_10x10_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_12x10_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_12x10_SRGB_BLOCK:
+		case DATA_FORMAT_ASTC_12x12_UNORM_BLOCK:
+		case DATA_FORMAT_ASTC_12x12_SRGB_BLOCK:
+			is_compressed = true;
+			break;
+
+		default:
+			break;
+	}
+
+	if (is_depth_stencil) {
+		flags.set_flag(TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+		// Depth textures can't be updated via CAN_UPDATE (CopyDst is not allowed).
+		flags.clear_flag(TEXTURE_USAGE_CAN_UPDATE_BIT);
+		return flags;
+	}
+
+	if (is_compressed) {
+		// Compressed textures: sampling + copy only. No render attachment, no storage.
+		flags.clear_flag(TEXTURE_USAGE_CAN_UPDATE_BIT); // Must use CAN_COPY_TO to upload.
+		return flags;
+	}
+
+	// Plain color format: render attachment is generally supported.
 	flags.set_flag(TEXTURE_USAGE_COLOR_ATTACHMENT_BIT);
+
+	// Storage binding: only formats explicitly listed in the WebGPU spec support it.
+	// See https://gpuweb.github.io/gpuweb/#storage-texel-format-capability-matrix
+	switch (p_format) {
+		case DATA_FORMAT_R8G8B8A8_UNORM:
+		case DATA_FORMAT_R8G8B8A8_SNORM:
+		case DATA_FORMAT_R8G8B8A8_UINT:
+		case DATA_FORMAT_R8G8B8A8_SINT:
+		case DATA_FORMAT_R16G16B16A16_SFLOAT:
+		case DATA_FORMAT_R16G16B16A16_UINT:
+		case DATA_FORMAT_R16G16B16A16_SINT:
+		case DATA_FORMAT_R32_SFLOAT:
+		case DATA_FORMAT_R32_UINT:
+		case DATA_FORMAT_R32_SINT:
+		case DATA_FORMAT_R32G32_SFLOAT:
+		case DATA_FORMAT_R32G32_UINT:
+		case DATA_FORMAT_R32G32_SINT:
+		case DATA_FORMAT_R32G32B32A32_SFLOAT:
+		case DATA_FORMAT_R32G32B32A32_UINT:
+		case DATA_FORMAT_R32G32B32A32_SINT:
+			flags.set_flag(TEXTURE_USAGE_STORAGE_BIT);
+			break;
+		default:
+			break;
+	}
+
 	return flags;
 }
 
@@ -533,6 +662,8 @@ WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p
 		case DATA_FORMAT_D24_UNORM_S8_UINT: return WGPUTextureFormat_Depth24PlusStencil8;
 		case DATA_FORMAT_D32_SFLOAT_S8_UINT: return WGPUTextureFormat_Depth32FloatStencil8;
 		case DATA_FORMAT_S8_UINT: return WGPUTextureFormat_Stencil8;
+		// No depth16+stencil8 in WebGPU; use depth24plus-stencil8 as nearest approximation.
+		case DATA_FORMAT_D16_UNORM_S8_UINT: return WGPUTextureFormat_Depth24PlusStencil8;
 		default:
 			WARN_PRINT(vformat("WebGPU: Unsupported DataFormat %d", (int)p_format));
 			return WGPUTextureFormat_Undefined;
@@ -965,7 +1096,11 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) {
 	WGSwapChain *sc = (WGSwapChain *)(p_swap_chain.id);
 	ERR_FAIL_NULL_V(sc, FramebufferID());
-	ERR_FAIL_COND_V(!sc->configured, FramebufferID());
+	if (!sc->configured) {
+		// Not yet sized — request a resize so the RD layer calls swap_chain_resize().
+		r_resize_required = true;
+		return FramebufferID();
+	}
 
 	// Release resources from the previous frame.
 	if (sc->current_framebuffer) {
@@ -1210,6 +1345,33 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 				case RDD::UNIFORM_TYPE_STORAGE_BUFFER: {
 					entry.buffer.type = u.writable ? WGPUBufferBindingType_Storage : WGPUBufferBindingType_ReadOnlyStorage;
+					entry.buffer.hasDynamicOffset = false;
+					entry.buffer.minBindingSize = 0;
+				} break;
+
+				// Dynamic variants treated as static — dynamic offsets not yet implemented.
+				case RDD::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC: {
+					entry.buffer.type = WGPUBufferBindingType_Uniform;
+					entry.buffer.hasDynamicOffset = false;
+					entry.buffer.minBindingSize = 0;
+				} break;
+
+				case RDD::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC: {
+					entry.buffer.type = u.writable ? WGPUBufferBindingType_Storage : WGPUBufferBindingType_ReadOnlyStorage;
+					entry.buffer.hasDynamicOffset = false;
+					entry.buffer.minBindingSize = 0;
+				} break;
+
+				// WebGPU has no texel buffers (TBOs); emulate as storage buffers.
+				case RDD::UNIFORM_TYPE_TEXTURE_BUFFER:
+				case RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER: {
+					entry.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+					entry.buffer.hasDynamicOffset = false;
+					entry.buffer.minBindingSize = 0;
+				} break;
+
+				case RDD::UNIFORM_TYPE_IMAGE_BUFFER: {
+					entry.buffer.type = WGPUBufferBindingType_Storage;
 					entry.buffer.hasDynamicOffset = false;
 					entry.buffer.minBindingSize = 0;
 				} break;
@@ -1537,7 +1699,7 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 			view_desc.arrayLayerCount = 1;
 			view_desc.aspect = WGPUTextureAspect_All;
 
-			WGPUTextureView view = wgpuTextureCreateView(tex->handle, &view_desc);
+			WGPUTextureView view = wgpuTextureCreateView(tex->view_source, &view_desc);
 
 			WGPURenderPassColorAttachment color_att = {};
 			color_att.view = view;
@@ -1580,7 +1742,7 @@ void RenderingDeviceDriverWebGPU::command_clear_depth_stencil_texture(CommandBuf
 			view_desc.arrayLayerCount = 1;
 			view_desc.aspect = WGPUTextureAspect_All;
 
-			WGPUTextureView view = wgpuTextureCreateView(tex->handle, &view_desc);
+			WGPUTextureView view = wgpuTextureCreateView(tex->view_source, &view_desc);
 
 			WGPURenderPassDepthStencilAttachment ds_att = {};
 			ds_att.view = view;
@@ -1746,7 +1908,9 @@ void RenderingDeviceDriverWebGPU::pipeline_cache_free() {
 }
 
 size_t RenderingDeviceDriverWebGPU::pipeline_cache_query_size() {
-	return 0;
+	// We don't implement a pipeline cache, but must return non-zero so
+	// RenderingDevice::update_pipeline_cache() doesn't emit an error every frame.
+	return 1;
 }
 
 Vector<uint8_t> RenderingDeviceDriverWebGPU::pipeline_cache_serialize() {
@@ -2688,6 +2852,12 @@ uint64_t RenderingDeviceDriverWebGPU::limit_get(Limit p_limit) {
 		case LIMIT_MAX_UNIFORM_BUFFERS_PER_UNIFORM_SET: return 12;
 		case LIMIT_MAX_PUSH_CONSTANT_SIZE: return 128;
 		case LIMIT_MAX_UNIFORM_BUFFER_SIZE: return 65536;
+		// WebGPU spec minimum-guaranteed texture limits.
+		case LIMIT_MAX_TEXTURE_ARRAY_LAYERS: return 256;
+		case LIMIT_MAX_TEXTURE_SIZE_1D: return 8192;
+		case LIMIT_MAX_TEXTURE_SIZE_2D: return 8192;
+		case LIMIT_MAX_TEXTURE_SIZE_3D: return 2048;
+		case LIMIT_MAX_TEXTURE_SIZE_CUBE: return 8192;
 		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTE_OFFSET: return 2048;
 		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTES: return 16;
 		case LIMIT_MAX_VERTEX_INPUT_BINDINGS: return 8;

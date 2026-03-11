@@ -38,9 +38,15 @@
 #include "core/object/callable_method_pointer.h"
 #include "core/os/main_loop.h"
 #include "servers/rendering/dummy/rasterizer_dummy.h"
+#include "servers/rendering/rendering_device.h"
 
 #ifdef GLES3_ENABLED
 #include "drivers/gles3/rasterizer_gles3.h"
+#endif
+
+#ifdef WEBGPU_ENABLED
+#include "drivers/webgpu/rendering_context_driver_webgpu.h"
+#include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #endif
 
 #include <emscripten.h>
@@ -1129,9 +1135,44 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, WindowMode 
 
 #ifdef WEBGPU_ENABLED
 	if (p_rendering_driver == "webgpu") {
-		// WebGPU device is pre-initialized by the JS shell before the WASM module loads.
-		// RenderingDevice is created in main/main.cpp using RenderingContextDriverWebGPU.
-		// No display-server-level rasterizer init needed here — the RD path handles everything.
+		// The WebGPU device is pre-initialized by the JS shell (navigator.gpu.requestDevice)
+		// and imported via Module["preinitializedWebGPUDevice"]. We initialize the
+		// context driver, create the canvas surface, initialize RenderingDevice, and
+		// register the RD compositor so rendering_server->init() finds it.
+		rendering_context = memnew(RenderingContextDriverWebGPU);
+		if (rendering_context->initialize() != OK) {
+			memdelete(rendering_context);
+			rendering_context = nullptr;
+			r_error = ERR_CANT_CREATE;
+			ERR_FAIL_MSG("WebGPU: Failed to initialize rendering context. Ensure navigator.gpu is available and the device was pre-initialized in the HTML shell.");
+		}
+		Error err = rendering_context->window_create(MAIN_WINDOW_ID, nullptr);
+		if (err != OK) {
+			memdelete(rendering_context);
+			rendering_context = nullptr;
+			r_error = err;
+			ERR_FAIL_MSG("WebGPU: Failed to create canvas surface.");
+		}
+		rendering_context->window_set_size(MAIN_WINDOW_ID, p_resolution.x, p_resolution.y);
+		rendering_context->window_set_vsync_mode(MAIN_WINDOW_ID, p_vsync_mode);
+
+		rendering_device = memnew(RenderingDevice);
+		err = rendering_device->initialize(rendering_context, MAIN_WINDOW_ID);
+		if (err != OK) {
+			memdelete(rendering_device);
+			rendering_device = nullptr;
+			memdelete(rendering_context);
+			rendering_context = nullptr;
+			r_error = err;
+			ERR_FAIL_MSG("WebGPU: Failed to initialize rendering device.");
+		}
+		err = rendering_device->screen_create(MAIN_WINDOW_ID);
+		if (err != OK) {
+			// Non-fatal: the swapchain may be resized on first frame.
+			WARN_PRINT("WebGPU: screen_create() failed — swapchain will be set up on first frame.");
+		}
+
+		RendererCompositorRD::make_current();
 	} else
 #endif // WEBGPU_ENABLED
 	{
@@ -1199,6 +1240,17 @@ DisplayServerWeb::~DisplayServerWeb() {
 	if (webgl_ctx) {
 		emscripten_webgl_commit_frame();
 		emscripten_webgl_destroy_context(webgl_ctx);
+	}
+#endif
+#ifdef WEBGPU_ENABLED
+	if (rendering_device) {
+		rendering_device->screen_free(MAIN_WINDOW_ID);
+		memdelete(rendering_device);
+		rendering_device = nullptr;
+	}
+	if (rendering_context) {
+		memdelete(rendering_context);
+		rendering_context = nullptr;
 	}
 #endif
 }

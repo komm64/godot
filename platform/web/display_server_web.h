@@ -37,6 +37,10 @@
 #include <emscripten.h>
 #include <emscripten/html5.h>
 
+#ifdef WEBGPU_ENABLED
+#include "servers/rendering/rendering_device.h"
+#endif
+
 class DisplayServerWeb : public DisplayServer {
 	GDSOFTCLASS(DisplayServerWeb, DisplayServer);
 
@@ -58,7 +62,8 @@ private:
 	EMSCRIPTEN_WEBGL_CONTEXT_HANDLE webgl_ctx = 0;
 #endif
 #ifdef WEBGPU_ENABLED
-	// WebGPU uses the RenderingDevice path; no display-server-level context handle needed.
+	RenderingContextDriver *rendering_context = nullptr;
+	RenderingDevice *rendering_device = nullptr;
 #endif
 
 	HashMap<int64_t, CharString> utterance_ids;

@@ -55,7 +55,8 @@ struct WGBuffer {
 // =============================================================================
 
 struct WGTexture {
-	WGPUTexture handle = nullptr;
+	WGPUTexture handle = nullptr; // null for shared/sliced views (they don't own the GPU texture)
+	WGPUTexture view_source = nullptr; // always the owning WGPUTexture; inherited by shared/sliced textures
 	WGPUTextureView default_view = nullptr;
 	WGPUTextureFormat format = WGPUTextureFormat_Undefined;
 	WGPUTextureDimension dimension = WGPUTextureDimension_2D;
