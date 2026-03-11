@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 10, 2026 (Phase 1 COMPLETE — Tasks 1.1–1.4 all DONE. Engine boots in browser, reaches PCK load stage. Phase 2 next.)
+> **Last Updated**: March 10, 2026 (Phase 2 IN PROGRESS — Tasks 2.1–2.5 implemented and compiling clean. Task 2.6 (integration test) next.)
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -446,10 +446,18 @@ Reference: `drivers/metal/rendering_device_driver_metal.h` and `.mm`
 > **Goal**: Implement buffers, textures, samplers, shaders (SPIR-V → WGSL), uniform sets, and pipelines. Get 2D rendering (CanvasItem) working.
 
 ### Task 2.1: Shader Translation Pipeline `[PARALLEL with 2.2]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 8-12 hours
 **Dependencies**: Phase 1
 **CRITICAL PATH**: Everything else in Phase 2+ depends on shaders working.
+
+**Completion Notes** (March 10, 2026):
+- Using SPIR-V directly via `WGPUShaderSourceSPIRV` (Dawn's emdawnwebgpu supports SPIR-V natively — no Tint/WGSL translation needed).
+- `RenderingShaderContainerWebGPU::_set_code_from_spirv()`: Stores raw SPIR-V bytes per stage. Push constant bind group slot (group 3, binding 0) derived from `ReflectShader.push_constant_size`.
+- `RenderingShaderContainerWebGPU` header/extra-data serialization implemented.
+- `shader_create_from_container()`: Iterates stages, creates `WGPUShaderModule` via `WGPUShaderSourceSPIRV`. Builds `WGPUBindGroupLayout` per descriptor set from reflection data (uniform/storage/texture/sampler/image entries). Builds `WGPUPipelineLayout` covering all sets + push constant bind group. Stores in `WGShader`.
+- Push constant ring buffer (256KB, group 3, binding 0) initialized in `initialize()` with `WGPUBufferUsage_Uniform | CopyDst`.
+- Compiles clean.
 
 **Instructions**:
 
@@ -501,9 +509,17 @@ Reference: `drivers/metal/rendering_device_driver_metal.h` and `.mm`
 ---
 
 ### Task 2.2: Buffer Implementation `[PARALLEL with 2.1]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 4-6 hours
 **Dependencies**: Phase 1
+
+**Completion Notes** (March 10, 2026):
+- `buffer_create()` / `buffer_free()`: Full `WGPUBuffer` creation with size aligned to 4 bytes + `WGPUBufferUsage` mapping from all Godot `BufferUsageBits`.
+- `buffer_map()` / `buffer_unmap()`: Shadow CPU buffer pattern — `buffer_map()` allocates and returns the shadow map; `buffer_unmap()` flushes via `wgpuQueueWriteBuffer()` if dirty.
+- `buffer_flush()`: Explicit flush of shadow map.
+- Transfer commands: `command_clear_buffer()`, `command_copy_buffer()`, `command_copy_buffer_to_texture()`, `command_copy_texture_to_buffer()` — all implemented.
+- Upload path via `wgpuQueueWriteBuffer()` for initial data in `buffer_create()`.
+- Compiles clean.
 
 **Instructions**:
 
@@ -544,9 +560,20 @@ Implement all buffer-related methods in `RenderingDeviceDriverWebGPU`.
 ---
 
 ### Task 2.3: Texture & Sampler Implementation `[PARALLEL with 2.1, 2.2]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 6-8 hours
 **Dependencies**: Phase 1, Task 1.1 (pixel formats)
+
+**Completion Notes** (March 10, 2026):
+- `texture_create()`: Full `WGPUTexture` + default `WGPUTextureView` creation with dimension/view-dimension/usage/sample-count mapping.
+- `texture_create_shared()` / `texture_create_shared_from_slice()`: New `WGPUTextureView` from existing texture, respects format/mip/layer overrides.
+- `texture_free()`: Releases view and texture (shared textures have null handle so only view released).
+- `texture_get_copyable_layout()`: 256-byte row-pitch alignment for WebGPU buffer↔texture copies.
+- `texture_get_data()`: WARN_PRINT_ONCE stub (async readback not yet impl).
+- `command_copy_texture()`, `command_blit_region()`, `command_clear_color_texture()`: Implemented.
+- `sampler_create()` / `sampler_free()`: Full `WGPUSamplerDescriptor` mapping (filter, address, LOD, anisotropy, compare).
+- `_data_format_to_wgpu()` and `_data_format_to_wgpu_vertex()`: Full format mapping tables inline in driver.
+- Compiles clean.
 
 **Instructions**:
 
@@ -587,9 +614,16 @@ Implement all buffer-related methods in `RenderingDeviceDriverWebGPU`.
 ---
 
 ### Task 2.4: Uniform Sets (Bind Groups) `[SERIAL, after 2.1]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 4-6 hours
 **Dependencies**: Tasks 2.1, 2.2, 2.3
+
+**Completion Notes** (March 10, 2026):
+- `uniform_set_create()`: Builds `WGPUBindGroupEntry[]` per uniform type (sampler, texture, image, sampler_with_texture, uniform_buffer, storage_buffer, input_attachment). Creates `WGPUBindGroup` from shader's prebuilt layout.
+- `uniform_set_free()`: `wgpuBindGroupRelease()`.
+- `command_bind_render_uniform_sets()` / `command_bind_compute_uniform_sets()`: Call `setBindGroup()` on the active encoder.
+- Sampler-with-texture handled correctly (two entries per pair: sampler at binding+0, texture at binding+1).
+- Compiles clean.
 
 **Instructions**:
 
@@ -619,9 +653,18 @@ Implement all buffer-related methods in `RenderingDeviceDriverWebGPU`.
 ---
 
 ### Task 2.5: Pipeline Creation `[SERIAL, after 2.4]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 6-8 hours
 **Dependencies**: Tasks 2.1, 2.2, 2.3, 2.4
+
+**Completion Notes** (March 10, 2026):
+- `render_pipeline_create()`: Full `WGPURenderPipelineDescriptor` — vertex state (buffer layouts + attributes from `WGVertexFormat`), primitive state (topology, cull, front face, strip index format), multisample state, depth/stencil state (all compare/stencil ops mapped), color targets (write mask + blend state with factor/op mapping), fragment state. Spec constants via `WGPUConstantEntry`.
+- `compute_pipeline_create()`: Full `WGPUComputePipelineDescriptor` with spec constants.
+- `vertex_format_create()`: Groups attributes by binding, builds `WGPUVertexBufferLayout[]`.
+- `_data_format_to_wgpu_vertex()`: 30+ format mappings including float16, uint/sint 8/16/32, unorm/snorm, packed 10_10_10_2.
+- `_flush_push_constants()`: Writes push constant data to ring buffer via `wgpuQueueWriteBuffer()`, sets bind group with dynamic offset on active render or compute encoder.
+- All draw/dispatch/state-setting commands implemented.
+- Compiles clean.
 
 **Instructions**:
 

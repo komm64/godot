@@ -60,9 +60,16 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// --- Push Constant Emulation ---
 	// Ring buffer for push constant data. Each slot is 256-byte aligned.
 	WGPUBuffer push_constant_ring_buffer = nullptr;
-	static constexpr uint32_t PUSH_CONSTANT_RING_SIZE = 256 * 1024; // 256KB
+	static constexpr uint32_t PUSH_CONSTANT_RING_SIZE = 256 * 1024; // 256KB = 1024 draw calls at 256B/slot
 	static constexpr uint32_t PUSH_CONSTANT_SLOT_ALIGNMENT = 256;
 	uint32_t push_constant_ring_offset = 0;
+
+	// Universal push constant bind group layout: group N, binding 0,
+	// uniform buffer with hasDynamicOffset=true. Created once at initialize().
+	// All shaders that use push constants share this layout in their pipeline layouts.
+	WGPUBindGroupLayout push_constant_bind_group_layout = nullptr;
+	// Bind group backed by the ring buffer (also created once, reused every frame with dynamic offsets).
+	WGPUBindGroup push_constant_bind_group = nullptr;
 
 	// --- Pixel Format Mapping ---
 	// TODO: Move to dedicated pixel_formats_webgpu.h/cpp when ready.
@@ -71,6 +78,7 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	void _check_capabilities();
 	WGPUTextureFormat _data_format_to_wgpu(DataFormat p_format) const;
 	DataFormat _wgpu_to_data_format(WGPUTextureFormat p_format) const;
+	static WGPUVertexFormat _data_format_to_wgpu_vertex(DataFormat p_format);
 	WGPUBufferUsage _buffer_usage_to_wgpu(BitField<BufferUsageBits> p_usage) const;
 	WGPUTextureUsage _texture_usage_to_wgpu(BitField<TextureUsageBits> p_usage) const;
 	WGPUTextureDimension _texture_type_to_dimension(TextureType p_type) const;

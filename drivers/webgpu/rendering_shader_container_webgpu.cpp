@@ -33,96 +33,46 @@
 #include "rendering_shader_container_webgpu.h"
 
 // =========================================================================
-// SPIR-V → WGSL Translation
+// SPIR-V Storage
 // =========================================================================
 //
-// This is the core translation pipeline. Options:
-//   (A) Google Tint (from Dawn) — recommended, best WGSL output.
-//   (B) Naga (Rust, from wgpu) — would require FFI.
-//   (C) SPIRV-Cross — does NOT have a WGSL backend, cannot use.
+// Architecture decision (see copilot-instructions.md #6):
+//   GLSL → SPIR-V (glslang) → stored directly as WGPUShaderSourceSPIRV.
+//   Dawn's emdawnwebgpu port natively supports WGPUShaderSourceSPIRV;
+//   no WGSL/Tint translation step is needed.
 //
-// Integration approach:
-//   1. At BUILD/EXPORT time: Cross-compile SPIR-V → WGSL using Tint.
-//   2. Store WGSL source in the shader container (alongside reflection data).
-//   3. At RUNTIME (browser): Load pre-compiled WGSL, no translation needed.
-//
-// Push constant handling during translation:
-//   - Detect push_constant block in SPIR-V.
-//   - Rewrite to uniform buffer at @group(N) @binding(M).
-//   - Store N and M in header_data for runtime use.
-//
-// Specialization constant handling:
-//   - SPIR-V specialization constants → WGSL pipeline-overridable constants.
-//   - layout(constant_id = N) → @id(N) override constName: Type = default;
-//
-// subpassInput handling:
-//   - SPIR-V subpassInput → WGSL texture_2d (sample from previous pass output).
-//   - subpassLoad() → textureSample() or textureLoad().
-//
+// Push constant handling:
+//   Godot's push constants are emulated via a uniform buffer at a fixed
+//   bind group slot (default: group 3, binding 0).
+//   The bind group slot is recorded in HeaderData and used by the driver
+//   to create the pipeline layout and bind the ring buffer at draw time.
 
 bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p_shader) {
-	// This method is called during shader compilation (build/export time).
-	// It receives fully reflected SPIR-V data and must produce WGSL.
+	const uint32_t stage_count = p_shader.shader_stages.size();
+	shaders.resize(stage_count);
 
-	wgsl_sources.clear();
-	stage_data.clear();
-
-	for (uint32_t i = 0; i < p_shader.shader_stages.size(); i++) {
+	for (uint32_t i = 0; i < stage_count; i++) {
 		const ReflectShaderStage &stage = p_shader.shader_stages[i];
-		Span<uint32_t> spirv = stage.spirv();
-
-		// TODO: Use Tint to translate SPIR-V → WGSL.
-		//
-		// Tint integration sketch:
-		//   #include "src/tint/api/tint.h"
-		//
-		//   tint::spirv::reader::Options reader_options;
-		//   reader_options.allowed_features = tint::wgsl::AllowedFeatures::Everything();
-		//
-		//   tint::Program program = tint::spirv::reader::Read(spirv.ptr(), spirv.size(), reader_options);
-		//   if (!program.IsValid()) {
-		//       ERR_FAIL_V_MSG(false, vformat("Tint SPIR-V read error: %s", program.Diagnostics().Str().c_str()));
-		//   }
-		//
-		//   // Apply transforms:
-		//   // 1. Push constant → uniform buffer rewrite.
-		//   // 2. subpassInput → texture rewrite.
-		//   // 3. Rename entry points if needed.
-		//
-		//   tint::wgsl::writer::Options writer_options;
-		//   auto result = tint::wgsl::writer::Generate(program, writer_options);
-		//   if (result != tint::Success) {
-		//       ERR_FAIL_V_MSG(false, "Tint WGSL generation failed.");
-		//   }
-		//
-		//   String wgsl = String::utf8(result->wgsl.c_str());
-
-		// PLACEHOLDER: Store empty WGSL until Tint is integrated.
-		String wgsl = "// TODO: SPIR-V → WGSL translation not yet implemented.\n";
-		wgsl += vformat("// Stage: %d, SPIR-V size: %d bytes\n", (int)stage.shader_stage, spirv.size() * 4);
-
-		wgsl_sources.push_back(wgsl);
-
-		StageData sd;
-		sd.wgsl_source_size = wgsl.utf8().length();
-		stage_data.push_back(sd);
+		// Store raw SPIR-V bytes directly — no translation.
+		Vector<uint8_t> spirv_bytes = stage.spirv_data();
+		shaders.write[i].shader_stage = stage.shader_stage;
+		shaders.write[i].code_compression_flags = 0; // No compression.
+		shaders.write[i].code_decompressed_size = 0; // 0 = not compressed (use raw bytes).
+		shaders.write[i].code_compressed_bytes = spirv_bytes;
 	}
 
-	// Record push constant location.
+	// Decide push constant bind group slot.
 	if (p_shader.push_constant_size > 0) {
-		header_data.push_constant_bind_group = 3; // Convention: push constants go in group 3.
+		// Convention: push constants use bind group 3, binding 0.
+		// Godot shaders use sets 0–3 for uniforms, but set 3 is reserved for
+		// material params. The ring-buffer push constant emulation also uses
+		// group 3, binding 0 — this matches the SPIR-V layout Godot generates
+		// for push_constant blocks (std430, set=-1/push_constant in Vulkan).
+		header_data.push_constant_bind_group = 3;
 		header_data.push_constant_binding = 0;
-	}
-
-	// Store shader code in the container format.
-	shaders.resize(wgsl_sources.size());
-	for (uint32_t i = 0; i < wgsl_sources.size(); i++) {
-		CharString utf8 = wgsl_sources[i].utf8();
-		shaders.write[i].shader_stage = p_shader.shader_stages[i].shader_stage;
-		shaders.write[i].code_decompressed_size = utf8.length();
-		shaders.write[i].code_compression_flags = 0;
-		shaders.write[i].code_compressed_bytes.resize(utf8.length());
-		memcpy(shaders.write[i].code_compressed_bytes.ptrw(), utf8.get_data(), utf8.length());
+	} else {
+		header_data.push_constant_bind_group = RenderingShaderContainerWebGPU::NO_PUSH_CONSTANTS;
+		header_data.push_constant_binding = 0;
 	}
 
 	return true;
@@ -146,34 +96,9 @@ uint32_t RenderingShaderContainerWebGPU::_to_bytes_header_extra_data(uint8_t *p_
 	return sizeof(HeaderData);
 }
 
-uint32_t RenderingShaderContainerWebGPU::_from_bytes_shader_extra_data_start(const uint8_t *p_bytes) {
-	stage_data.resize(reflection_data.stage_count);
-	wgsl_sources.resize(reflection_data.stage_count);
-	return 0;
-}
-
-uint32_t RenderingShaderContainerWebGPU::_from_bytes_shader_extra_data(const uint8_t *p_bytes, uint32_t p_index) {
-	if (p_bytes) {
-		memcpy(&stage_data[p_index], p_bytes, sizeof(StageData));
-	}
-	return sizeof(StageData);
-}
-
-uint32_t RenderingShaderContainerWebGPU::_to_bytes_shader_extra_data(uint8_t *p_bytes, uint32_t p_index) const {
-	if (p_bytes) {
-		memcpy(p_bytes, &stage_data[p_index], sizeof(StageData));
-	}
-	return sizeof(StageData);
-}
-
 // =========================================================================
 // Public API
 // =========================================================================
-
-const String &RenderingShaderContainerWebGPU::get_wgsl_source(uint32_t p_stage_index) const {
-	ERR_FAIL_INDEX_V(p_stage_index, wgsl_sources.size(), wgsl_sources[0]);
-	return wgsl_sources[p_stage_index];
-}
 
 RenderingShaderContainerWebGPU::RenderingShaderContainerWebGPU() {
 }

@@ -96,17 +96,21 @@ struct WGVertexFormat {
 // =============================================================================
 
 struct WGShader {
-	WGPUShaderModule module = nullptr;
+	// Per-stage shader modules. Indexed by RDD::ShaderStage enum value.
+	WGPUShaderModule stage_modules[6] = {}; // SHADER_STAGE_MAX = 6 (vertex/frag/tess×2/compute/max)
+	WGPUShaderModule module = nullptr; // Legacy alias — points to first non-null module.
+
 	WGPUPipelineLayout pipeline_layout = nullptr;
-	LocalVector<WGPUBindGroupLayout> bind_group_layouts;
+	LocalVector<WGPUBindGroupLayout> bind_group_layouts; // One per descriptor set.
 
 	// Push constant emulation.
 	uint32_t push_constant_size = 0;
-	uint32_t push_constant_bind_group = 3; // Default: bind group 3.
-	uint32_t push_constant_binding = 0;    // Binding 0 within that group.
+	uint32_t push_constant_bind_group = UINT32_MAX; // UINT32_MAX = no push constants.
+	uint32_t push_constant_binding = 0;
 	BitField<RDD::ShaderStage> push_constant_stages;
 
-	// Reflection data for uniform set creation.
+	// Reflection data for uniform set creation:
+	//   bind_group_infos[set_index].entries[binding_index] → layout entry + Godot type.
 	struct BindGroupEntry {
 		WGPUBindGroupLayoutEntry layout_entry = {};
 		RDD::UniformType godot_type = RDD::UNIFORM_TYPE_MAX;

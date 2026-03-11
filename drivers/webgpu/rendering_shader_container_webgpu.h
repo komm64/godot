@@ -41,41 +41,35 @@ public:
 	// Format identifier for WebGPU shader containers.
 	static constexpr uint32_t FORMAT_WEBGPU = 0x57475055; // "WGPU"
 	static constexpr uint32_t FORMAT_VERSION = 1;
+	static constexpr uint32_t NO_PUSH_CONSTANTS = UINT32_MAX;
 
 	struct HeaderData {
-		uint32_t push_constant_bind_group = 3;  // Which bind group index holds push constants.
-		uint32_t push_constant_binding = 0;     // Which binding within that group.
+		uint32_t push_constant_bind_group = NO_PUSH_CONSTANTS; // UINT32_MAX = no push constants.
+		uint32_t push_constant_binding = 0;
 		uint32_t flags = 0;
-	};
-
-	struct StageData {
-		uint32_t wgsl_source_size = 0; // Size of WGSL source code.
 	};
 
 protected:
 	HeaderData header_data;
-	LocalVector<StageData> stage_data;
-	LocalVector<String> wgsl_sources; // WGSL source per stage.
 
 	// --- RenderingShaderContainer overrides ---
 
 	virtual uint32_t _format() const override { return FORMAT_WEBGPU; }
 	virtual uint32_t _format_version() const override { return FORMAT_VERSION; }
 
-	/// Called by set_code_from_spirv() — this is where SPIR-V → WGSL translation happens.
+	/// Called by set_code_from_spirv() — stores raw SPIR-V bytes per stage.
+	/// Dawn's WebGPU implementation supports WGPUShaderSourceSPIRV natively;
+	/// no WGSL/Tint translation step is needed.
 	virtual bool _set_code_from_spirv(const ReflectShader &p_shader) override;
 
-	// Serialization overrides for extra data.
+	// Serialization overrides for extra header data.
 	virtual uint32_t _from_bytes_header_extra_data(const uint8_t *p_bytes) override;
 	virtual uint32_t _to_bytes_header_extra_data(uint8_t *p_bytes) const override;
-	virtual uint32_t _from_bytes_shader_extra_data_start(const uint8_t *p_bytes) override;
-	virtual uint32_t _from_bytes_shader_extra_data(const uint8_t *p_bytes, uint32_t p_index) override;
-	virtual uint32_t _to_bytes_shader_extra_data(uint8_t *p_bytes, uint32_t p_index) const override;
 
 public:
-	const String &get_wgsl_source(uint32_t p_stage_index) const;
 	uint32_t get_push_constant_bind_group() const { return header_data.push_constant_bind_group; }
 	uint32_t get_push_constant_binding() const { return header_data.push_constant_binding; }
+	bool has_push_constants() const { return header_data.push_constant_bind_group != NO_PUSH_CONSTANTS; }
 
 	RenderingShaderContainerWebGPU();
 	virtual ~RenderingShaderContainerWebGPU();

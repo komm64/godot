@@ -46,6 +46,14 @@ RenderingDeviceDriverWebGPU::RenderingDeviceDriverWebGPU(RenderingContextDriverW
 }
 
 RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
+	if (push_constant_bind_group) {
+		wgpuBindGroupRelease(push_constant_bind_group);
+		push_constant_bind_group = nullptr;
+	}
+	if (push_constant_bind_group_layout) {
+		wgpuBindGroupLayoutRelease(push_constant_bind_group_layout);
+		push_constant_bind_group_layout = nullptr;
+	}
 	if (push_constant_ring_buffer) {
 		wgpuBufferRelease(push_constant_ring_buffer);
 		push_constant_ring_buffer = nullptr;
@@ -79,6 +87,41 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		desc.mappedAtCreation = false;
 		push_constant_ring_buffer = wgpuDeviceCreateBuffer(device, &desc);
 		ERR_FAIL_COND_V(push_constant_ring_buffer == nullptr, ERR_CANT_CREATE);
+	}
+
+	// Create a universal push constant bind group layout:
+	//   binding 0, all stages, uniform buffer with dynamic offset.
+	// All shaders with push constants use this same layout for their push
+	// constant slot in the pipeline layout (hasDynamicOffset=true allows
+	// reusing one bind group with different ring buffer offsets per draw).
+	{
+		WGPUBindGroupLayoutEntry pc_entry = {};
+		pc_entry.binding = 0;
+		pc_entry.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment | WGPUShaderStage_Compute;
+		pc_entry.buffer.type = WGPUBufferBindingType_Uniform;
+		pc_entry.buffer.hasDynamicOffset = true;
+		pc_entry.buffer.minBindingSize = 0; // Flexible — works for any push constant size.
+
+		WGPUBindGroupLayoutDescriptor layout_desc = {};
+		layout_desc.entryCount = 1;
+		layout_desc.entries = &pc_entry;
+		push_constant_bind_group_layout = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
+		ERR_FAIL_COND_V(push_constant_bind_group_layout == nullptr, ERR_CANT_CREATE);
+
+		// Create the bind group (backed by the ring buffer).
+		// Dynamic offset is applied at bind time via SetBindGroup(..., 1, &offset).
+		WGPUBindGroupEntry bg_entry = {};
+		bg_entry.binding = 0;
+		bg_entry.buffer = push_constant_ring_buffer;
+		bg_entry.offset = 0;
+		bg_entry.size = PUSH_CONSTANT_SLOT_ALIGNMENT;
+
+		WGPUBindGroupDescriptor bg_desc = {};
+		bg_desc.layout = push_constant_bind_group_layout;
+		bg_desc.entryCount = 1;
+		bg_desc.entries = &bg_entry;
+		push_constant_bind_group = wgpuDeviceCreateBindGroup(device, &bg_desc);
+		ERR_FAIL_COND_V(push_constant_bind_group == nullptr, ERR_CANT_CREATE);
 	}
 
 	// Create shader container format.
@@ -505,6 +548,45 @@ RDD::DataFormat RenderingDeviceDriverWebGPU::_wgpu_to_data_format(WGPUTextureFor
 	}
 }
 
+WGPUVertexFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu_vertex(DataFormat p_format) {
+	switch (p_format) {
+		case DATA_FORMAT_R32_SFLOAT: return WGPUVertexFormat_Float32;
+		case DATA_FORMAT_R32G32_SFLOAT: return WGPUVertexFormat_Float32x2;
+		case DATA_FORMAT_R32G32B32_SFLOAT: return WGPUVertexFormat_Float32x3;
+		case DATA_FORMAT_R32G32B32A32_SFLOAT: return WGPUVertexFormat_Float32x4;
+		case DATA_FORMAT_R32_UINT: return WGPUVertexFormat_Uint32;
+		case DATA_FORMAT_R32G32_UINT: return WGPUVertexFormat_Uint32x2;
+		case DATA_FORMAT_R32G32B32_UINT: return WGPUVertexFormat_Uint32x3;
+		case DATA_FORMAT_R32G32B32A32_UINT: return WGPUVertexFormat_Uint32x4;
+		case DATA_FORMAT_R32_SINT: return WGPUVertexFormat_Sint32;
+		case DATA_FORMAT_R32G32_SINT: return WGPUVertexFormat_Sint32x2;
+		case DATA_FORMAT_R32G32B32_SINT: return WGPUVertexFormat_Sint32x3;
+		case DATA_FORMAT_R32G32B32A32_SINT: return WGPUVertexFormat_Sint32x4;
+		case DATA_FORMAT_R16G16_SFLOAT: return WGPUVertexFormat_Float16x2;
+		case DATA_FORMAT_R16G16B16A16_SFLOAT: return WGPUVertexFormat_Float16x4;
+		case DATA_FORMAT_R16G16_UINT: return WGPUVertexFormat_Uint16x2;
+		case DATA_FORMAT_R16G16B16A16_UINT: return WGPUVertexFormat_Uint16x4;
+		case DATA_FORMAT_R16G16_SINT: return WGPUVertexFormat_Sint16x2;
+		case DATA_FORMAT_R16G16B16A16_SINT: return WGPUVertexFormat_Sint16x4;
+		case DATA_FORMAT_R16G16_UNORM: return WGPUVertexFormat_Unorm16x2;
+		case DATA_FORMAT_R16G16B16A16_UNORM: return WGPUVertexFormat_Unorm16x4;
+		case DATA_FORMAT_R16G16_SNORM: return WGPUVertexFormat_Snorm16x2;
+		case DATA_FORMAT_R16G16B16A16_SNORM: return WGPUVertexFormat_Snorm16x4;
+		case DATA_FORMAT_R8G8_UNORM: return WGPUVertexFormat_Unorm8x2;
+		case DATA_FORMAT_R8G8B8A8_UNORM: return WGPUVertexFormat_Unorm8x4;
+		case DATA_FORMAT_R8G8_SNORM: return WGPUVertexFormat_Snorm8x2;
+		case DATA_FORMAT_R8G8B8A8_SNORM: return WGPUVertexFormat_Snorm8x4;
+		case DATA_FORMAT_R8G8_UINT: return WGPUVertexFormat_Uint8x2;
+		case DATA_FORMAT_R8G8B8A8_UINT: return WGPUVertexFormat_Uint8x4;
+		case DATA_FORMAT_R8G8_SINT: return WGPUVertexFormat_Sint8x2;
+		case DATA_FORMAT_R8G8B8A8_SINT: return WGPUVertexFormat_Sint8x4;
+		case DATA_FORMAT_A2B10G10R10_UNORM_PACK32: return WGPUVertexFormat_Unorm10_10_10_2;
+		default:
+			WARN_PRINT(vformat("WebGPU: Unsupported vertex DataFormat %d", (int)p_format));
+			return (WGPUVertexFormat)0;
+	}
+}
+
 // =============================================================================
 // SAMPLERS
 // =============================================================================
@@ -585,8 +667,50 @@ bool RenderingDeviceDriverWebGPU::sampler_is_format_supported_for_filter(DataFor
 
 RDD::VertexFormatID RenderingDeviceDriverWebGPU::vertex_format_create(Span<VertexAttribute> p_vertex_attribs, const VertexAttributeBindingsMap &p_vertex_bindings) {
 	WGVertexFormat *vf = new WGVertexFormat();
-	// TODO: Map vertex attributes to WGPUVertexBufferLayout + WGPUVertexAttribute.
-	// Store for use during pipeline creation.
+
+	// Build attribute list.
+	for (uint32_t i = 0; i < p_vertex_attribs.size(); i++) {
+		const VertexAttribute &va = p_vertex_attribs[i];
+		WGVertexFormat::Attribute attr;
+		attr.location = va.location;
+		attr.format = _data_format_to_wgpu_vertex(va.format);
+		attr.offset = va.offset;
+		attr.binding = (va.binding == UINT32_MAX) ? i : va.binding;
+		vf->attributes.push_back(attr);
+	}
+
+	// Build binding list from p_vertex_bindings map.
+	if (!p_vertex_bindings.is_empty()) {
+		uint32_t max_binding = 0;
+		for (const KeyValue<uint32_t, VertexAttributeBinding> &kv : p_vertex_bindings) {
+			max_binding = MAX(max_binding, kv.key);
+		}
+		vf->bindings.resize(max_binding + 1);
+		for (const KeyValue<uint32_t, VertexAttributeBinding> &kv : p_vertex_bindings) {
+			vf->bindings[kv.key].stride = kv.value.stride;
+			vf->bindings[kv.key].step_mode = (kv.value.frequency == VERTEX_FREQUENCY_INSTANCE)
+					? WGPUVertexStepMode_Instance
+					: WGPUVertexStepMode_Vertex;
+		}
+	} else {
+		// Build bindings from vertex attribute data (stride/frequency stored per-attribute in older API).
+		HashMap<uint32_t, bool> seen;
+		for (uint32_t i = 0; i < p_vertex_attribs.size(); i++) {
+			const VertexAttribute &va = p_vertex_attribs[i];
+			uint32_t binding = (va.binding == UINT32_MAX) ? i : va.binding;
+			if (!seen.has(binding)) {
+				if (vf->bindings.size() <= binding) {
+					vf->bindings.resize(binding + 1);
+				}
+				vf->bindings[binding].stride = va.stride;
+				vf->bindings[binding].step_mode = (va.frequency == VERTEX_FREQUENCY_INSTANCE)
+						? WGPUVertexStepMode_Instance
+						: WGPUVertexStepMode_Vertex;
+				seen[binding] = true;
+			}
+		}
+	}
+
 	return VertexFormatID(vf);
 }
 
@@ -961,27 +1085,207 @@ void RenderingDeviceDriverWebGPU::framebuffer_free(FramebufferID p_framebuffer) 
 // SHADER
 // =============================================================================
 
+// Helper: map Godot stage mask bits to WGPUShaderStage visibility flags.
+static WGPUShaderStage _stages_to_wgpu_visibility(uint32_t p_stage_mask) {
+	WGPUShaderStage vis = WGPUShaderStage_None;
+	if (p_stage_mask & (1u << RDD::SHADER_STAGE_VERTEX)) {
+		vis = (WGPUShaderStage)(vis | WGPUShaderStage_Vertex);
+	}
+	if (p_stage_mask & (1u << RDD::SHADER_STAGE_FRAGMENT)) {
+		vis = (WGPUShaderStage)(vis | WGPUShaderStage_Fragment);
+	}
+	if (p_stage_mask & (1u << RDD::SHADER_STAGE_COMPUTE)) {
+		vis = (WGPUShaderStage)(vis | WGPUShaderStage_Compute);
+	}
+	// Tessellation stages map to vertex visibility as a safe fallback.
+	if (p_stage_mask & ((1u << RDD::SHADER_STAGE_TESSELATION_CONTROL) | (1u << RDD::SHADER_STAGE_TESSELATION_EVALUATION))) {
+		vis = (WGPUShaderStage)(vis | WGPUShaderStage_Vertex);
+	}
+	return vis;
+}
+
 RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) {
-	// TODO: Extract WGSL from container.
-	// TODO: Create WGPUShaderModule via wgpuDeviceCreateShaderModule().
-	// TODO: Build WGPUBindGroupLayout array from reflection data.
-	// TODO: Build WGPUPipelineLayout.
-	WARN_PRINT_ONCE("WebGPU: shader_create_from_container not yet implemented.");
-	return ShaderID();
+	ERR_FAIL_COND_V(p_shader_container.is_null(), ShaderID());
+
+	Ref<RenderingShaderContainerWebGPU> wg_container = p_shader_container;
+	ERR_FAIL_COND_V(wg_container.is_null(), ShaderID());
+
+	RenderingDeviceCommons::ShaderReflection shader_refl = p_shader_container->get_shader_reflection();
+
+	WGShader *shader = new WGShader();
+	shader->name = String(p_shader_container->shader_name.ptr());
+	shader->push_constant_bind_group = wg_container->get_push_constant_bind_group();
+	shader->push_constant_binding = wg_container->get_push_constant_binding();
+	shader->push_constant_size = shader_refl.push_constant_size;
+
+	// --- Create one WGPUShaderModule per stage ---
+	Vector<RenderingShaderContainer::Shader> &stage_shaders = p_shader_container->shaders;
+	for (int i = 0; i < stage_shaders.size(); i++) {
+		const RenderingShaderContainer::Shader &s = stage_shaders[i];
+
+		// The code_compressed_bytes holds raw SPIR-V (no compression — code_decompressed_size == 0).
+		const PackedByteArray &spv_bytes = s.code_compressed_bytes;
+		ERR_FAIL_COND_V_MSG(spv_bytes.is_empty(), ShaderID(), "WebGPU: empty SPIR-V for shader stage.");
+		ERR_FAIL_COND_V_MSG(spv_bytes.size() % 4 != 0, ShaderID(), "WebGPU: SPIR-V size must be a multiple of 4.");
+
+		WGPUShaderSourceSPIRV spirv_source = {};
+		spirv_source.chain.sType = WGPUSType_ShaderSourceSPIRV;
+		spirv_source.code = (const uint32_t *)(spv_bytes.ptr());
+		spirv_source.codeSize = spv_bytes.size() / 4; // Number of 32-bit words.
+
+		WGPUShaderModuleDescriptor mod_desc = {};
+		mod_desc.nextInChain = (WGPUChainedStruct *)&spirv_source;
+
+		WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &mod_desc);
+		ERR_FAIL_COND_V_MSG(mod == nullptr, ShaderID(), vformat("WebGPU: wgpuDeviceCreateShaderModule failed for stage %d.", (int)s.shader_stage));
+
+		if (s.shader_stage < 6) {
+			shader->stage_modules[s.shader_stage] = mod;
+		}
+		// Set the legacy module alias to the first created module.
+		if (!shader->module) {
+			shader->module = mod;
+		}
+	}
+
+	// --- Build WGPUBindGroupLayout for each descriptor set ---
+	const uint32_t set_count = (uint32_t)shader_refl.uniform_sets.size();
+	shader->bind_group_infos.resize(set_count);
+	shader->bind_group_layouts.resize(set_count);
+
+	for (uint32_t set = 0; set < set_count; set++) {
+		const Vector<RenderingDeviceCommons::ShaderUniform> &set_uniforms = shader_refl.uniform_sets[set];
+		uint32_t entry_count = (uint32_t)set_uniforms.size();
+
+		LocalVector<WGPUBindGroupLayoutEntry> entries;
+		entries.resize(entry_count);
+
+		WGShader::BindGroupInfo &bgi = shader->bind_group_infos[set];
+		bgi.entries.resize(entry_count);
+
+		for (uint32_t e = 0; e < entry_count; e++) {
+			const RenderingDeviceCommons::ShaderUniform &u = set_uniforms[e];
+			WGPUBindGroupLayoutEntry &entry = entries[e];
+			WGShader::BindGroupEntry &bge = bgi.entries[e];
+
+			entry = {};
+			entry.binding = u.binding;
+			entry.visibility = _stages_to_wgpu_visibility((uint32_t)u.stages);
+
+			bge.godot_type = u.type;
+			bge.layout_entry = entry; // Will be fully filled below.
+
+			switch (u.type) {
+				case RDD::UNIFORM_TYPE_SAMPLER: {
+					entry.sampler.type = WGPUSamplerBindingType_Filtering;
+				} break;
+
+				case RDD::UNIFORM_TYPE_TEXTURE:
+				case RDD::UNIFORM_TYPE_INPUT_ATTACHMENT: {
+					entry.texture.sampleType = WGPUTextureSampleType_Float;
+					entry.texture.viewDimension = WGPUTextureViewDimension_2D;
+					entry.texture.multisampled = false;
+				} break;
+
+				case RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE: {
+					// Combined sampler+texture: WebGPU keeps them separate, but Godot's RD
+					// presents them as a pair at the same binding slot.
+					// Layout entry covers the texture side; sampler is at binding+1.
+					entry.texture.sampleType = WGPUTextureSampleType_Float;
+					entry.texture.viewDimension = WGPUTextureViewDimension_2D;
+					entry.texture.multisampled = false;
+				} break;
+
+				case RDD::UNIFORM_TYPE_IMAGE: {
+					entry.storageTexture.access = u.writable ? WGPUStorageTextureAccess_WriteOnly : WGPUStorageTextureAccess_ReadOnly;
+					entry.storageTexture.format = WGPUTextureFormat_RGBA8Unorm; // Fallback.
+					entry.storageTexture.viewDimension = WGPUTextureViewDimension_2D;
+				} break;
+
+				case RDD::UNIFORM_TYPE_UNIFORM_BUFFER: {
+					entry.buffer.type = WGPUBufferBindingType_Uniform;
+					entry.buffer.hasDynamicOffset = false;
+					entry.buffer.minBindingSize = 0;
+				} break;
+
+				case RDD::UNIFORM_TYPE_STORAGE_BUFFER: {
+					entry.buffer.type = u.writable ? WGPUBufferBindingType_Storage : WGPUBufferBindingType_ReadOnlyStorage;
+					entry.buffer.hasDynamicOffset = false;
+					entry.buffer.minBindingSize = 0;
+				} break;
+
+				default:
+					WARN_PRINT_ONCE(vformat("WebGPU: unhandled uniform type %d in bind group layout.", (int)u.type));
+					entry.buffer.type = WGPUBufferBindingType_Uniform;
+					break;
+			}
+			bge.layout_entry = entry;
+		}
+
+		WGPUBindGroupLayoutDescriptor layout_desc = {};
+		layout_desc.entryCount = entry_count;
+		layout_desc.entries = entries.size() > 0 ? entries.ptr() : nullptr;
+		shader->bind_group_layouts[set] = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
+		ERR_FAIL_COND_V_MSG(shader->bind_group_layouts[set] == nullptr, ShaderID(), "WebGPU: wgpuDeviceCreateBindGroupLayout failed.");
+	}
+
+	// --- Build WGPUPipelineLayout ---
+	// The number of bind groups in the pipeline layout must cover:
+	//   - All descriptor sets (0 .. set_count - 1)
+	//   - The push constant bind group slot (if any)
+	const bool has_pc = wg_container->has_push_constants();
+	const uint32_t pc_group = has_pc ? wg_container->get_push_constant_bind_group() : UINT32_MAX;
+	const uint32_t total_groups = has_pc ? MAX(set_count, pc_group + 1) : set_count;
+
+	LocalVector<WGPUBindGroupLayout> all_layouts;
+	all_layouts.resize(total_groups);
+
+	// Create empty layouts for any gaps between sets and push constant slot.
+	WGPUBindGroupLayout empty_layout = nullptr;
+	if (total_groups > set_count) {
+		WGPUBindGroupLayoutDescriptor empty_desc = {};
+		empty_desc.entryCount = 0;
+		empty_layout = wgpuDeviceCreateBindGroupLayout(device, &empty_desc);
+	}
+
+	for (uint32_t i = 0; i < total_groups; i++) {
+		if (has_pc && i == pc_group) {
+			all_layouts[i] = push_constant_bind_group_layout;
+		} else if (i < set_count) {
+			all_layouts[i] = shader->bind_group_layouts[i];
+		} else {
+			all_layouts[i] = empty_layout ? empty_layout : push_constant_bind_group_layout;
+		}
+	}
+
+	WGPUPipelineLayoutDescriptor pl_desc = {};
+	pl_desc.bindGroupLayoutCount = total_groups;
+	pl_desc.bindGroupLayouts = all_layouts.size() > 0 ? all_layouts.ptr() : nullptr;
+	shader->pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &pl_desc);
+	ERR_FAIL_COND_V_MSG(shader->pipeline_layout == nullptr, ShaderID(), "WebGPU: wgpuDeviceCreatePipelineLayout failed.");
+
+	if (empty_layout) {
+		wgpuBindGroupLayoutRelease(empty_layout);
+	}
+
+	return ShaderID(shader);
 }
 
 uint32_t RenderingDeviceDriverWebGPU::shader_get_layout_hash(ShaderID p_shader) {
 	WGShader *shader = (WGShader *)(p_shader.id);
 	if (!shader) return 0;
-	// TODO: Compute hash from bind group layouts.
-	return 0;
+	// Use the pipeline layout pointer as a cheap hash identifier.
+	return (uint32_t)(uint64_t)(void *)(shader->pipeline_layout);
 }
 
 void RenderingDeviceDriverWebGPU::shader_free(ShaderID p_shader) {
 	WGShader *shader = (WGShader *)(p_shader.id);
 	ERR_FAIL_NULL(shader);
-	if (shader->module) {
-		wgpuShaderModuleRelease(shader->module);
+	for (int i = 0; i < 6; i++) {
+		if (shader->stage_modules[i]) {
+			wgpuShaderModuleRelease(shader->stage_modules[i]);
+			shader->stage_modules[i] = nullptr;
+		}
 	}
 	if (shader->pipeline_layout) {
 		wgpuPipelineLayoutRelease(shader->pipeline_layout);
@@ -997,10 +1301,13 @@ void RenderingDeviceDriverWebGPU::shader_free(ShaderID p_shader) {
 void RenderingDeviceDriverWebGPU::shader_destroy_modules(ShaderID p_shader) {
 	WGShader *shader = (WGShader *)(p_shader.id);
 	ERR_FAIL_NULL(shader);
-	if (shader->module) {
-		wgpuShaderModuleRelease(shader->module);
-		shader->module = nullptr;
+	for (int i = 0; i < 6; i++) {
+		if (shader->stage_modules[i]) {
+			wgpuShaderModuleRelease(shader->stage_modules[i]);
+			shader->stage_modules[i] = nullptr;
+		}
 	}
+	shader->module = nullptr;
 }
 
 // =============================================================================
@@ -1008,11 +1315,118 @@ void RenderingDeviceDriverWebGPU::shader_destroy_modules(ShaderID p_shader) {
 // =============================================================================
 
 RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) {
-	// TODO: For each BoundUniform, create WGPUBindGroupEntry.
-	// TODO: Get bind group layout from shader at p_set_index.
-	// TODO: Call wgpuDeviceCreateBindGroup().
-	WARN_PRINT_ONCE("WebGPU: uniform_set_create not yet implemented.");
-	return UniformSetID();
+	WGShader *shader = (WGShader *)(p_shader.id);
+	ERR_FAIL_NULL_V(shader, UniformSetID());
+	ERR_FAIL_COND_V(p_set_index >= (uint32_t)shader->bind_group_layouts.size(), UniformSetID());
+
+	WGPUBindGroupLayout layout = shader->bind_group_layouts[p_set_index];
+	ERR_FAIL_NULL_V(layout, UniformSetID());
+
+	// Each BoundUniform may expand to one or two WGPUBindGroupEntry items.
+	LocalVector<WGPUBindGroupEntry> entries;
+	entries.reserve(p_uniforms.size() * 2);
+
+	for (uint32_t i = 0; i < p_uniforms.size(); i++) {
+		const BoundUniform &uniform = p_uniforms[i];
+		if (uniform.immutable_sampler) {
+			continue; // Immutable samplers are pre-specified in the pipeline layout.
+		}
+
+		switch (uniform.type) {
+			case UNIFORM_TYPE_SAMPLER: {
+				for (uint32_t j = 0; j < uniform.ids.size(); j++) {
+					WGPUBindGroupEntry entry = {};
+					entry.binding = uniform.binding + j; // Arrays occupy consecutive bindings.
+					entry.sampler = (WGPUSampler)(uniform.ids[j].id);
+					entries.push_back(entry);
+				}
+			} break;
+
+			case UNIFORM_TYPE_TEXTURE:
+			case UNIFORM_TYPE_INPUT_ATTACHMENT: {
+				for (uint32_t j = 0; j < uniform.ids.size(); j++) {
+					WGTexture *tex = (WGTexture *)(uniform.ids[j].id);
+					ERR_CONTINUE_MSG(tex == nullptr, "WebGPU: null texture in uniform set.");
+					WGPUBindGroupEntry entry = {};
+					entry.binding = uniform.binding + j;
+					entry.textureView = tex->default_view;
+					entries.push_back(entry);
+				}
+			} break;
+
+			case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE: {
+				// Godot pairs sampler+texture as ids[j*2] / ids[j*2+1].
+				// WebGPU needs separate sampler and texture entries.
+				// We place the sampler at @binding(N) and texture at @binding(N+1).
+				for (uint32_t j = 0; j < uniform.ids.size() / 2; j++) {
+					WGPUSampler sampler = (WGPUSampler)(uniform.ids[j * 2 + 0].id);
+					WGTexture *tex = (WGTexture *)(uniform.ids[j * 2 + 1].id);
+					if (sampler) {
+						WGPUBindGroupEntry se = {};
+						se.binding = uniform.binding + j * 2 + 0;
+						se.sampler = sampler;
+						entries.push_back(se);
+					}
+					if (tex && tex->default_view) {
+						WGPUBindGroupEntry te = {};
+						te.binding = uniform.binding + j * 2 + 1;
+						te.textureView = tex->default_view;
+						entries.push_back(te);
+					}
+				}
+			} break;
+
+			case UNIFORM_TYPE_IMAGE: {
+				for (uint32_t j = 0; j < uniform.ids.size(); j++) {
+					WGTexture *tex = (WGTexture *)(uniform.ids[j].id);
+					ERR_CONTINUE_MSG(tex == nullptr, "WebGPU: null texture in image uniform.");
+					WGPUBindGroupEntry entry = {};
+					entry.binding = uniform.binding + j;
+					entry.textureView = tex->default_view;
+					entries.push_back(entry);
+				}
+			} break;
+
+			case UNIFORM_TYPE_UNIFORM_BUFFER: {
+				WGBuffer *buf = (WGBuffer *)(uniform.ids[0].id);
+				ERR_CONTINUE_MSG(buf == nullptr, "WebGPU: null buffer in uniform set.");
+				WGPUBindGroupEntry entry = {};
+				entry.binding = uniform.binding;
+				entry.buffer = buf->handle;
+				entry.offset = 0;
+				entry.size = buf->size;
+				entries.push_back(entry);
+			} break;
+
+			case UNIFORM_TYPE_STORAGE_BUFFER: {
+				WGBuffer *buf = (WGBuffer *)(uniform.ids[0].id);
+				ERR_CONTINUE_MSG(buf == nullptr, "WebGPU: null buffer in storage uniform.");
+				WGPUBindGroupEntry entry = {};
+				entry.binding = uniform.binding;
+				entry.buffer = buf->handle;
+				entry.offset = 0;
+				entry.size = buf->size;
+				entries.push_back(entry);
+			} break;
+
+			default: {
+				WARN_PRINT_ONCE(vformat("WebGPU: unhandled uniform type %d in uniform_set_create.", (int)uniform.type));
+			} break;
+		}
+	}
+
+	WGPUBindGroupDescriptor bg_desc = {};
+	bg_desc.layout = layout;
+	bg_desc.entryCount = entries.size();
+	bg_desc.entries = entries.size() > 0 ? entries.ptr() : nullptr;
+
+	WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &bg_desc);
+	ERR_FAIL_COND_V_MSG(bg == nullptr, UniformSetID(), "WebGPU: wgpuDeviceCreateBindGroup failed.");
+
+	WGUniformSet *us = new WGUniformSet();
+	us->handle = bg;
+	us->set_index = p_set_index;
+	return UniformSetID(us);
 }
 
 void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
@@ -1211,6 +1625,10 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 	if (!p_cmd_buf->push_constants_dirty || p_cmd_buf->push_constant_data_len == 0 || !p_shader) {
 		return;
 	}
+	if (p_shader->push_constant_bind_group == UINT32_MAX || !push_constant_bind_group) {
+		p_cmd_buf->push_constants_dirty = false;
+		return; // Shader has no push constants.
+	}
 
 	// Write push constant data to ring buffer.
 	uint32_t aligned_size = (p_cmd_buf->push_constant_data_len + PUSH_CONSTANT_SLOT_ALIGNMENT - 1) & ~(PUSH_CONSTANT_SLOT_ALIGNMENT - 1);
@@ -1223,11 +1641,11 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 
 	uint32_t dynamic_offset = push_constant_ring_offset;
 
-	// Set the push constant bind group with dynamic offset.
+	// Bind the push constant ring buffer bind group with a dynamic offset.
 	if (p_cmd_buf->render_encoder) {
-		wgpuRenderPassEncoderSetBindGroup(p_cmd_buf->render_encoder, p_shader->push_constant_bind_group, nullptr /* TODO: PC bind group */, 1, &dynamic_offset);
+		wgpuRenderPassEncoderSetBindGroup(p_cmd_buf->render_encoder, p_shader->push_constant_bind_group, push_constant_bind_group, 1, &dynamic_offset);
 	} else if (p_cmd_buf->compute_encoder) {
-		wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, p_shader->push_constant_bind_group, nullptr /* TODO: PC bind group */, 1, &dynamic_offset);
+		wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, p_shader->push_constant_bind_group, push_constant_bind_group, 1, &dynamic_offset);
 	}
 
 	push_constant_ring_offset += aligned_size;
@@ -1628,13 +2046,320 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		RenderPassID p_render_pass,
 		uint32_t p_render_subpass,
 		VectorView<PipelineSpecializationConstant> p_specialization_constants) {
-	// TODO: Build WGPURenderPipelineDescriptor from all parameters.
-	// TODO: Map primitive topology, cull mode, front face, blend state, depth/stencil state.
-	// TODO: Map vertex format to vertex buffer layouts.
-	// TODO: Map specialization constants to WGPUConstantEntry array.
-	// TODO: Call wgpuDeviceCreateRenderPipeline().
-	WARN_PRINT_ONCE("WebGPU: render_pipeline_create not yet implemented.");
-	return PipelineID();
+	WGShader *shader = (WGShader *)(p_shader.id);
+	ERR_FAIL_COND_V(!shader, PipelineID());
+	WGVertexFormat *vf = p_vertex_format.id ? (WGVertexFormat *)(p_vertex_format.id) : nullptr;
+	WGRenderPass *rp = (WGRenderPass *)(p_render_pass.id);
+	ERR_FAIL_COND_V(!rp, PipelineID());
+	ERR_FAIL_COND_V(p_render_subpass >= (uint32_t)rp->subpasses.size(), PipelineID());
+	const WGRenderPass::SubpassInfo &subpass = rp->subpasses[p_render_subpass];
+
+	// --- Specialization constants ---
+	LocalVector<WGPUConstantEntry> spec_entries;
+	LocalVector<CharString> spec_keys; // Keep alive until wgpuDeviceCreateRenderPipeline().
+	spec_entries.resize(p_specialization_constants.size());
+	spec_keys.resize(p_specialization_constants.size());
+	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
+		const PipelineSpecializationConstant &sc = p_specialization_constants[i];
+		spec_keys[i] = String::num_int64(sc.constant_id).utf8();
+		spec_entries[i] = {};
+		spec_entries[i].key = { spec_keys[i].get_data(), (size_t)spec_keys[i].length() };
+		if (sc.type == PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL) {
+			spec_entries[i].value = sc.bool_value ? 1.0 : 0.0;
+		} else if (sc.type == PIPELINE_SPECIALIZATION_CONSTANT_TYPE_FLOAT) {
+			spec_entries[i].value = (double)sc.float_value;
+		} else {
+			spec_entries[i].value = (double)sc.int_value;
+		}
+	}
+
+	// --- Vertex state ---
+	LocalVector<WGPUVertexBufferLayout> vb_layouts;
+	LocalVector<WGPUVertexAttribute> vb_attrs;
+	if (vf && !vf->attributes.is_empty()) {
+		// Group attributes by binding, counting totals first.
+		HashMap<uint32_t, uint32_t> binding_attr_count;
+		for (const WGVertexFormat::Attribute &a : vf->attributes) {
+			binding_attr_count[a.binding]++;
+		}
+		uint32_t total_attrs = vf->attributes.size();
+		vb_attrs.resize(total_attrs); // Pre-allocate — no reallocation after this.
+
+		// Determine start index per binding.
+		HashMap<uint32_t, uint32_t> binding_start;
+		uint32_t pos = 0;
+		for (uint32_t b = 0; b < vf->bindings.size(); b++) {
+			if (binding_attr_count.has(b)) {
+				binding_start[b] = pos;
+				pos += binding_attr_count[b];
+			}
+		}
+
+		// Fill attrs per binding.
+		HashMap<uint32_t, uint32_t> fill_pos;
+		for (const WGVertexFormat::Attribute &a : vf->attributes) {
+			uint32_t idx = binding_start[a.binding] + (fill_pos.has(a.binding) ? fill_pos[a.binding]++ : (fill_pos[a.binding] = 1, 0));
+			vb_attrs[idx].format = a.format;
+			vb_attrs[idx].offset = a.offset;
+			vb_attrs[idx].shaderLocation = a.location;
+		}
+
+		// Build layouts (one per binding that has attributes).
+		for (uint32_t b = 0; b < vf->bindings.size(); b++) {
+			if (!binding_attr_count.has(b)) {
+				continue;
+			}
+			WGPUVertexBufferLayout layout = {};
+			layout.arrayStride = vf->bindings[b].stride;
+			layout.stepMode = vf->bindings[b].step_mode;
+			layout.attributeCount = binding_attr_count[b];
+			layout.attributes = vb_attrs.ptr() + binding_start[b];
+			vb_layouts.push_back(layout);
+		}
+	}
+
+	WGPUVertexState vertex_state = {};
+	vertex_state.module = shader->stage_modules[SHADER_STAGE_VERTEX];
+	vertex_state.entryPoint = { "main", WGPU_STRLEN };
+	vertex_state.bufferCount = vb_layouts.size();
+	vertex_state.buffers = vb_layouts.ptr();
+	if (!spec_entries.is_empty()) {
+		vertex_state.constantCount = spec_entries.size();
+		vertex_state.constants = spec_entries.ptr();
+	}
+
+	// --- Primitive state ---
+	WGPUPrimitiveState primitive = {};
+	bool is_strip = false;
+	switch (p_render_primitive) {
+		case RENDER_PRIMITIVE_POINTS:
+			primitive.topology = WGPUPrimitiveTopology_PointList;
+			break;
+		case RENDER_PRIMITIVE_LINES:
+		case RENDER_PRIMITIVE_LINES_WITH_ADJACENCY:
+			primitive.topology = WGPUPrimitiveTopology_LineList;
+			break;
+		case RENDER_PRIMITIVE_LINESTRIPS:
+		case RENDER_PRIMITIVE_LINESTRIPS_WITH_ADJACENCY:
+			primitive.topology = WGPUPrimitiveTopology_LineStrip;
+			is_strip = true;
+			break;
+		case RENDER_PRIMITIVE_TRIANGLES:
+		case RENDER_PRIMITIVE_TRIANGLES_WITH_ADJACENCY:
+			primitive.topology = WGPUPrimitiveTopology_TriangleList;
+			break;
+		case RENDER_PRIMITIVE_TRIANGLE_STRIPS:
+		case RENDER_PRIMITIVE_TRIANGLE_STRIPS_WITH_AJACENCY:
+		case RENDER_PRIMITIVE_TRIANGLE_STRIPS_WITH_RESTART_INDEX:
+			primitive.topology = WGPUPrimitiveTopology_TriangleStrip;
+			is_strip = true;
+			break;
+		default:
+			primitive.topology = WGPUPrimitiveTopology_TriangleList;
+			break;
+	}
+	if (is_strip) {
+		primitive.stripIndexFormat = WGPUIndexFormat_Uint32;
+	}
+	switch (p_rasterization_state.cull_mode) {
+		case POLYGON_CULL_FRONT:
+			primitive.cullMode = WGPUCullMode_Front;
+			break;
+		case POLYGON_CULL_BACK:
+			primitive.cullMode = WGPUCullMode_Back;
+			break;
+		default:
+			primitive.cullMode = WGPUCullMode_None;
+			break;
+	}
+	primitive.frontFace = (p_rasterization_state.front_face == POLYGON_FRONT_FACE_CLOCKWISE)
+			? WGPUFrontFace_CW
+			: WGPUFrontFace_CCW;
+
+	// --- Multisample state ---
+	WGPUMultisampleState multisample = {};
+	// TextureSamples enum: 0=1x, 1=2x, 2=4x, 3=8x ... → 1 << sample_count
+	multisample.count = (uint32_t)(1u << (uint32_t)p_multisample_state.sample_count);
+	multisample.mask = 0xFFFFFFFFu;
+	multisample.alphaToCoverageEnabled = p_multisample_state.enable_alpha_to_coverage;
+
+	// --- Depth/stencil helpers ---
+	auto map_compare = [](CompareOperator op) -> WGPUCompareFunction {
+		switch (op) {
+			case COMPARE_OP_NEVER: return WGPUCompareFunction_Never;
+			case COMPARE_OP_LESS: return WGPUCompareFunction_Less;
+			case COMPARE_OP_EQUAL: return WGPUCompareFunction_Equal;
+			case COMPARE_OP_LESS_OR_EQUAL: return WGPUCompareFunction_LessEqual;
+			case COMPARE_OP_GREATER: return WGPUCompareFunction_Greater;
+			case COMPARE_OP_NOT_EQUAL: return WGPUCompareFunction_NotEqual;
+			case COMPARE_OP_GREATER_OR_EQUAL: return WGPUCompareFunction_GreaterEqual;
+			default: return WGPUCompareFunction_Always;
+		}
+	};
+	auto map_stencil_op = [](StencilOperation op) -> WGPUStencilOperation {
+		switch (op) {
+			case STENCIL_OP_KEEP: return WGPUStencilOperation_Keep;
+			case STENCIL_OP_ZERO: return WGPUStencilOperation_Zero;
+			case STENCIL_OP_REPLACE: return WGPUStencilOperation_Replace;
+			case STENCIL_OP_INCREMENT_AND_CLAMP: return WGPUStencilOperation_IncrementClamp;
+			case STENCIL_OP_DECREMENT_AND_CLAMP: return WGPUStencilOperation_DecrementClamp;
+			case STENCIL_OP_INVERT: return WGPUStencilOperation_Invert;
+			case STENCIL_OP_INCREMENT_AND_WRAP: return WGPUStencilOperation_IncrementWrap;
+			case STENCIL_OP_DECREMENT_AND_WRAP: return WGPUStencilOperation_DecrementWrap;
+			default: return WGPUStencilOperation_Keep;
+		}
+	};
+
+	// --- Depth/stencil state ---
+	WGPUDepthStencilState ds = {};
+	WGPUDepthStencilState *ds_ptr = nullptr;
+	if (subpass.depth_stencil_reference.attachment != ATTACHMENT_UNUSED) {
+		uint32_t ds_att = (uint32_t)subpass.depth_stencil_reference.attachment;
+		ds.format = (ds_att < (uint32_t)rp->attachments.size())
+				? _data_format_to_wgpu(rp->attachments[ds_att].format)
+				: WGPUTextureFormat_Depth24Plus;
+
+		ds.depthWriteEnabled = p_depth_stencil_state.enable_depth_write
+				? WGPUOptionalBool_True
+				: WGPUOptionalBool_False;
+		ds.depthCompare = p_depth_stencil_state.enable_depth_test
+				? map_compare(p_depth_stencil_state.depth_compare_operator)
+				: WGPUCompareFunction_Always;
+
+		if (p_depth_stencil_state.enable_stencil) {
+			ds.stencilFront.compare = map_compare(p_depth_stencil_state.front_op.compare);
+			ds.stencilFront.failOp = map_stencil_op(p_depth_stencil_state.front_op.fail);
+			ds.stencilFront.depthFailOp = map_stencil_op(p_depth_stencil_state.front_op.depth_fail);
+			ds.stencilFront.passOp = map_stencil_op(p_depth_stencil_state.front_op.pass);
+			ds.stencilBack.compare = map_compare(p_depth_stencil_state.back_op.compare);
+			ds.stencilBack.failOp = map_stencil_op(p_depth_stencil_state.back_op.fail);
+			ds.stencilBack.depthFailOp = map_stencil_op(p_depth_stencil_state.back_op.depth_fail);
+			ds.stencilBack.passOp = map_stencil_op(p_depth_stencil_state.back_op.pass);
+			ds.stencilReadMask = p_depth_stencil_state.front_op.compare_mask;
+			ds.stencilWriteMask = p_depth_stencil_state.front_op.write_mask;
+		} else {
+			ds.stencilFront = { WGPUCompareFunction_Always, WGPUStencilOperation_Keep, WGPUStencilOperation_Keep, WGPUStencilOperation_Keep };
+			ds.stencilBack = { WGPUCompareFunction_Always, WGPUStencilOperation_Keep, WGPUStencilOperation_Keep, WGPUStencilOperation_Keep };
+			ds.stencilReadMask = 0xFF;
+			ds.stencilWriteMask = 0xFF;
+		}
+		if (p_rasterization_state.depth_bias_enabled) {
+			ds.depthBias = (int32_t)p_rasterization_state.depth_bias_constant_factor;
+			ds.depthBiasSlopeScale = p_rasterization_state.depth_bias_slope_factor;
+			ds.depthBiasClamp = p_rasterization_state.depth_bias_clamp;
+		}
+		ds_ptr = &ds;
+	}
+
+	// --- Blend factor/op helpers ---
+	auto blend_factor = [](BlendFactor f) -> WGPUBlendFactor {
+		switch (f) {
+			case BLEND_FACTOR_ZERO: return WGPUBlendFactor_Zero;
+			case BLEND_FACTOR_ONE: return WGPUBlendFactor_One;
+			case BLEND_FACTOR_SRC_COLOR: return WGPUBlendFactor_Src;
+			case BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return WGPUBlendFactor_OneMinusSrc;
+			case BLEND_FACTOR_DST_COLOR: return WGPUBlendFactor_Dst;
+			case BLEND_FACTOR_ONE_MINUS_DST_COLOR: return WGPUBlendFactor_OneMinusDst;
+			case BLEND_FACTOR_SRC_ALPHA: return WGPUBlendFactor_SrcAlpha;
+			case BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: return WGPUBlendFactor_OneMinusSrcAlpha;
+			case BLEND_FACTOR_DST_ALPHA: return WGPUBlendFactor_DstAlpha;
+			case BLEND_FACTOR_ONE_MINUS_DST_ALPHA: return WGPUBlendFactor_OneMinusDstAlpha;
+			case BLEND_FACTOR_CONSTANT_COLOR: return WGPUBlendFactor_Constant;
+			case BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR: return WGPUBlendFactor_OneMinusConstant;
+			case BLEND_FACTOR_CONSTANT_ALPHA: return WGPUBlendFactor_Constant;
+			case BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA: return WGPUBlendFactor_OneMinusConstant;
+			case BLEND_FACTOR_SRC_ALPHA_SATURATE: return WGPUBlendFactor_SrcAlphaSaturated;
+			default: return WGPUBlendFactor_Zero;
+		}
+	};
+	auto blend_op = [](BlendOperation op) -> WGPUBlendOperation {
+		switch (op) {
+			case BLEND_OP_ADD: return WGPUBlendOperation_Add;
+			case BLEND_OP_SUBTRACT: return WGPUBlendOperation_Subtract;
+			case BLEND_OP_REVERSE_SUBTRACT: return WGPUBlendOperation_ReverseSubtract;
+			case BLEND_OP_MINIMUM: return WGPUBlendOperation_Min;
+			case BLEND_OP_MAXIMUM: return WGPUBlendOperation_Max;
+			default: return WGPUBlendOperation_Add;
+		}
+	};
+
+	// --- Color targets (one per fragment shader @location()) ---
+	uint32_t color_target_count = p_color_attachments.size();
+	LocalVector<WGPUColorTargetState> color_targets;
+	LocalVector<WGPUBlendState> blend_states;
+	color_targets.resize(color_target_count);
+	blend_states.resize(color_target_count);
+	memset(color_targets.ptr(), 0, sizeof(WGPUColorTargetState) * color_target_count);
+	memset(blend_states.ptr(), 0, sizeof(WGPUBlendState) * color_target_count);
+
+	for (uint32_t i = 0; i < color_target_count; i++) {
+		// Get texture format from subpass color reference i.
+		WGPUTextureFormat fmt = WGPUTextureFormat_RGBA8Unorm; // Placeholder for unused slots.
+		if (i < (uint32_t)subpass.color_references.size()) {
+			int32_t att_idx = subpass.color_references[i].attachment;
+			if (att_idx != ATTACHMENT_UNUSED && (uint32_t)att_idx < (uint32_t)rp->attachments.size()) {
+				fmt = _data_format_to_wgpu(rp->attachments[att_idx].format);
+				if (fmt == WGPUTextureFormat_Undefined) {
+					fmt = WGPUTextureFormat_RGBA8Unorm;
+				}
+			}
+		}
+		color_targets[i].format = fmt;
+
+		if (p_color_attachments[i] == ATTACHMENT_UNUSED) {
+			color_targets[i].writeMask = WGPUColorWriteMask_None;
+			continue;
+		}
+
+		// Blend state from p_blend_state.attachments[i].
+		if (i < (uint32_t)p_blend_state.attachments.size()) {
+			const PipelineColorBlendState::Attachment &ba = p_blend_state.attachments[i];
+			WGPUColorWriteMask mask = WGPUColorWriteMask_None;
+			if (ba.write_r) { mask |= WGPUColorWriteMask_Red; }
+			if (ba.write_g) { mask |= WGPUColorWriteMask_Green; }
+			if (ba.write_b) { mask |= WGPUColorWriteMask_Blue; }
+			if (ba.write_a) { mask |= WGPUColorWriteMask_Alpha; }
+			color_targets[i].writeMask = mask;
+			if (ba.enable_blend) {
+				blend_states[i].color = { blend_op(ba.color_blend_op), blend_factor(ba.src_color_blend_factor), blend_factor(ba.dst_color_blend_factor) };
+				blend_states[i].alpha = { blend_op(ba.alpha_blend_op), blend_factor(ba.src_alpha_blend_factor), blend_factor(ba.dst_alpha_blend_factor) };
+				color_targets[i].blend = &blend_states[i];
+			}
+		} else {
+			color_targets[i].writeMask = WGPUColorWriteMask_All;
+		}
+	}
+
+	// --- Fragment state ---
+	WGPUFragmentState frag = {};
+	frag.module = shader->stage_modules[SHADER_STAGE_FRAGMENT];
+	frag.entryPoint = { "main", WGPU_STRLEN };
+	frag.targetCount = color_target_count;
+	frag.targets = color_targets.ptr();
+	if (!spec_entries.is_empty()) {
+		frag.constantCount = spec_entries.size();
+		frag.constants = spec_entries.ptr();
+	}
+
+	// --- Build and create render pipeline ---
+	WGPURenderPipelineDescriptor desc = {};
+	desc.layout = shader->pipeline_layout;
+	desc.vertex = vertex_state;
+	desc.primitive = primitive;
+	desc.depthStencil = ds_ptr;
+	desc.multisample = multisample;
+	if (frag.module) {
+		desc.fragment = &frag;
+	}
+
+	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
+	ERR_FAIL_COND_V_MSG(!pipeline, PipelineID(), "WebGPU: Failed to create render pipeline.");
+
+	WGPipelineWrapper *pw = new WGPipelineWrapper();
+	pw->type = WGPipelineWrapper::RENDER;
+	pw->render_handle = pipeline;
+	pw->shader = shader;
+	return PipelineID(pw);
 }
 
 // =============================================================================
@@ -1701,11 +2426,47 @@ void RenderingDeviceDriverWebGPU::command_compute_dispatch_indirect(CommandBuffe
 }
 
 RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) {
-	// TODO: Build WGPUComputePipelineDescriptor.
-	// TODO: Map specialization constants to WGPUConstantEntry.
-	// TODO: Call wgpuDeviceCreateComputePipeline().
-	WARN_PRINT_ONCE("WebGPU: compute_pipeline_create not yet implemented.");
-	return PipelineID();
+	WGShader *shader = (WGShader *)(p_shader.id);
+	ERR_FAIL_COND_V(!shader, PipelineID());
+	ERR_FAIL_COND_V_MSG(!shader->stage_modules[SHADER_STAGE_COMPUTE], PipelineID(),
+			"WebGPU: compute_pipeline_create called with a shader that has no compute stage.");
+
+	// Specialization constants.
+	LocalVector<WGPUConstantEntry> spec_entries;
+	LocalVector<CharString> spec_keys;
+	spec_entries.resize(p_specialization_constants.size());
+	spec_keys.resize(p_specialization_constants.size());
+	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
+		const PipelineSpecializationConstant &sc = p_specialization_constants[i];
+		spec_keys[i] = String::num_int64(sc.constant_id).utf8();
+		spec_entries[i] = {};
+		spec_entries[i].key = { spec_keys[i].get_data(), (size_t)spec_keys[i].length() };
+		if (sc.type == PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL) {
+			spec_entries[i].value = sc.bool_value ? 1.0 : 0.0;
+		} else if (sc.type == PIPELINE_SPECIALIZATION_CONSTANT_TYPE_FLOAT) {
+			spec_entries[i].value = (double)sc.float_value;
+		} else {
+			spec_entries[i].value = (double)sc.int_value;
+		}
+	}
+
+	WGPUComputePipelineDescriptor desc = {};
+	desc.layout = shader->pipeline_layout;
+	desc.compute.module = shader->stage_modules[SHADER_STAGE_COMPUTE];
+	desc.compute.entryPoint = { "main", WGPU_STRLEN };
+	if (!spec_entries.is_empty()) {
+		desc.compute.constantCount = spec_entries.size();
+		desc.compute.constants = spec_entries.ptr();
+	}
+
+	WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(device, &desc);
+	ERR_FAIL_COND_V_MSG(!pipeline, PipelineID(), "WebGPU: Failed to create compute pipeline.");
+
+	WGPipelineWrapper *pw = new WGPipelineWrapper();
+	pw->type = WGPipelineWrapper::COMPUTE;
+	pw->compute_handle = pipeline;
+	pw->shader = shader;
+	return PipelineID(pw);
 }
 
 // =============================================================================
