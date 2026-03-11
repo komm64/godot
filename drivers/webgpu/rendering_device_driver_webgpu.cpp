@@ -192,8 +192,8 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_device_address(BufferID p_buffe
 	return 0; // No device addresses in WebGPU.
 }
 
-WGPUBufferUsageFlags RenderingDeviceDriverWebGPU::_buffer_usage_to_wgpu(BitField<BufferUsageBits> p_usage) const {
-	WGPUBufferUsageFlags flags = 0;
+WGPUBufferUsage RenderingDeviceDriverWebGPU::_buffer_usage_to_wgpu(BitField<BufferUsageBits> p_usage) const {
+	WGPUBufferUsage flags = 0;
 	if (p_usage.has_flag(BUFFER_USAGE_TRANSFER_FROM_BIT)) {
 		flags |= WGPUBufferUsage_CopySrc;
 	}
@@ -394,8 +394,8 @@ bool RenderingDeviceDriverWebGPU::texture_can_make_shared_with_format(TextureID 
 	return true;
 }
 
-WGPUTextureUsageFlags RenderingDeviceDriverWebGPU::_texture_usage_to_wgpu(BitField<TextureUsageBits> p_usage) const {
-	WGPUTextureUsageFlags flags = 0;
+WGPUTextureUsage RenderingDeviceDriverWebGPU::_texture_usage_to_wgpu(BitField<TextureUsageBits> p_usage) const {
+	WGPUTextureUsage flags = 0;
 	if (p_usage.has_flag(TEXTURE_USAGE_SAMPLING_BIT)) {
 		flags |= WGPUTextureUsage_TextureBinding;
 	}
@@ -495,7 +495,7 @@ WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p
 	}
 }
 
-DataFormat RenderingDeviceDriverWebGPU::_wgpu_to_data_format(WGPUTextureFormat p_format) const {
+RDD::DataFormat RenderingDeviceDriverWebGPU::_wgpu_to_data_format(WGPUTextureFormat p_format) const {
 	// TODO: Full reverse mapping. For now, handle common cases.
 	switch (p_format) {
 		case WGPUTextureFormat_BGRA8Unorm: return DATA_FORMAT_B8G8R8A8_UNORM;
@@ -1020,10 +1020,12 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferTextureCopyRegion &region = p_regions[i];
 
-		WGPUTexelCopyBufferLayout src_layout = {};
-		src_layout.offset = region.buffer_offset;
-		src_layout.bytesPerRow = ((region.row_pitch + 255) / 256) * 256; // 256-byte aligned.
-		src_layout.rowsPerImage = region.texture_region_size.y;
+		// WGPUTexelCopyBufferInfo combines the buffer handle + layout (Dawn API)
+		WGPUTexelCopyBufferInfo src_info = {};
+		src_info.buffer = src->handle;
+		src_info.layout.offset = region.buffer_offset;
+		src_info.layout.bytesPerRow = ((region.row_pitch + 255) / 256) * 256; // 256-byte aligned.
+		src_info.layout.rowsPerImage = region.texture_region_size.y;
 
 		WGPUTexelCopyTextureInfo dst_copy = {};
 		dst_copy.texture = dst->handle;
@@ -1033,7 +1035,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 
 		WGPUExtent3D extent = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
 
-		wgpuCommandEncoderCopyBufferToTexture(cmd->encoder, &src_layout, &dst_copy, &extent);
+		wgpuCommandEncoderCopyBufferToTexture(cmd->encoder, &src_info, &dst_copy, &extent);
 	}
 }
 
@@ -1056,14 +1058,16 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 		src_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y, region.texture_subresource.layer };
 		src_copy.aspect = WGPUTextureAspect_All;
 
-		WGPUTexelCopyBufferLayout dst_layout = {};
-		dst_layout.offset = region.buffer_offset;
-		dst_layout.bytesPerRow = ((region.row_pitch + 255) / 256) * 256;
-		dst_layout.rowsPerImage = region.texture_region_size.y;
+		// WGPUTexelCopyBufferInfo combines the buffer handle + layout (Dawn API)
+		WGPUTexelCopyBufferInfo dst_info = {};
+		dst_info.buffer = dst->handle;
+		dst_info.layout.offset = region.buffer_offset;
+		dst_info.layout.bytesPerRow = ((region.row_pitch + 255) / 256) * 256;
+		dst_info.layout.rowsPerImage = region.texture_region_size.y;
 
 		WGPUExtent3D extent = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
 
-		wgpuCommandEncoderCopyTextureToBuffer(cmd->encoder, &src_copy, &dst_layout, &extent);
+		wgpuCommandEncoderCopyTextureToBuffer(cmd->encoder, &src_copy, &dst_info, &extent);
 	}
 }
 
@@ -1535,11 +1539,11 @@ void RenderingDeviceDriverWebGPU::command_begin_label(CommandBufferID p_cmd_buff
 	ERR_FAIL_NULL(cmd);
 
 	if (cmd->render_encoder) {
-		wgpuRenderPassEncoderPushDebugGroup(cmd->render_encoder, p_label_name);
+		wgpuRenderPassEncoderPushDebugGroup(cmd->render_encoder, WGPUStringView{ p_label_name, WGPU_STRLEN });
 	} else if (cmd->compute_encoder) {
-		wgpuComputePassEncoderPushDebugGroup(cmd->compute_encoder, p_label_name);
+		wgpuComputePassEncoderPushDebugGroup(cmd->compute_encoder, WGPUStringView{ p_label_name, WGPU_STRLEN });
 	} else if (cmd->encoder) {
-		wgpuCommandEncoderPushDebugGroup(cmd->encoder, p_label_name);
+		wgpuCommandEncoderPushDebugGroup(cmd->encoder, WGPUStringView{ p_label_name, WGPU_STRLEN });
 	}
 }
 
@@ -1564,11 +1568,11 @@ void RenderingDeviceDriverWebGPU::command_insert_breadcrumb(CommandBufferID p_cm
 	snprintf(marker, sizeof(marker), "breadcrumb_%u", p_data);
 
 	if (cmd->render_encoder) {
-		wgpuRenderPassEncoderInsertDebugMarker(cmd->render_encoder, marker);
+		wgpuRenderPassEncoderInsertDebugMarker(cmd->render_encoder, WGPUStringView{ marker, WGPU_STRLEN });
 	} else if (cmd->compute_encoder) {
-		wgpuComputePassEncoderInsertDebugMarker(cmd->compute_encoder, marker);
+		wgpuComputePassEncoderInsertDebugMarker(cmd->compute_encoder, WGPUStringView{ marker, WGPU_STRLEN });
 	} else if (cmd->encoder) {
-		wgpuCommandEncoderInsertDebugMarker(cmd->encoder, marker);
+		wgpuCommandEncoderInsertDebugMarker(cmd->encoder, WGPUStringView{ marker, WGPU_STRLEN });
 	}
 }
 

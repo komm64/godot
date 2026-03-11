@@ -57,6 +57,9 @@ private:
 #ifdef GLES3_ENABLED
 	EMSCRIPTEN_WEBGL_CONTEXT_HANDLE webgl_ctx = 0;
 #endif
+#ifdef WEBGPU_ENABLED
+	// WebGPU uses the RenderingDevice path; no display-server-level context handle needed.
+#endif
 
 	HashMap<int64_t, CharString> utterance_ids;
 

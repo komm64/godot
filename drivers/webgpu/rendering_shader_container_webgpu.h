@@ -94,13 +94,13 @@ public:
 	}
 
 	virtual ShaderLanguageVersion get_shader_language_version() const override {
-		// GLSL 4.50 is what Godot uses for RD shaders.
-		return ShaderLanguageVersion(4, 50);
+		// Vulkan-flavour GLSL 1.1 — same as the Vulkan driver.
+		return SHADER_LANGUAGE_VULKAN_VERSION_1_1;
 	}
 
 	virtual ShaderSpirvVersion get_shader_spirv_version() const override {
 		// SPIR-V 1.0 — maximum compatibility with Tint.
-		return ShaderSpirvVersion(1, 0);
+		return SHADER_SPIRV_VERSION_1_0;
 	}
 };
 

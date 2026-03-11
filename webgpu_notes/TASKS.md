@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 10, 2026
+> **Last Updated**: March 10, 2026 (Phase 1 build compiles clean — Emscripten 5.x fixes applied)
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -111,9 +111,14 @@
 ---
 
 ### Task 0.2: Wire Up Driver Registration `[SERIAL, after 0.1]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 2-3 hours
 **Dependencies**: Task 0.1
+
+**Completion Notes** (March 10, 2026):
+- Majority of this task was completed as part of Task 0.1.
+- Added `#ifdef WEBGPU_ENABLED` guard to `platform/web/display_server_web.h` (line after GLES3_ENABLED block)
+- `get_rendering_drivers_func()`, constructor guard, `main/main.cpp` and `display_server.cpp` changes all done in 0.1.
 
 **Instructions**:
 
@@ -150,9 +155,15 @@
 > **Goal**: Implement enough of the WebGPU driver to clear the screen to a solid color in a browser. This validates the entire pipeline: build → Emscripten → WebGPU init → surface → render pass → present.
 
 ### Task 1.1: WebGPU Internal Objects `[PARALLEL with 1.2]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 4-6 hours
 **Dependencies**: Phase 0
+
+**Completion Notes** (March 10, 2026):
+- All internal object types defined in `drivers/webgpu/webgpu_objects.h` (copied from `webgpu_notes/stubs/`)
+- Pixel format mapping complete in `drivers/webgpu/pixel_formats_webgpu.h`
+- Fixed Dawn API renames: `WGPUBufferUsageFlags` → `WGPUBufferUsage`, `WGPUTextureUsageFlags` → `WGPUTextureUsage`, `WGPUVertexFormat_Undefined` (removed) → `(WGPUVertexFormat)0`
+- Build compiles clean with `--use-port=emdawnwebgpu`
 
 **Instructions**:
 
@@ -212,9 +223,26 @@
 ---
 
 ### Task 1.2: Emscripten WebGPU Bootstrapping `[PARALLEL with 1.1]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 3-4 hours
 **Dependencies**: Phase 0
+
+**Completion Notes** (March 10, 2026):
+- **CRITICAL DISCOVERY**: Emscripten 5.0.0 is installed. `-sUSE_WEBGPU=1` was removed in Emscripten 5.x.
+  The new approach is `--use-port=emdawnwebgpu` (Dawn's WebGPU port). Updated `platform/web/detect.py`.
+- **API changes in Emscripten 5.x / Dawn webgpu.h**:
+  - `html5_webgpu.h` is GONE → replaced with `<emscripten/emscripten.h>` + `EM_ASM_PTR`
+  - `emscripten_webgpu_get_device()` is GONE → use `WebGPU.importJsDevice(gpuDevice)` JS utility
+  - Canvas surface struct: `WGPUSurfaceDescriptorFromCanvasHTMLSelector` → `WGPUEmscriptenSurfaceSourceCanvasHTMLSelector`
+  - `WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector` → `WGPUSType_EmscriptenSurfaceSourceCanvasHTMLSelector`
+  - All string params (`const char*`) are now `WGPUStringView` → use `WGPUStringView{str, WGPU_STRLEN}`
+  - `WGPUTexelCopyBufferLayout` (layout-only) + buffer ptr → `WGPUTexelCopyBufferInfo` (combined)
+  - `WGPUVertexFormat_Undefined` removed → use `(WGPUVertexFormat)0`
+  - `WGPUShaderSourceSPIRV` EXISTS in Dawn headers (good for SPIR-V shaders in Phase 2!)
+- Created `misc/dist/html/webgpu-full-size.html` — HTML shell with JS-side WebGPU device init
+- Modified `platform/web/js/engine/config.js` — added `preinitializedWebGPUDevice` property
+- Device acquisition in C++: `EM_ASM_PTR` calling `WebGPU["importJsDevice"](Module["preinitializedWebGPUDevice"])`
+- Build compiles and LINKS clean: `bin/godot.web.template_debug.wasm32.zip` produced ✓
 
 **Instructions**:
 
@@ -274,9 +302,16 @@
 ---
 
 ### Task 1.3: Context Driver Implementation `[SERIAL, after 1.1 + 1.2]`
-**Status**: `TODO`
+**Status**: `IN_PROGRESS`
 **Effort**: 4-6 hours
 **Dependencies**: Tasks 1.1, 1.2
+
+**In-Progress Notes** (March 10, 2026):
+- Stub implementation exists in `drivers/webgpu/rendering_context_driver_webgpu.cpp` — COMPILES CLEAN.
+- Device acquisition uses `EM_ASM_PTR` + `WebGPU["importJsDevice"]` pattern
+- Canvas surface uses renamed `WGPUEmscriptenSurfaceSourceCanvasHTMLSelector` struct
+- NOT YET TESTED in browser (requires next session)
+- Next: run in actual browser to verify surface creation and device initialization
 
 **Instructions**:
 
@@ -319,9 +354,15 @@ Reference: `drivers/metal/rendering_context_driver_metal.h` and `.mm`
 ---
 
 ### Task 1.4: Minimal Device Driver — Clear Screen `[SERIAL, after 1.3]`
-**Status**: `TODO`
+**Status**: `IN_PROGRESS`
 **Effort**: 8-12 hours
 **Dependencies**: Task 1.3
+
+**In-Progress Notes** (March 10, 2026):
+- Full stub implementation exists in `drivers/webgpu/rendering_device_driver_webgpu.cpp` — COMPILES CLEAN.
+- All 126 override finals defined (vs 121 pure virtuals in base class).
+- Most methods are stubs returning safe defaults. Needs real implementation.
+- Next: implement enough to see something in browser (swap chain, clear render pass)
 
 **Instructions**:
 

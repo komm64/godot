@@ -45,7 +45,7 @@ using RDD = RenderingDeviceDriver;
 struct WGBuffer {
 	WGPUBuffer handle = nullptr;
 	uint64_t size = 0;
-	WGPUBufferUsageFlags usage = 0;
+	WGPUBufferUsage usage = 0;
 	uint8_t *shadow_map = nullptr; // For CPU-side mapping emulation.
 	bool map_dirty = false;
 };
@@ -64,7 +64,7 @@ struct WGTexture {
 	uint32_t mipmaps = 1;
 	uint32_t layers = 1;
 	uint32_t sample_count = 1;
-	WGPUTextureUsageFlags usage = 0;
+	WGPUTextureUsage usage = 0;
 	bool is_from_swap_chain = false;
 };
 
@@ -79,7 +79,7 @@ struct WGTexture {
 struct WGVertexFormat {
 	struct Attribute {
 		uint32_t location = 0;
-		WGPUVertexFormat format = WGPUVertexFormat_Undefined;
+		WGPUVertexFormat format = (WGPUVertexFormat)0;
 		uint64_t offset = 0;
 		uint32_t binding = 0;
 	};

@@ -129,6 +129,16 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		gdextensionLibs: [],
 		/**
+		 * A pre-initialized WebGPU device to pass to the Emscripten module.
+		 * Required for WebGPU rendering. Must be set before engine init.
+		 * Used by emscripten_webgpu_get_device() in C++.
+		 *
+		 * @memberof EngineConfig
+		 * @default
+		 * @type {?GPUDevice}
+		 */
+		preinitializedWebGPUDevice: null,
+		/**
 		 * @ignore
 		 * @type {Array.<string>}
 		 */
@@ -268,6 +278,7 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		this.focusCanvas = parse('focusCanvas', this.focusCanvas);
 		this.serviceWorker = parse('serviceWorker', this.serviceWorker);
 		this.gdextensionLibs = parse('gdextensionLibs', this.gdextensionLibs);
+		this.preinitializedWebGPUDevice = parse('preinitializedWebGPUDevice', this.preinitializedWebGPUDevice);
 		this.fileSizes = parse('fileSizes', this.fileSizes);
 		this.emscriptenPoolSize = parse('emscriptenPoolSize', this.emscriptenPoolSize);
 		this.godotPoolSize = parse('godotPoolSize', this.godotPoolSize);
@@ -291,6 +302,8 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 			'noExitRuntime': false,
 			'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.gdextensionLibs),
 			'emscriptenPoolSize': this.emscriptenPoolSize,
+			// WebGPU: pass pre-initialized device if provided (for emscripten_webgpu_get_device()).
+			...(this.preinitializedWebGPUDevice ? { 'preinitializedWebGPUDevice': this.preinitializedWebGPUDevice } : {}),
 			'instantiateWasm': function (imports, onSuccess) {
 				function done(result) {
 					onSuccess(result['instance'], result['module']);

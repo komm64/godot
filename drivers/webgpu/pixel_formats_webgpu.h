@@ -579,7 +579,7 @@ static inline WGPUVertexFormat data_format_to_wgpu_vertex(RenderingDeviceCommons
 		case DF::DATA_FORMAT_A2B10G10R10_UNORM_PACK32: return WGPUVertexFormat_Unorm10_10_10_2;
 
 		default:
-			return WGPUVertexFormat_Undefined;
+			return (WGPUVertexFormat)0; // WGPUVertexFormat_Undefined was removed in Dawn
 	}
 }
 

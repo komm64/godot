@@ -33,7 +33,9 @@
 #include "rendering_context_driver_webgpu.h"
 #include "rendering_device_driver_webgpu.h"
 
-#include <emscripten/html5_webgpu.h>
+// html5_webgpu.h was removed in Emscripten 5.x when USE_WEBGPU was dropped.
+// Device is now imported via the emdawnwebgpu port using WebGPU.importJsDevice().
+#include <emscripten/emscripten.h>
 
 RenderingContextDriverWebGPU::RenderingContextDriverWebGPU() {
 }
@@ -58,10 +60,14 @@ RenderingContextDriverWebGPU::~RenderingContextDriverWebGPU() {
 }
 
 Error RenderingContextDriverWebGPU::initialize() {
-	// The WebGPU device must be pre-initialized in the JavaScript shell
-	// before the WASM module loads. We retrieve the already-initialized device here.
-	// See: webgpu_notes/stubs/webgpu_shell.js for the JS initialization code.
-	device = emscripten_webgpu_get_device();
+	// The HTML shell pre-initializes a GPUDevice and stores it in Module.preinitializedWebGPUDevice.
+	// We use the emdawnwebgpu port's WebGPU.importJsDevice() to wrap it in a C WGPUDevice handle.
+	// Note: WebGPU is the global JS library object injected by --use-port=emdawnwebgpu.
+	device = (WGPUDevice)(uintptr_t)EM_ASM_PTR({
+		var d = Module["preinitializedWebGPUDevice"];
+		if (!d) { return 0; }
+		return WebGPU["importJsDevice"](d);
+	});
 	ERR_FAIL_COND_V_MSG(device == nullptr, ERR_CANT_CREATE, "WebGPU: Failed to get pre-initialized device. Ensure JS shell calls navigator.gpu.requestDevice() before WASM.");
 
 	queue = wgpuDeviceGetQueue(device);
@@ -105,12 +111,13 @@ RenderingContextDriver::SurfaceID RenderingContextDriverWebGPU::surface_create(c
 		// For now, use default.
 	}
 
-	WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc = {};
-	canvas_desc.chain.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector;
-	canvas_desc.selector = canvas_selector;
+	// Emscripten 5.x / emdawnwebgpu renamed this struct.
+	WGPUEmscriptenSurfaceSourceCanvasHTMLSelector canvas_desc = {};
+	canvas_desc.chain.sType = WGPUSType_EmscriptenSurfaceSourceCanvasHTMLSelector;
+	canvas_desc.selector = WGPUStringView{ canvas_selector, WGPU_STRLEN };
 
 	WGPUSurfaceDescriptor surface_desc = {};
-	surface_desc.nextInChain = (const WGPUChainedStruct *)&canvas_desc;
+	surface_desc.nextInChain = (WGPUChainedStruct *)&canvas_desc;
 
 	// Note: We need an instance to create a surface. If we don't have one,
 	// create a minimal one. In Emscripten, the instance is a lightweight wrapper.

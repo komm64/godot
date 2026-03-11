@@ -71,8 +71,8 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	void _check_capabilities();
 	WGPUTextureFormat _data_format_to_wgpu(DataFormat p_format) const;
 	DataFormat _wgpu_to_data_format(WGPUTextureFormat p_format) const;
-	WGPUBufferUsageFlags _buffer_usage_to_wgpu(BitField<BufferUsageBits> p_usage) const;
-	WGPUTextureUsageFlags _texture_usage_to_wgpu(BitField<TextureUsageBits> p_usage) const;
+	WGPUBufferUsage _buffer_usage_to_wgpu(BitField<BufferUsageBits> p_usage) const;
+	WGPUTextureUsage _texture_usage_to_wgpu(BitField<TextureUsageBits> p_usage) const;
 	WGPUTextureDimension _texture_type_to_dimension(TextureType p_type) const;
 	WGPUTextureViewDimension _texture_type_to_view_dimension(TextureType p_type) const;
 

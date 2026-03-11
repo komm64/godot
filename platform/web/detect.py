@@ -260,7 +260,10 @@ def configure(env: "SConsEnvironment"):
 
     if env["webgpu"]:
         env.AppendUnique(CPPDEFINES=["WEBGPU_ENABLED", "RD_ENABLED"])
-        env.Append(LINKFLAGS=["-sUSE_WEBGPU=1"])
+        # Emscripten 4.0.10+ uses the emdawnwebgpu port; -sUSE_WEBGPU=1 was removed in 5.0.
+        # Pass --use-port=emdawnwebgpu to both CCFLAGS (for headers) and LINKFLAGS (for JS glue).
+        env.Append(CCFLAGS=["--use-port=emdawnwebgpu"])
+        env.Append(LINKFLAGS=["--use-port=emdawnwebgpu"])
 
     if env["javascript_eval"]:
         env.Append(CPPDEFINES=["JAVASCRIPT_EVAL_ENABLED"])
