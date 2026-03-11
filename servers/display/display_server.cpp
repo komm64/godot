@@ -45,6 +45,9 @@
 #if defined(METAL_ENABLED)
 #include "drivers/metal/rendering_context_driver_metal.h"
 #endif
+#if defined(WEBGPU_ENABLED)
+#include "drivers/webgpu/rendering_context_driver_webgpu.h"
+#endif
 
 DisplayServer *DisplayServer::singleton = nullptr;
 
@@ -2039,6 +2042,11 @@ bool DisplayServer::is_rendering_device_supported() {
 		GODOT_CLANG_WARNING_POP
 	}
 #endif
+#ifdef WEBGPU_ENABLED
+	if (rcd == nullptr) {
+		rcd = memnew(RenderingContextDriverWebGPU);
+	}
+#endif
 
 	if (rcd != nullptr) {
 		err = rcd->initialize();
@@ -2119,6 +2127,11 @@ bool DisplayServer::can_create_rendering_device() {
 		// Eliminate "RenderingContextDriverMetal is only available on iOS 14.0 or newer".
 		rcd = memnew(RenderingContextDriverMetal);
 		GODOT_CLANG_WARNING_POP
+	}
+#endif
+#ifdef WEBGPU_ENABLED
+	if (rcd == nullptr) {
+		rcd = memnew(RenderingContextDriverWebGPU);
 	}
 #endif
 

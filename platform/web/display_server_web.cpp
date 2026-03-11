@@ -996,6 +996,9 @@ void DisplayServerWeb::process_joypads() {
 
 Vector<String> DisplayServerWeb::get_rendering_drivers_func() {
 	Vector<String> drivers;
+#ifdef WEBGPU_ENABLED
+	drivers.push_back("webgpu");
+#endif
 #ifdef GLES3_ENABLED
 	drivers.push_back("opengl3");
 #endif
@@ -1124,6 +1127,14 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, WindowMode 
 	// Expose method for requesting quit.
 	godot_js_os_request_quit_cb(request_quit_callback);
 
+#ifdef WEBGPU_ENABLED
+	if (p_rendering_driver == "webgpu") {
+		// WebGPU device is pre-initialized by the JS shell before the WASM module loads.
+		// RenderingDevice is created in main/main.cpp using RenderingContextDriverWebGPU.
+		// No display-server-level rasterizer init needed here — the RD path handles everything.
+	} else
+#endif // WEBGPU_ENABLED
+	{
 #ifdef GLES3_ENABLED
 	bool webgl2_inited = false;
 	if (godot_js_display_has_webgl(2)) {
@@ -1153,6 +1164,7 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, WindowMode 
 #else
 	RasterizerDummy::make_current();
 #endif
+	} // end of webgpu else block
 
 	// JS Input interface (js/libs/library_godot_input.js)
 	godot_js_input_mouse_button_cb(&DisplayServerWeb::mouse_button_callback);

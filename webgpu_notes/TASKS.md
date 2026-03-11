@@ -43,10 +43,22 @@
 > **Goal**: Get WebGPU compilation wired into the build system. No driver code yet — just the scaffolding that compiles an empty driver with `scons platform=web webgpu=yes`.
 
 ### Task 0.1: Build System — SConstruct & detect.py `[SERIAL]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 2-3 hours
 **Dependencies**: None
-**Agent Notes**: This must be done first — all other tasks depend on it.
+**Agent Notes**: Completed March 10, 2026. All build system wiring done. Dry-run confirms all 3 webgpu driver files are picked up and glslang is enabled.
+
+**Completion Notes**:
+- Added `webgpu` BoolVariable to `SConstruct` after `metal` option
+- Updated `platform/web/detect.py` `get_flags()` to add `"supported": ["webgpu"]`
+- Updated `platform/web/detect.py` `configure()` to add WEBGPU_ENABLED, RD_ENABLED defines and -sUSE_WEBGPU=1 linker flag
+- Updated `modules/glslang/config.py` to enable glslang for WebGPU builds
+- Created `drivers/webgpu/` directory with all stub files (copied from `webgpu_notes/stubs/`)
+- Updated `drivers/SCsub` to include WebGPU driver with platform support check
+- Updated `servers/display/display_server.cpp` to include WebGPU context driver header and create RCD in `is_rendering_device_supported()` and `can_create_rendering_device()`
+- Updated `main/main.cpp` to add `rendering/rendering_device/driver.web`, add `webgpu` to `available_drivers`, and update `rendering_method.web` to support forward_plus/mobile
+- Updated `platform/web/display_server_web.cpp` to add `webgpu` to `get_rendering_drivers_func()` and add WebGPU init guard in constructor
+- Dry-run verified: `scons platform=web webgpu=yes opengl3=no -n` reads SConscript files without errors, queues all 3 WebGPU driver files + glslang for compilation
 
 **Instructions**:
 
