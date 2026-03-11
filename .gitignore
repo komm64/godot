@@ -397,3 +397,4 @@ $RECYCLE.BIN/
 *.generated.props
 .chat-history/
 *.uid
+tmp/

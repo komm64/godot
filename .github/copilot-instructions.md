@@ -4,6 +4,15 @@
 
 Add a WebGPU rendering driver to Godot 4.6, targeting browser export via Emscripten. The driver must implement the `RenderingDeviceDriver` / `RenderingContextDriver` / `RenderingShaderContainerFormat` interfaces (same as the Vulkan, D3D12, and Metal backends). Deadline: March 24, 2026.
 
+## File System Rules
+
+**Always save files inside this workspace.** Paths outside the workspace (e.g. `/tmp/`, `../`) require human approval for each write, which blocks automation. Use workspace-relative equivalents instead:
+
+- Use `./tmp/` instead of `/tmp/` — already in `.gitignore`, safe for scratch files
+- Use `./foo/` instead of `../foo/`, and add `./foo/` to `.gitignore` if it should not be committed
+
+This applies to commit message files, build logs, temp scripts, and any other scratch output.
+
 ## Read These First
 
 All design decisions, API mappings, and tasks are documented in `webgpu_notes/`:
@@ -43,8 +52,8 @@ modules/glslang/          ← GLSL→SPIR-V (needs webgpu added to can_build())
 2. **Subpasses:** Flattened — each Godot subpass becomes a separate `WGPURenderPassEncoder`. See `DESIGN.md` Section 6.
 3. **Barriers:** All no-ops — WebGPU tracks hazards automatically.
 4. **Buffer mapping:** Shadow CPU buffer pattern — maintain a CPU copy, flush via `wgpuQueueWriteBuffer` on unmap.
-5. **Device init:** JS shell pre-initializes WebGPU; C++ retrieves it via `emscripten_webgpu_get_device()`.
-6. **Shader translation:** GLSL → SPIR-V (glslang) → WGSL (Tint from Dawn). See `DESIGN.md` Section 7.
+5. **Device init:** JS shell stores a pre-initialized `GPUDevice` in `Module["preinitializedWebGPUDevice"]`; C++ retrieves it via `EM_ASM_PTR({ return WebGPU["importJsDevice"](Module["preinitializedWebGPUDevice"]); })`. (`emscripten_webgpu_get_device()` and `html5_webgpu.h` were removed in Emscripten 5.x.)
+6. **Shader translation:** GLSL → SPIR-V (glslang) → passed directly as `WGPUShaderSourceSPIRV` (Dawn's `webgpu.h` supports SPIR-V natively; no WGSL/Tint translation step needed).
 
 ## WebGPU Constraints to Keep in Mind
 
@@ -59,12 +68,12 @@ modules/glslang/          ← GLSL→SPIR-V (needs webgpu added to can_build())
 
 ## Phase Status
 
-Check `webgpu_notes/TASKS.md` for current phase. As of project start:
-- **Phase 0 (Day 1):** Build system + driver registration → see `BUILD_BLOCKERS.md`
-- **Phase 1 (Days 2–4):** Core skeleton — copy stubs, boot Emscripten, clear screen
-- **Phase 2 (Days 5–7):** Resources (shaders, buffers, textures, pipelines)
-- **Phase 3 (Days 8–10):** 3D, compute, timestamps
-- **Phase 4–5 (Days 11–14):** Export, HTML shell, testing
+Check `webgpu_notes/TASKS.md` for current phase. Current state as of March 10, 2026 (Day 1):
+- **Phase 0 (Day 1):** ✅ DONE — Build system wiring + driver registration committed
+- **Phase 1 (Days 2–4):** 🔄 IN PROGRESS — Compiles clean; Tasks 1.1 + 1.2 done; 1.3/1.4 (browser runtime + clear screen) next
+- **Phase 2 (Days 5–7):** TODO — Resources (shaders, buffers, textures, pipelines)
+- **Phase 3 (Days 8–10):** TODO — 3D, compute, timestamps
+- **Phase 4–5 (Days 11–14):** TODO — Export, HTML shell, testing
 
 ## Build Commands
 
@@ -81,7 +90,14 @@ python misc/scripts/check_style.py
 
 ## Emscripten Notes
 
-- Requires Emscripten 4.0.0+: `emcc --version`
-- WebGPU flag: `-sUSE_WEBGPU=1`  
-- Device retrieval: `#include <emscripten/html5_webgpu.h>` → `emscripten_webgpu_get_device()`
-- Surface from canvas: `WGPUSurfaceDescriptorFromCanvasHTMLSelector` with `selector = "#canvas"`
+- **Installed version: Emscripten 5.0.0** (at `/Users/dwalter/Documents/projects/godot/emsdk`)
+- WebGPU is provided via the emdawnwebgpu port (Dawn). `-sUSE_WEBGPU=1` was **removed** in Emscripten 5.x.
+- Build flag (both CCFLAGS and LINKFLAGS): `--use-port=emdawnwebgpu`
+- Dawn webgpu.h is at: `emsdk/upstream/emscripten/cache/ports/emdawnwebgpu/emdawnwebgpu_pkg/webgpu/include/webgpu/webgpu.h`
+- `html5_webgpu.h` and `emscripten_webgpu_get_device()` **do not exist** in Emscripten 5.x — use `EM_ASM_PTR` (see Decision #5)
+- Surface from canvas: `WGPUEmscriptenSurfaceSourceCanvasHTMLSelector` (renamed from `WGPUSurfaceDescriptorFromCanvasHTMLSelector`), sType: `WGPUSType_EmscriptenSurfaceSourceCanvasHTMLSelector`
+- All string parameters use `WGPUStringView{const char* data, size_t length}`. Use `WGPU_STRLEN = SIZE_MAX` for null-terminated strings.
+- `WGPUBufferUsage` / `WGPUTextureUsage` (the `Flags` suffix was dropped in Dawn)
+- `WGPUTexelCopyBufferInfo = {WGPUTexelCopyBufferLayout layout; WGPUBuffer buffer;}` — copy functions take this combined struct
+- `WGPUVertexFormat_Undefined` was removed — use `(WGPUVertexFormat)0`
+- Source Emscripten before building: `source /Users/dwalter/Documents/projects/godot/emsdk/emsdk_env.sh`
