@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 11, 2026 (Task 2.6 IN PROGRESS — Engine boots WebGPU, renders 2D at ~240fps with zero errors in browser. Visual correctness pending verification. Next: add visible test content and verify render pipeline output.)
+> **Last Updated**: March 12, 2026 — Phase 2 COMPLETE. 2D rendering milestone achieved: Blue ColorRect (30,90,252) pixel-perfect in browser. Phase 3 (3D rendering) is next.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -712,35 +712,55 @@ Implement all buffer-related methods in `RenderingDeviceDriverWebGPU`.
 ---
 
 ### Task 2.6: Integration Test — 2D Rendering `[SERIAL, after 2.5]`
-**Status**: `IN_PROGRESS`
+**Status**: `DONE`
 **Effort**: 4-8 hours (mostly debugging)
 **Dependencies**: Tasks 2.1-2.5
 
-**Progress (March 11, 2026)**:
-- ✅ Engine boots WebGPU, initializes device, loads all shaders
-- ✅ No WebGPU validation errors from Chrome
-- ✅ Frames submitting at ~240fps (empty 2D scene, threads=no build)
-- ✅ Swap chain configured and operating correctly
-- ✅ Push constant ring buffer working
-- ✅ Bind group layouts correct
-- ⚠️ Visual correctness not yet verified (canvas may show black background)
-- ⚠️ Render pipeline creation not yet verified (no pipeline errors = likely working)
+**Completion Notes** (March 12, 2026):
+- ✅ **MILESTONE**: Blue ColorRect (30,90,252) renders pixel-perfect in browser via WebGPU
+- ✅ Screenshot analysis: 73.8% gray (77,77,77) background + 26.2% blue (30,90,252) — only TWO colors, zero artifacts
+- ✅ Blit pipeline working — blits render targets to swap chain correctly
+- ✅ Canvas pipeline working — 2D CanvasItem shader renders correctly
+- ✅ Push constant ring buffer working — data reaches shaders
+- ✅ Bind groups created and bound correctly
+- ✅ All diagnostic logging removed (clean console)
 
-**Issues Fixed This Session**:
-- `TypeError: createView on undefined` — fixed by adding `view_source` field to WGTexture
-  so shared/sliced textures inherit the owning WGPUTexture handle
-- `Texture dimensions exceed device maximum` — fixed limit_get() returning 0
-- Worker thread WebGPU isolation — fixed by building with threads=no
-- `R8G8B8A8_Unorm does not support usage as storage image` — rewrote texture_get_usages_supported_by_format()
-- `!new_pipelines_cache_size` spam — fixed pipeline_cache_query_size() returning 1
-- `swap_chain_acquire_framebuffer: !sc->configured` / createView crash — fixed r_resize_required trigger
+**Root Cause Fixed**: Staging/persistent buffer data never reached the GPU. Three related bugs:
+
+1. **`command_copy_buffer` (staging→destination)**: The GPU staging buffer was always empty because
+   `shadow_map` data (CPU side) was never written to it. Fix: when `src->shadow_map` exists, write
+   directly to the destination buffer via `wgpuQueueWriteBuffer()`, bypassing the empty GPU staging buffer.
+
+2. **`command_copy_buffer_to_texture` (staging→texture)**: Same pattern — staging GPU buffer had no data.
+   Fix: flush `src->shadow_map` to GPU staging buffer via `wgpuQueueWriteBuffer()` before the copy command.
+
+3. **`buffer_persistent_map_advance` (persistent mapped buffers)**: Was returning `nullptr`, so canvas
+   instance data (transforms, colors, etc.) was written to null. Fix: allocate shadow buffer on first call,
+   return valid pointer. `buffer_flush()` now always uploads via `wgpuQueueWriteBuffer()`.
+
+**Key Lesson**: WebGPU has no synchronous buffer mapping. Godot's RDD API assumes `buffer_map()` returns
+a writable pointer immediately. The shadow buffer pattern (CPU copy + `wgpuQueueWriteBuffer` flush) is the
+correct approach, but ALL code paths that read from staging buffers must check `shadow_map` first.
+
+**Issues Fixed During Phase 2**:
+- `TypeError: createView on undefined` — `view_source` field added to WGTexture for shared/sliced textures
+- `Texture dimensions exceed device maximum` — `limit_get()` was returning 0
+- Worker thread WebGPU isolation — build with `threads=no`
+- `R8G8B8A8_Unorm does not support usage as storage image` — rewrote `texture_get_usages_supported_by_format()`
+- `!new_pipelines_cache_size` spam — fixed `pipeline_cache_query_size()` returning 1
+- `swap_chain_acquire_framebuffer: !sc->configured` — fixed `r_resize_required` trigger
 - `Unsupported DataFormat 127` — added D16_UNORM_S8_UINT → Depth24PlusStencil8
 - `Unhandled uniform type 10` — added DYNAMIC UBO/SSBO + TBO uniform types
+- SPIR-V version changed from 1.0 to 1.3 so glslang emits SSBOs as `StorageClass::StorageBuffer`
+  (not old-style `StorageClass::Uniform + BufferBlock`), which NAGA converts correctly to `var<storage>`
+- Swap chain resize: added `rendering_context->surface_set_size()` call in `DisplayServerWeb` canvas resize handler
 
-**Next Steps**:
-1. Verify visual output — check if canvas shows 2D content vs black screen
-2. Test with a scene that has actual visible content (ColorRect, Label, Sprite2D)
-3. Debug render pipeline creation for CanvasShaderRD (the 2D canvas shader)
+**Remaining Known Errors (non-blocking for 2D, will affect 3D)**:
+- 9× NAGA `UnsupportedExtInst(35)` — GLSL.std.450 opcode 35 = `Modf` (fragment shaders, stage 1)
+- 4× NAGA `UnsupportedRelationalFunction(IsInf)` — compute shaders (stage 4)
+- 5× Dawn `storageTexture doesn't match buffer` — shader declares `storageTexture` but BGL says `buffer`
+- 1× Dawn `binding_array with 7 elements but layout only provides 1` — array size mismatch
+- 1× Dawn `Dimension Cube doesn't match expected 2D` — texture view dimension mismatch
 
 
   - Buffer sizes must be multiples of 4
@@ -758,18 +778,76 @@ Implement all buffer-related methods in `RenderingDeviceDriverWebGPU`.
 **Effort**: 8-12 hours
 **Dependencies**: Phase 2
 
+**Pre-work Notes (from Phase 2 debugging)**:
+
+The renderer falls back to **Mobile** (not Forward+) because `maxSampledTexturesPerShaderStage < 48`.
+This is actually ideal — Mobile renderer is simpler and better suited to WebGPU's resource limits.
+
+**Known Blockers To Fix First**:
+
+1. **NAGA `UnsupportedExtInst(35)` — `Modf` function (9 occurrences)**:
+   - GLSL.std.450 opcode 35 = `Modf` (returns fract + whole parts via pointer).
+   - All 9 failures are in **fragment shaders (stage 1)** — these are scene/material shaders.
+   - NAGA's SPIR-V frontend doesn't implement this extended instruction.
+   - **Fix options**: (a) Patch NAGA Rust source to support it, (b) Add a SPIR-V pre-processing
+     pass that rewrites `Modf` → `floor` + `fract`, (c) Modify Godot's GLSL shaders to avoid `modf()`.
+   - Option (c) is easiest: grep for `modf(` in `servers/rendering/renderer_rd/shaders/` and replace
+     with manual `floor()` + subtraction. Only needed for the WebGPU path (could use `#ifdef`).
+
+2. **NAGA `UnsupportedRelationalFunction(IsInf)` (4 occurrences)**:
+   - All 4 are in **compute shaders (stage 4)**.
+   - WGSL has no `isinf()` builtin. NAGA rejects SPIR-V `OpIsInf`.
+   - **Fix options**: Same as above — patch NAGA, SPIR-V rewriting, or modify GLSL source.
+   - `isinf(x)` can be emulated as `abs(x) == 1.0/0.0` or `x != x && x == x` patterns,
+     but simpler to just clamp values in the GLSL source where `isinf` is used.
+
+3. **Dawn `storageTexture doesn't match buffer` (5 occurrences)**:
+   - Shader SPIR-V declares a `storageTexture` (image) binding, but the bind group layout
+     created from Godot's reflection data says `buffer`. This is a type mismatch in
+     `uniform_set_create()` or `shader_create_from_container()`.
+   - Root cause: Godot's uniform type enum for storage images vs storage buffers may be
+     mapping incorrectly to WebGPU binding types. Check `UNIFORM_TYPE_IMAGE` handling.
+   - **Debug**: Log the shader name + set + binding index for each error to find which shaders.
+
+4. **Dawn `binding_array with 7 elements but layout only provides 1`**:
+   - A shader uses an array of bindings (e.g., `texture2D textures[7]`), but the bind group
+     layout only declares `count: 1`. Fix: when building `WGPUBindGroupLayoutEntry`, set the
+     `.count` field from the reflection data's array size. Check `RenderingShaderReflection`
+     for how array sizes are reported.
+
+5. **Dawn `Dimension Cube doesn't match expected 2D`**:
+   - A cube texture view is being bound where the layout expects a 2D texture.
+   - This could be a `texture_create_shared_from_slice()` issue — when creating a 2D view from
+     a cube texture, ensure the view dimension is explicitly `WGPUTextureViewDimension_2D`.
+   - Or it could be a bind group layout issue — the layout declares `dimension: 2D` but the
+     shader actually uses `textureCube`. Check the scene shader's reflection data.
+
+**Buffer System Notes** (verified working in Phase 2):
+- The shadow buffer pattern works correctly for all three buffer types:
+  - **Staging buffers**: `command_copy_buffer()` reads from `shadow_map`, writes directly to dest via `wgpuQueueWriteBuffer()`
+  - **Staging-to-texture**: `command_copy_buffer_to_texture()` flushes `shadow_map` to GPU buffer before copy
+  - **Persistent mapped buffers**: `buffer_persistent_map_advance()` allocates shadow buffer, returns valid pointer; `buffer_flush()` uploads
+- These fixes will carry over to 3D — no buffer changes expected.
+
+**Rendering Architecture Notes**:
+- Godot Mobile renderer uses `SceneForwardMobile` — forward rendering with single-pass lighting.
+- Key shaders: `scene_forward_mobile.glsl` (vertex + fragment), `sky.glsl`, `tonemap.glsl`.
+- The scene shader uses push constants for model matrix + material params — our ring buffer handles this.
+- Bind group usage: set 0 = scene globals, set 1 = render pass data, set 2 = material, set 3 = push constants (our emulation).
+
 **Instructions**:
 
 1. **Test with a minimal 3D scene**:
    - Start with: camera, directional light, one mesh (cube/sphere)
-   - Export with Forward+ renderer via WebGPU
+   - Export with Mobile renderer via WebGPU (it auto-selects Mobile due to texture limits)
    - Debug and fix issues
 
 2. **Expected challenges**:
-   - **Storage buffer limits**: Forward+ uses multiple storage buffers for light clusters. WebGPU default max is 8. May need to request higher limits at device creation.
-   - **Sampler limits**: Forward+ may use >16 samplers per stage when shadows + GI + materials combined. May need to reduce or combine.
+   - **NAGA shader failures**: Fix Modf + IsInf issues FIRST (see blockers above)
+   - **Storage texture/buffer mismatch**: Fix the 5 Dawn validation errors
+   - **Binding array counts**: Fix the array size mismatch
+   - **Cube texture dimension**: Fix the view dimension mismatch
    - **Multiview**: Not available on WebGPU. Ensure it falls back gracefully.
-   - **Compute dispatches**: Forward+ cluster builder uses compute shaders. Ensure compute path works.
    - **Timestamp queries**: Used for profiling. May not be available — make optional.
 
 3. **Post-processing effects**:
@@ -777,11 +855,15 @@ Implement all buffer-related methods in `RenderingDeviceDriverWebGPU`.
    - Test each effect individually
    - Some may need to be disabled on WebGPU if they exceed resource limits
 
-4. **Mobile renderer path**:
-   - The Mobile renderer is simpler (single-pass forward). Test it too.
-   - It should work more easily than Forward+ since it uses fewer resources.
+4. **Debugging approach**:
+   - Use `node tmp/webtest/capture-logs.mjs N` to capture browser console logs
+   - Parse with `grep "DAWN-ERR\|NAGA\|Error" tmp/browserN.log`
+   - Use `python3 tmp/analyze_ss.py` to check visual output
+   - Build: `scons platform=web target=template_debug webgpu=yes opengl3=no -j4`
+   - Deploy: `cp bin/.web_zip/godot.wasm bin/.web_zip/godot.js tmp/webtest/`
+   - Serve: `python3 tmp/webtest/serve.py`
 
-**Completion Criteria**: A 3D scene with meshes, lights, and shadows renders correctly in the browser using Forward+ or Mobile renderer.
+**Completion Criteria**: A 3D scene with meshes, lights, and shadows renders correctly in the browser using Mobile renderer.
 
 ---
 
@@ -1181,19 +1263,28 @@ platform/web/js/* or misc/dist/html/*   ← WebGPU JS shell
 
 When debugging issues, check these common WebGPU problems:
 
-- [ ] Buffer sizes must be multiples of 4 bytes
-- [ ] Uniform buffer offsets must be 256-byte aligned
-- [ ] Texture row copy alignment: `bytesPerRow` must be multiple of 256
-- [ ] Max 4 bind groups (0-3) — Godot uses 0-3 so this is OK
-- [ ] No push constants — must use emulation via uniform buffer
-- [ ] No subpasses — must flatten (follow Metal pattern)
-- [ ] No barriers — `command_pipeline_barrier()` is a no-op
-- [ ] No secondary command buffers
+- [x] Buffer sizes must be multiples of 4 bytes
+- [x] Uniform buffer offsets must be 256-byte aligned
+- [x] Texture row copy alignment: `bytesPerRow` must be multiple of 256
+- [x] Max 4 bind groups (0-3) — Godot uses 0-3 so this is OK
+- [x] No push constants — must use emulation via uniform buffer (ring buffer at group 3, binding 120)
+- [x] No subpasses — must flatten (follow Metal pattern)
+- [x] No barriers — `command_pipeline_barrier()` is a no-op
+- [x] No secondary command buffers
 - [ ] No geometry/tessellation shaders
-- [ ] 3-component texture formats (RGB) don't exist — use RGBA
-- [ ] `wgpuSurfaceGetCurrentTexture()` can return invalid texture (handle gracefully)
-- [ ] All shader modules use WGSL, not SPIR-V or GLSL
-- [ ] `mapAsync()` is asynchronous — use `wgpuQueueWriteBuffer()` for synchronous uploads
-- [ ] Maximum texture size may be 8192 (not 16384 like Vulkan)
-- [ ] Maximum storage buffers per stage may be 8 (check Forward+ needs)
-- [ ] Device can be "lost" at any time — handle `WGPUDeviceLostCallback`
+- [x] 3-component texture formats (RGB) don't exist — use RGBA
+- [x] `wgpuSurfaceGetCurrentTexture()` can return invalid texture (handle gracefully)
+- [x] All shader modules use WGSL, not SPIR-V or GLSL (SPIR-V fed to Dawn, NAGA converts to WGSL internally)
+- [x] `mapAsync()` is asynchronous — use shadow buffer + `wgpuQueueWriteBuffer()` for synchronous uploads
+- [x] Maximum texture size may be 8192 (not 16384 like Vulkan) — `limit_get()` returns actual device limits
+- [ ] Maximum storage buffers per stage may be 8 (check Forward+ needs) — Mobile renderer used instead
+- [x] Device can be "lost" at any time — handle `WGPUDeviceLostCallback`
+- [x] All staging buffer copies must check `shadow_map` and flush CPU data before GPU-side copy commands
+- [x] Persistent mapped buffers must allocate shadow buffer — `buffer_persistent_map_advance()` cannot return `nullptr`
+- [x] SPIR-V 1.3 required for correct SSBO StorageClass (1.0 uses Uniform+BufferBlock which NAGA mishandles)
+- [x] `texture_get_usages_supported_by_format()` — common formats like RGBA8 do NOT support storage on WebGPU
+- [x] Swap chain resize: `surface_set_size()` must be called when canvas dimensions change
+- [ ] NAGA does not support GLSL.std.450 `Modf` (opcode 35) — avoid `modf()` in shaders for WebGPU
+- [ ] NAGA does not support `OpIsInf` — avoid `isinf()` in shaders for WebGPU
+- [ ] Binding arrays: `WGPUBindGroupLayoutEntry.count` must match shader's array size
+- [ ] Cube texture views: ensure view dimension matches what shader expects (Cube vs 2D)

@@ -68,11 +68,11 @@ modules/glslang/          ← GLSL→SPIR-V (needs webgpu added to can_build())
 
 ## Phase Status
 
-Check `webgpu_notes/TASKS.md` for current phase. Current state as of March 10, 2026 (Day 1):
+Check `webgpu_notes/TASKS.md` for current phase. Current state as of March 12, 2026:
 - **Phase 0 (Day 1):** ✅ DONE — Build system wiring + driver registration committed
-- **Phase 1 (Days 2–4):** 🔄 IN PROGRESS — Compiles clean; Tasks 1.1 + 1.2 done; 1.3/1.4 (browser runtime + clear screen) next
-- **Phase 2 (Days 5–7):** TODO — Resources (shaders, buffers, textures, pipelines)
-- **Phase 3 (Days 8–10):** TODO — 3D, compute, timestamps
+- **Phase 1 (Days 2–4):** ✅ DONE — Core driver skeleton, WebGPU bootstrapping, context driver, swap chain
+- **Phase 2 (Days 5–7):** ✅ DONE — Shaders, buffers, textures, samplers, uniform sets, pipelines, 2D rendering
+- **Phase 3 (Days 8–10):** 🔄 IN PROGRESS — 3D rendering, compute shaders, timestamps
 - **Phase 4–5 (Days 11–14):** TODO — Export, HTML shell, testing
 
 ## Build Commands
