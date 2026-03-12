@@ -63,16 +63,16 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 
 	// Decide push constant bind group slot.
 	if (p_shader.push_constant_size > 0) {
-		// Convention: push constants use bind group 3, binding 0.
-		// Godot shaders use sets 0–3 for uniforms, but set 3 is reserved for
-		// material params. The ring-buffer push constant emulation also uses
-		// group 3, binding 0 — this matches the SPIR-V layout Godot generates
-		// for push_constant blocks (std430, set=-1/push_constant in Vulkan).
+		// Convention: push constants use bind group 3, binding PUSH_CONSTANT_RING_BINDING (120).
+		// Chosen high enough to avoid collision with split combined-sampler bindings
+		// (original binding N → sampler@N*2, image@N*2+1; max reasonable N ~20 → max~41).
+		// Must match PC_RING_BUFFER_BINDING in tmp/naga-converter/src/lib.rs
+		// and PUSH_CONSTANT_RING_BINDING in rendering_device_driver_webgpu.h.
 		header_data.push_constant_bind_group = 3;
-		header_data.push_constant_binding = 0;
+		header_data.push_constant_binding = 120; // PUSH_CONSTANT_RING_BINDING
 	} else {
 		header_data.push_constant_bind_group = RenderingShaderContainerWebGPU::NO_PUSH_CONSTANTS;
-		header_data.push_constant_binding = 0;
+		header_data.push_constant_binding = 120; // PUSH_CONSTANT_RING_BINDING
 	}
 
 	return true;

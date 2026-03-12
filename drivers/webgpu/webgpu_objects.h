@@ -109,6 +109,9 @@ struct WGShader {
 	uint32_t push_constant_bind_group = UINT32_MAX; // UINT32_MAX = no push constants.
 	uint32_t push_constant_binding = 0;
 	BitField<RDD::ShaderStage> push_constant_stages;
+	// Merged bind group layout for the PC group when it also has material uniforms.
+	// nullptr = PC group has no other uniforms; pipeline uses the universal PC-only layout.
+	WGPUBindGroupLayout merged_pc_group_layout = nullptr;
 
 	// Reflection data for uniform set creation:
 	//   bind_group_infos[set_index].entries[binding_index] → layout entry + Godot type.
@@ -220,6 +223,9 @@ struct WGCommandBuffer {
 	uint8_t push_constant_data[MAX_PUSH_CONSTANT_SIZE] = {};
 	uint32_t push_constant_data_len = 0;
 	bool push_constants_dirty = false;
+	// Combined bind group for the PC group (includes both material resources and PC ring buffer).
+	// Updated by command_bind_render_uniform_sets when the PC group is bound.
+	WGPUBindGroup current_pc_bind_group = nullptr;
 
 	// Render state tracking.
 	struct RenderState {

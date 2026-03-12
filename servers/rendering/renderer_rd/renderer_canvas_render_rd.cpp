@@ -678,7 +678,9 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 
 		Transform3D screen_transform;
 		screen_transform.translate_local(-(ssize.width / 2.0f), -(ssize.height / 2.0f), 0.0f);
-		screen_transform.scale(Vector3(2.0f / ssize.width, 2.0f / ssize.height, 1.0f));
+		// Vulkan NDC: y=-1 is TOP. WebGPU NDC: y=+1 is TOP. Negate y for WebGPU.
+		const float y_scale = (RD::get_singleton()->get_device_api_name() == "WebGPU") ? -2.0f / ssize.height : 2.0f / ssize.height;
+		screen_transform.scale(Vector3(2.0f / ssize.width, y_scale, 1.0f));
 		_update_transform_to_mat4(screen_transform, state_buffer.screen_transform);
 		_update_transform_2d_to_mat4(p_canvas_transform, state_buffer.canvas_transform);
 
@@ -3012,10 +3014,10 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 		const RID *uniform_set = rid_set_to_uniform_set.getptr(key);
 		if (uniform_set == nullptr) {
 			RD::Uniform *uniform_ptrw = state.batch_texture_uniforms.ptrw();
-			uniform_ptrw[0] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 0, p_batch->tex_info->diffuse);
-			uniform_ptrw[1] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_batch->tex_info->normal);
-			uniform_ptrw[2] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_batch->tex_info->specular);
-			uniform_ptrw[3] = RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3, p_batch->tex_info->sampler);
+			uniform_ptrw[0] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 1, p_batch->tex_info->diffuse);
+			uniform_ptrw[1] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 2, p_batch->tex_info->normal);
+			uniform_ptrw[2] = RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 3, p_batch->tex_info->specular);
+			uniform_ptrw[3] = RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 4, p_batch->tex_info->sampler);
 
 			RID rid = RD::get_singleton()->uniform_set_create(state.batch_texture_uniforms, shader.default_version_rd_shader, BATCH_UNIFORM_SET);
 			ERR_FAIL_COND_MSG(rid.is_null(), "Failed to create uniform set for batch.");

@@ -62,6 +62,11 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	WGPUBuffer push_constant_ring_buffer = nullptr;
 	static constexpr uint32_t PUSH_CONSTANT_RING_SIZE = 256 * 1024; // 256KB = 1024 draw calls at 256B/slot
 	static constexpr uint32_t PUSH_CONSTANT_SLOT_ALIGNMENT = 256;
+	// Binding slot used for the PC ring buffer inside group 3.
+	// Must match PC_RING_BUFFER_BINDING in tmp/naga-converter/src/lib.rs.
+	// Chosen high enough to avoid collision with split combined-sampler bindings
+	// (original binding N → sampler@N*2, image@N*2+1; max original ~20 → max split ~41).
+	static constexpr uint32_t PUSH_CONSTANT_RING_BINDING = 120;
 	uint32_t push_constant_ring_offset = 0;
 
 	// Universal push constant bind group layout: group N, binding 0,

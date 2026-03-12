@@ -85,22 +85,22 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	{
 		WGPUBufferDescriptor desc = {};
 		desc.size = PUSH_CONSTANT_RING_SIZE;
-		desc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+		desc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
 		desc.mappedAtCreation = false;
 		push_constant_ring_buffer = wgpuDeviceCreateBuffer(device, &desc);
 		ERR_FAIL_COND_V(push_constant_ring_buffer == nullptr, ERR_CANT_CREATE);
 	}
 
 	// Create a universal push constant bind group layout:
-	//   binding 0, all stages, uniform buffer with dynamic offset.
+	//   PUSH_CONSTANT_RING_BINDING, all stages, uniform buffer with dynamic offset.
 	// All shaders with push constants use this same layout for their push
 	// constant slot in the pipeline layout (hasDynamicOffset=true allows
 	// reusing one bind group with different ring buffer offsets per draw).
 	{
 		WGPUBindGroupLayoutEntry pc_entry = {};
-		pc_entry.binding = 0;
+		pc_entry.binding = PUSH_CONSTANT_RING_BINDING;
 		pc_entry.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment | WGPUShaderStage_Compute;
-		pc_entry.buffer.type = WGPUBufferBindingType_Uniform;
+		pc_entry.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
 		pc_entry.buffer.hasDynamicOffset = true;
 		pc_entry.buffer.minBindingSize = 0; // Flexible — works for any push constant size.
 
@@ -113,7 +113,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		// Create the bind group (backed by the ring buffer).
 		// Dynamic offset is applied at bind time via SetBindGroup(..., 1, &offset).
 		WGPUBindGroupEntry bg_entry = {};
-		bg_entry.binding = 0;
+		bg_entry.binding = PUSH_CONSTANT_RING_BINDING;
 		bg_entry.buffer = push_constant_ring_buffer;
 		bg_entry.offset = 0;
 		bg_entry.size = PUSH_CONSTANT_SLOT_ALIGNMENT;
@@ -1214,6 +1214,18 @@ RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(C
 
 	sc->current_texture = surface_texture.texture;
 
+	// Get actual surface texture dimensions. On web, wgpuSurfaceConfigure may be called
+	// with OS physical-pixel dimensions (e.g. 1152×648 on HiDPI), but the browser canvas
+	// may be CSS-sized (e.g. 756×417). wgpuTextureGetWidth gives the real GPU texture size.
+	uint32_t actual_w = wgpuTextureGetWidth(sc->current_texture);
+	uint32_t actual_h = wgpuTextureGetHeight(sc->current_texture);
+	if (actual_w != sc->width || actual_h != sc->height) {
+		WARN_PRINT_ONCE(vformat("WebGPU: surface texture (%d x %d) differs from configured (%d x %d) — using actual size",
+				actual_w, actual_h, sc->width, sc->height));
+		sc->width = actual_w;
+		sc->height = actual_h;
+	}
+
 	// Create a view for this frame's swap chain texture.
 	WGPUTextureViewDescriptor view_desc = {};
 	view_desc.format = sc->format;
@@ -1601,7 +1613,59 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 	for (uint32_t i = 0; i < total_groups; i++) {
 		if (has_pc && i == pc_group) {
-			all_layouts[i] = push_constant_bind_group_layout;
+			// Build a merged layout: the shader's own group entries (material uniforms,
+			// textures, etc.) PLUS the PC ring-buffer entry at binding 0 with hasDynamicOffset.
+			// This is needed because calling setBindGroup() twice for the same group index
+			// overrides the first binding — we must combine both into one layout/bind group.
+			bool has_existing = (i < set_count && i < (uint32_t)shader->bind_group_infos.size() &&
+					!shader->bind_group_infos[i].entries.is_empty());
+			if (has_existing) {
+				// Rebuild all layout entries for this group (both sampler AND texture for
+				// combined types — bge.layout_entry only stores the texture entry).
+				LocalVector<WGPUBindGroupLayoutEntry> merged_entries;
+				const Vector<RenderingDeviceCommons::ShaderUniform> &pc_uniforms = shader_refl.uniform_sets[i];
+				for (int u_idx2 = 0; u_idx2 < pc_uniforms.size(); u_idx2++) {
+					const RenderingDeviceCommons::ShaderUniform &pu = pc_uniforms[u_idx2];
+					WGPUShaderStage pvis = _stages_to_wgpu_visibility((uint32_t)pu.stages);
+					if (pu.type == RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE) {
+						WGPUBindGroupLayoutEntry se = {}, te = {};
+						se.binding = pu.binding * 2 + 0; se.visibility = pvis;
+						se.sampler.type = WGPUSamplerBindingType_Filtering;
+						te.binding = pu.binding * 2 + 1; te.visibility = pvis;
+						te.texture.sampleType = WGPUTextureSampleType_Float;
+						te.texture.viewDimension = WGPUTextureViewDimension_2D;
+						merged_entries.push_back(se);
+						merged_entries.push_back(te);
+					} else {
+						// For all other types, just copy the existing bge.layout_entry.
+						merged_entries.push_back(shader->bind_group_infos[i].entries[u_idx2].layout_entry);
+					}
+				}
+				// Add the PC ring-buffer entry: PUSH_CONSTANT_RING_BINDING, read-only storage, hasDynamicOffset=true.
+				// Safety: skip if any existing entry is already at PUSH_CONSTANT_RING_BINDING.
+				bool has_pc_binding = false;
+				for (const auto &me : merged_entries) { if (me.binding == PUSH_CONSTANT_RING_BINDING) { has_pc_binding = true; break; } }
+				WGPUBindGroupLayoutEntry pc_entry = {};
+				pc_entry.binding = PUSH_CONSTANT_RING_BINDING;
+				pc_entry.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment | WGPUShaderStage_Compute;
+				pc_entry.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+				pc_entry.buffer.hasDynamicOffset = true;
+				pc_entry.buffer.minBindingSize = 0;
+				if (!has_pc_binding) {
+					merged_entries.push_back(pc_entry);
+				}
+
+				WGPUBindGroupLayoutDescriptor merged_desc = {};
+				merged_desc.entryCount = merged_entries.size();
+				merged_desc.entries = merged_entries.ptr();
+				shader->merged_pc_group_layout = wgpuDeviceCreateBindGroupLayout(device, &merged_desc);
+				ERR_FAIL_COND_V_MSG(!shader->merged_pc_group_layout, ShaderID(),
+						"WebGPU: failed to create merged PC+material bind group layout.");
+				all_layouts[i] = shader->merged_pc_group_layout;
+			} else {
+				// No material uniforms at this group — use the universal PC-only layout.
+				all_layouts[i] = push_constant_bind_group_layout;
+			}
 		} else if (i < set_count) {
 			all_layouts[i] = shader->bind_group_layouts[i];
 		} else {
@@ -1646,6 +1710,9 @@ void RenderingDeviceDriverWebGPU::shader_free(ShaderID p_shader) {
 			wgpuBindGroupLayoutRelease(layout);
 		}
 	}
+	if (shader->merged_pc_group_layout) {
+		wgpuBindGroupLayoutRelease(shader->merged_pc_group_layout);
+	}
 	delete shader;
 }
 
@@ -1672,6 +1739,16 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 
 	WGPUBindGroupLayout layout = shader->bind_group_layouts[p_set_index];
 	ERR_FAIL_NULL_V(layout, UniformSetID());
+
+	// If this set is also the push constant group AND the shader has a merged layout
+	// (PC ring buffer + material uniforms combined), switch to the merged layout.
+	// We will also inject a PC ring buffer entry into the entries array below.
+	const bool is_pc_group = (shader->push_constant_size > 0 &&
+			p_set_index == shader->push_constant_bind_group &&
+			shader->merged_pc_group_layout != nullptr);
+	if (is_pc_group) {
+		layout = shader->merged_pc_group_layout;
+	}
 
 	// Each BoundUniform may expand to one or two WGPUBindGroupEntry items.
 	LocalVector<WGPUBindGroupEntry> entries;
@@ -1764,6 +1841,17 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 				WARN_PRINT_ONCE(vformat("WebGPU: unhandled uniform type %d in uniform_set_create.", (int)uniform.type));
 			} break;
 		}
+	}
+
+	// If this is the merged PC group, inject the push constant ring buffer at PUSH_CONSTANT_RING_BINDING.
+	// Dynamic offset is 0 here; _flush_push_constants will rebind with the correct offset.
+	if (is_pc_group) {
+		WGPUBindGroupEntry pc_entry = {};
+		pc_entry.binding = PUSH_CONSTANT_RING_BINDING;
+		pc_entry.buffer = push_constant_ring_buffer;
+		pc_entry.offset = 0;
+		pc_entry.size = PUSH_CONSTANT_SLOT_ALIGNMENT;
+		entries.push_back(pc_entry);
 	}
 
 	WGPUBindGroupDescriptor bg_desc = {};
@@ -2077,11 +2165,19 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 
 	uint32_t dynamic_offset = push_constant_ring_offset;
 
+	// Choose which bind group to rebind at the PC group:
+	// - If the material uniform set for this group was previously bound and includes
+	//   the PC ring buffer (via merged_pc_group_layout), use that combined bind group.
+	// - Otherwise, fall back to the universal PC-only bind group.
+	WGPUBindGroup pc_bind_group_to_use = (p_cmd_buf->current_pc_bind_group != nullptr)
+			? p_cmd_buf->current_pc_bind_group
+			: push_constant_bind_group;
+
 	// Bind the push constant ring buffer bind group with a dynamic offset.
 	if (p_cmd_buf->render_encoder) {
-		wgpuRenderPassEncoderSetBindGroup(p_cmd_buf->render_encoder, p_shader->push_constant_bind_group, push_constant_bind_group, 1, &dynamic_offset);
+		wgpuRenderPassEncoderSetBindGroup(p_cmd_buf->render_encoder, p_shader->push_constant_bind_group, pc_bind_group_to_use, 1, &dynamic_offset);
 	} else if (p_cmd_buf->compute_encoder) {
-		wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, p_shader->push_constant_bind_group, push_constant_bind_group, 1, &dynamic_offset);
+		wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, p_shader->push_constant_bind_group, pc_bind_group_to_use, 1, &dynamic_offset);
 	}
 
 	push_constant_ring_offset += aligned_size;
@@ -2342,15 +2438,27 @@ void RenderingDeviceDriverWebGPU::command_render_set_scissor(CommandBufferID p_c
 		uint32_t y = MAX(sr.position.y, 0);
 		uint32_t w = MAX(sr.size.x, 0);
 		uint32_t h = MAX(sr.size.y, 0);
-		// Clamp scissor to render area dimensions (WebGPU validation requirement).
+		// Clamp scissor to the SMALLER of (render area) and (actual framebuffer size).
+		// WebGPU requires scissor to fit within attachment dimensions.
 		uint32_t clamp_w = 0;
 		uint32_t clamp_h = 0;
 		if (cmd->render_state.render_area_width > 0) {
 			clamp_w = cmd->render_state.render_area_width;
 			clamp_h = cmd->render_state.render_area_height;
-		} else if (cmd->render_state.framebuffer) {
-			clamp_w = cmd->render_state.framebuffer->width;
-			clamp_h = cmd->render_state.framebuffer->height;
+		}
+		if (cmd->render_state.framebuffer) {
+			uint32_t fb_w = cmd->render_state.framebuffer->width;
+			uint32_t fb_h = cmd->render_state.framebuffer->height;
+			// Use actual attachment texture dimensions when available — fb->width/height
+			// may reflect the Godot-level render-area (window size) rather than the GPU
+			// texture size, which is what WebGPU validates the scissor rect against.
+			const WGFramebuffer *wgfb = cmd->render_state.framebuffer;
+			if (!wgfb->attachments.is_empty() && wgfb->attachments[0] != nullptr) {
+				fb_w = wgfb->attachments[0]->width;
+				fb_h = wgfb->attachments[0]->height;
+			}
+			clamp_w = clamp_w > 0 ? MIN(clamp_w, fb_w) : fb_w;
+			clamp_h = clamp_h > 0 ? MIN(clamp_h, fb_h) : fb_h;
 		}
 		if (clamp_w > 0 && clamp_h > 0) {
 			if (x >= clamp_w || y >= clamp_h) {
@@ -2394,8 +2502,20 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 	for (uint32_t i = 0; i < p_set_count; i++) {
 		WGUniformSet *us = (WGUniformSet *)(p_uniform_sets[i].id);
 		if (us && us->handle) {
-			// TODO: Handle dynamic offsets properly.
-			wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, p_first_set_index + i, us->handle, 0, nullptr);
+			uint32_t set_idx = p_first_set_index + i;
+			// If this is the PC group of the current shader (with a merged layout),
+			// track the bind group for use in _flush_push_constants and bind it
+			// immediately with offset 0 (will be rebound with the real offset on flush).
+			WGShader *shader = cmd->render_state.current_pipeline ? cmd->render_state.current_pipeline->shader : nullptr;
+			if (shader && shader->merged_pc_group_layout &&
+					shader->push_constant_size > 0 && set_idx == shader->push_constant_bind_group) {
+				cmd->current_pc_bind_group = us->handle;
+				// Bind now with dynamic offset 0; _flush_push_constants will rebind with correct offset.
+				uint32_t zero_offset = 0;
+				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, us->handle, 1, &zero_offset);
+			} else {
+				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, us->handle, 0, nullptr);
+			}
 		}
 	}
 }
@@ -2525,23 +2645,10 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	const WGRenderPass::SubpassInfo &subpass = rp->subpasses[p_render_subpass];
 
 	// --- Specialization constants ---
-	LocalVector<WGPUConstantEntry> spec_entries;
-	LocalVector<CharString> spec_keys; // Keep alive until wgpuDeviceCreateRenderPipeline().
-	spec_entries.resize(p_specialization_constants.size());
-	spec_keys.resize(p_specialization_constants.size());
-	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
-		const PipelineSpecializationConstant &sc = p_specialization_constants[i];
-		spec_keys[i] = String::num_int64(sc.constant_id).utf8();
-		spec_entries[i] = {};
-		spec_entries[i].key = { spec_keys[i].get_data(), (size_t)spec_keys[i].length() };
-		if (sc.type == PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL) {
-			spec_entries[i].value = sc.bool_value ? 1.0 : 0.0;
-		} else if (sc.type == PIPELINE_SPECIALIZATION_CONSTANT_TYPE_FLOAT) {
-			spec_entries[i].value = (double)sc.float_value;
-		} else {
-			spec_entries[i].value = (double)sc.int_value;
-		}
-	}
+	// freeze_spec_constant_ops bakes spec constants into regular SPIR-V OpConstants
+	// before naga converts to WGSL, so no WGSL 'override' declarations are emitted.
+	// Passing constant overrides to Dawn would cause "not found" pipeline errors.
+	LocalVector<WGPUConstantEntry> spec_entries; // intentionally empty
 
 	// --- Vertex state ---
 	LocalVector<WGPUVertexBufferLayout> vb_layouts;
@@ -2902,23 +3009,9 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 			"WebGPU: compute_pipeline_create called with a shader that has no compute stage.");
 
 	// Specialization constants.
-	LocalVector<WGPUConstantEntry> spec_entries;
-	LocalVector<CharString> spec_keys;
-	spec_entries.resize(p_specialization_constants.size());
-	spec_keys.resize(p_specialization_constants.size());
-	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
-		const PipelineSpecializationConstant &sc = p_specialization_constants[i];
-		spec_keys[i] = String::num_int64(sc.constant_id).utf8();
-		spec_entries[i] = {};
-		spec_entries[i].key = { spec_keys[i].get_data(), (size_t)spec_keys[i].length() };
-		if (sc.type == PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL) {
-			spec_entries[i].value = sc.bool_value ? 1.0 : 0.0;
-		} else if (sc.type == PIPELINE_SPECIALIZATION_CONSTANT_TYPE_FLOAT) {
-			spec_entries[i].value = (double)sc.float_value;
-		} else {
-			spec_entries[i].value = (double)sc.int_value;
-		}
-	}
+	// freeze_spec_constant_ops bakes spec constants into regular SPIR-V OpConstants
+	// before naga converts to WGSL, so no WGSL 'override' declarations are emitted.
+	LocalVector<WGPUConstantEntry> spec_entries; // intentionally empty
 
 	WGPUComputePipelineDescriptor desc = {};
 	desc.layout = shader->pipeline_layout;
