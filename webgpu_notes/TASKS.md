@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 13, 2026 — **Phase 3 COMPLETE.** All tasks done: 3.1 (3D core), 3.2 (compute shaders), 3.3 (timestamp queries), 3.4 (push constant optimization). Ready for Phase 4 (export integration & polish).
+> **Last Updated**: March 13, 2026 — **Phase 4 IN PROGRESS.** Phase 3 complete. Task 4.1 (export preset integration) DONE — WebGPU rendering driver auto-detected from project settings, Engine.js auto-initializes WebGPU device, HTML shell shows clear WebGPU error messages.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -962,7 +962,7 @@ All three optimizations were already implemented during Phase 2:
 > **Goal**: Make WebGPU a proper export option in the Godot editor. WebGL fallback works. Polish for usability.
 
 ### Task 4.1: Export Preset Integration `[PARALLEL with 4.2]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 4-6 hours
 **Dependencies**: Phase 3
 
@@ -989,6 +989,20 @@ All three optimizations were already implemented during Phase 2:
    - This avoids runtime shader translation overhead
 
 **Completion Criteria**: Editor has a WebGPU export option. Export produces a working WebGPU build.
+
+**Completion Notes (March 13, 2026)**:
+- **Design decision**: Followed Godot's existing pattern — rendering driver is a **project setting** (`rendering/renderer/rendering_method.web`), not an export preset option. Template binary naming unchanged; a single web template supports both WebGPU and WebGL paths based on project settings.
+- **Export plugin** (`platform/web/export/export_plugin.cpp`):
+  - `_fix_html()` now reads `rendering/renderer/rendering_method.web` from project settings and emits `renderingDriver: 'webgpu'` or `'opengl3'` in the Engine.js config JSON.
+  - `has_valid_project_configuration()` now shows a warning when WebGPU rendering is selected.
+- **Engine.js** (`platform/web/js/engine/config.js` + `engine.js`):
+  - Added `renderingDriver` config property (parsed from export config).
+  - `startGame()` auto-calls `Engine.requestWebGPUDevice()` before WASM init when `renderingDriver === 'webgpu'` and no device was pre-provided.
+  - Added `Engine.requestWebGPUDevice()` static method: requests adapter (high-performance), auto-enables `timestamp-query` feature if available, returns `GPUDevice` promise.
+- **HTML shell** (`misc/dist/html/full-size.html`):
+  - Added WebGPU availability check: if `renderingDriver === 'webgpu'` and `navigator.gpu` is missing, shows clear error message listing supported browsers.
+- **Shader pre-compilation (item 4)**: Deferred — runtime SPIR-V→WGSL translation via Naga WASM is fast enough for now; shader caching can be added as a future optimization.
+- Both web template build and macOS editor build succeeded clean.
 
 ---
 

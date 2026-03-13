@@ -201,11 +201,24 @@ const Engine = (function () {
 				this.config.args = ['--main-pack', pack].concat(this.config.args);
 				// Start and init with execName as loadPath if not inited.
 				const me = this;
-				return Promise.all([
-					this.init(exe),
-					this.preloadFile(pack, pack),
-				]).then(function () {
-					return me.start.apply(me);
+
+				// If WebGPU rendering is requested, pre-initialize a GPUDevice
+				// before the WASM module starts (the C++ side expects it in
+				// Module.preinitializedWebGPUDevice).
+				let webgpuReady = Promise.resolve();
+				if (me.config.renderingDriver === 'webgpu' && !me.config.preinitializedWebGPUDevice) {
+					webgpuReady = Engine.requestWebGPUDevice().then(function (device) {
+						me.config.preinitializedWebGPUDevice = device;
+					});
+				}
+
+				return webgpuReady.then(function () {
+					return Promise.all([
+						me.init(exe),
+						me.preloadFile(pack, pack),
+					]).then(function () {
+						return me.start.apply(me);
+					});
 				});
 			},
 
@@ -266,9 +279,49 @@ const Engine = (function () {
 		return new Engine(initConfig);
 	}
 
+	/**
+	 * Request a WebGPU device from the browser. Returns a Promise that resolves
+	 * to a ``GPUDevice``, or rejects if WebGPU is not available.
+	 *
+	 * This is called automatically by :js:meth:`startGame <Engine.prototype.startGame>`
+	 * when ``renderingDriver`` is ``'webgpu'``.
+	 *
+	 * @param {Object=} adapterOptions Optional ``GPURequestAdapterOptions``.
+	 * @param {Object=} deviceDescriptor Optional ``GPUDeviceDescriptor``.
+	 * @returns {Promise<GPUDevice>} A promise resolving to the GPU device.
+	 *
+	 * @function Engine.requestWebGPUDevice
+	 */
+	Engine.requestWebGPUDevice = function (adapterOptions, deviceDescriptor) {
+		if (typeof navigator === 'undefined' || !navigator.gpu) {
+			return Promise.reject(new Error(
+				'WebGPU is not supported in this browser.\n'
+				+ 'Try using a recent version of Chrome, Edge, or Firefox.'
+			));
+		}
+		return navigator.gpu.requestAdapter(adapterOptions || {
+			powerPreference: 'high-performance',
+		}).then(function (adapter) {
+			if (!adapter) {
+				return Promise.reject(new Error(
+					'WebGPU adapter not found. Your GPU may not support WebGPU.'
+				));
+			}
+			const desc = deviceDescriptor || {
+				requiredFeatures: [],
+			};
+			// Request timestamp-query if available.
+			if (adapter.features.has('timestamp-query')) {
+				desc.requiredFeatures = (desc.requiredFeatures || []).concat(['timestamp-query']);
+			}
+			return adapter.requestDevice(desc);
+		});
+	};
+
 	// Closure compiler exported static methods.
 	SafeEngine['load'] = Engine.load;
 	SafeEngine['unload'] = Engine.unload;
+	SafeEngine['requestWebGPUDevice'] = Engine.requestWebGPUDevice;
 
 	// Feature-detection utilities.
 	SafeEngine['isWebGLAvailable'] = Features.isWebGLAvailable;

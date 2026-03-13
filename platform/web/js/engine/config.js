@@ -129,9 +129,22 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		gdextensionLibs: [],
 		/**
+		 * The rendering driver to use. Set by Godot export based on project settings.
+		 *
+		 * ``'webgpu'`` will automatically request a WebGPU device before engine init.
+		 *
+		 * ``'opengl3'`` (or empty) uses WebGL 2.0.
+		 *
+		 * @memberof EngineConfig
+		 * @default
+		 * @type {string}
+		 */
+		renderingDriver: '',
+		/**
 		 * A pre-initialized WebGPU device to pass to the Emscripten module.
 		 * Required for WebGPU rendering. Must be set before engine init.
-		 * Used by emscripten_webgpu_get_device() in C++.
+		 * If not provided and ``renderingDriver`` is ``'webgpu'``, one will be
+		 * requested automatically.
 		 *
 		 * @memberof EngineConfig
 		 * @default
@@ -278,6 +291,7 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		this.focusCanvas = parse('focusCanvas', this.focusCanvas);
 		this.serviceWorker = parse('serviceWorker', this.serviceWorker);
 		this.gdextensionLibs = parse('gdextensionLibs', this.gdextensionLibs);
+		this.renderingDriver = parse('renderingDriver', this.renderingDriver);
 		this.preinitializedWebGPUDevice = parse('preinitializedWebGPUDevice', this.preinitializedWebGPUDevice);
 		this.fileSizes = parse('fileSizes', this.fileSizes);
 		this.emscriptenPoolSize = parse('emscriptenPoolSize', this.emscriptenPoolSize);
