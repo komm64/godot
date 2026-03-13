@@ -231,6 +231,8 @@ struct WGCommandPool {
 	RDD::CommandBufferType buffer_type = RDD::COMMAND_BUFFER_TYPE_PRIMARY;
 };
 
+struct WGQueryPool; // Forward declaration for WGCommandBuffer.
+
 struct WGCommandBuffer {
 	WGPUCommandEncoder encoder = nullptr;
 	WGPUCommandBuffer finished_buffer = nullptr;
@@ -260,6 +262,9 @@ struct WGCommandBuffer {
 		uint32_t render_area_width = 0;
 		uint32_t render_area_height = 0;
 	} render_state;
+
+	// Track query pools that had timestamps written, for resolve at command buffer end.
+	LocalVector<WGQueryPool *> written_query_pools;
 
 	// Helpers.
 	void end_active_encoder() {
@@ -298,9 +303,14 @@ struct WGSemaphore {};
 
 struct WGQueryPool {
 	WGPUQuerySet handle = nullptr;
-	WGPUBuffer resolve_buffer = nullptr;
+	WGPUBuffer resolve_buffer = nullptr; // GPU buffer for query set resolve (CopySrc | QueryResolve).
+	WGPUBuffer readback_buffer = nullptr; // CPU-readable staging buffer (CopyDst | MapRead).
 	uint32_t count = 0;
-	bool available = false;
+	bool is_real = false; // True if backed by actual timestamp-query hardware.
+
+	// Shadow CPU buffer for async readback results.
+	uint64_t *cpu_results = nullptr;
+	bool readback_pending = false;
 };
 
 #endif // WEBGPU_ENABLED

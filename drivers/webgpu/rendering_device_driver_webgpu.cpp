@@ -39,6 +39,9 @@
 #include <emscripten/emscripten.h>
 #include <cstdlib>
 
+// Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
+static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
+
 // =============================================================================
 // Storage Texture Format Validation
 // =============================================================================
@@ -236,6 +239,12 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	WGPUStatus status = wgpuDeviceGetLimits(device, &device_limits);
 	if (status != WGPUStatus_Success) {
 		WARN_PRINT("WebGPU: Failed to query device limits, using spec minimums.");
+	}
+
+	// Check for timestamp query support.
+	timestamp_supported = wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery);
+	if (timestamp_supported) {
+		print_verbose("WebGPU: Timestamp query feature is available.");
 	}
 
 	// Multiview not supported in WebGPU.
@@ -1151,6 +1160,19 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 	for (uint32_t i = 0; i < p_cmd_buffers.size(); i++) {
 		WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffers[i].id);
 		if (cmd) {
+			// Trigger async readback for any query pools that had timestamps resolved.
+			for (uint32_t j = 0; j < cmd->written_query_pools.size(); j++) {
+				WGQueryPool *pool = cmd->written_query_pools[j];
+				if (pool->readback_pending && pool->readback_buffer) {
+					WGPUBufferMapCallbackInfo cb_info = {};
+					cb_info.mode = WGPUCallbackMode_AllowSpontaneous;
+					cb_info.callback = _timestamp_readback_callback;
+					cb_info.userdata1 = pool;
+					cb_info.userdata2 = nullptr;
+					wgpuBufferMapAsync(pool->readback_buffer, WGPUMapMode_Read, 0, sizeof(uint64_t) * pool->count, cb_info);
+				}
+			}
+			cmd->written_query_pools.clear();
 			cmd->finished_buffer = nullptr;
 		}
 	}
@@ -1210,6 +1232,15 @@ void RenderingDeviceDriverWebGPU::command_buffer_end(CommandBufferID p_cmd_buffe
 
 	// End any active render/compute pass.
 	cmd->end_active_encoder();
+
+	// Resolve any query pools that had timestamps written during this command buffer.
+	for (uint32_t i = 0; i < cmd->written_query_pools.size(); i++) {
+		WGQueryPool *pool = cmd->written_query_pools[i];
+		wgpuCommandEncoderResolveQuerySet(cmd->encoder, pool->handle, 0, pool->count, pool->resolve_buffer, 0);
+		uint64_t byte_size = sizeof(uint64_t) * pool->count;
+		wgpuCommandEncoderCopyBufferToBuffer(cmd->encoder, pool->resolve_buffer, 0, pool->readback_buffer, 0, byte_size);
+		pool->readback_pending = true;
+	}
 
 	// Finish the command encoder.
 	if (cmd->encoder) {
@@ -4529,9 +4560,56 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 // =============================================================================
 
 RDD::QueryPoolID RenderingDeviceDriverWebGPU::timestamp_query_pool_create(uint32_t p_query_count) {
-	// TODO: Check if timestamp-query feature is available.
-	// If available: wgpuDeviceCreateQuerySet() with type=Timestamp.
-	return QueryPoolID(); // Null — not supported initially.
+	WGQueryPool *pool = new WGQueryPool();
+	pool->count = p_query_count;
+	pool->cpu_results = (uint64_t *)memalloc(sizeof(uint64_t) * p_query_count);
+	memset(pool->cpu_results, 0, sizeof(uint64_t) * p_query_count);
+
+	if (!timestamp_supported) {
+		// No hardware timestamp support — return a dummy pool that returns zeros.
+		pool->is_real = false;
+		return QueryPoolID(pool);
+	}
+
+	// Create query set.
+	WGPUQuerySetDescriptor qs_desc = {};
+	qs_desc.type = WGPUQueryType_Timestamp;
+	qs_desc.count = p_query_count;
+	pool->handle = wgpuDeviceCreateQuerySet(device, &qs_desc);
+	if (!pool->handle) {
+		WARN_PRINT("WebGPU: Failed to create timestamp query set, falling back to dummy timestamps.");
+		pool->is_real = false;
+		return QueryPoolID(pool);
+	}
+
+	// Create resolve buffer (GPU-side, receives resolved query results).
+	uint64_t buf_size = sizeof(uint64_t) * p_query_count;
+	{
+		WGPUBufferDescriptor bd = {};
+		bd.size = buf_size;
+		bd.usage = WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc;
+		pool->resolve_buffer = wgpuDeviceCreateBuffer(device, &bd);
+	}
+
+	// Create readback buffer (CPU-readable staging buffer).
+	{
+		WGPUBufferDescriptor bd = {};
+		bd.size = buf_size;
+		bd.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+		pool->readback_buffer = wgpuDeviceCreateBuffer(device, &bd);
+	}
+
+	if (!pool->resolve_buffer || !pool->readback_buffer) {
+		WARN_PRINT("WebGPU: Failed to create timestamp resolve/readback buffers.");
+		if (pool->handle) { wgpuQuerySetRelease(pool->handle); pool->handle = nullptr; }
+		if (pool->resolve_buffer) { wgpuBufferRelease(pool->resolve_buffer); pool->resolve_buffer = nullptr; }
+		if (pool->readback_buffer) { wgpuBufferRelease(pool->readback_buffer); pool->readback_buffer = nullptr; }
+		pool->is_real = false;
+		return QueryPoolID(pool);
+	}
+
+	pool->is_real = true;
+	return QueryPoolID(pool);
 }
 
 void RenderingDeviceDriverWebGPU::timestamp_query_pool_free(QueryPoolID p_pool_id) {
@@ -4543,13 +4621,29 @@ void RenderingDeviceDriverWebGPU::timestamp_query_pool_free(QueryPoolID p_pool_i
 		if (pool->resolve_buffer) {
 			wgpuBufferRelease(pool->resolve_buffer);
 		}
+		if (pool->readback_buffer) {
+			wgpuBufferRelease(pool->readback_buffer);
+		}
+		if (pool->cpu_results) {
+			memfree(pool->cpu_results);
+		}
 		delete pool;
 	}
 }
 
 void RenderingDeviceDriverWebGPU::timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
-	// TODO: Resolve query set to buffer, map buffer, copy results.
-	memset(r_results, 0, sizeof(uint64_t) * p_query_count);
+	WGQueryPool *pool = (WGQueryPool *)(p_pool_id.id);
+	if (!pool || !pool->is_real) {
+		memset(r_results, 0, sizeof(uint64_t) * p_query_count);
+		return;
+	}
+
+	// Copy from the CPU shadow buffer (populated by the async readback callback).
+	uint32_t copy_count = MIN(p_query_count, pool->count);
+	memcpy(r_results, pool->cpu_results, sizeof(uint64_t) * copy_count);
+	if (p_query_count > copy_count) {
+		memset(r_results + copy_count, 0, sizeof(uint64_t) * (p_query_count - copy_count));
+	}
 }
 
 uint64_t RenderingDeviceDriverWebGPU::timestamp_query_result_to_time(uint64_t p_result) {
@@ -4557,11 +4651,50 @@ uint64_t RenderingDeviceDriverWebGPU::timestamp_query_result_to_time(uint64_t p_
 }
 
 void RenderingDeviceDriverWebGPU::command_timestamp_query_pool_reset(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_query_count) {
-	// No-op: WebGPU query sets don't need reset.
+	// No-op: WebGPU query sets don't need reset. Resolve happens in command_buffer_end().
+}
+
+// Forward declared at the top of the file; defined here.
+static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	WGQueryPool *pool = (WGQueryPool *)p_userdata1;
+	if (!pool) {
+		return;
+	}
+	if (p_status == WGPUMapAsyncStatus_Success) {
+		const void *data = wgpuBufferGetConstMappedRange(pool->readback_buffer, 0, sizeof(uint64_t) * pool->count);
+		if (data) {
+			memcpy(pool->cpu_results, data, sizeof(uint64_t) * pool->count);
+		}
+		wgpuBufferUnmap(pool->readback_buffer);
+	}
+	pool->readback_pending = false;
 }
 
 void RenderingDeviceDriverWebGPU::command_timestamp_write(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_index) {
-	// TODO: wgpuCommandEncoderWriteTimestamp(encoder, querySet, index) if available.
+	WGQueryPool *pool = (WGQueryPool *)(p_pool_id.id);
+	if (!pool || !pool->is_real || p_index >= pool->count) {
+		return;
+	}
+
+	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
+	ERR_FAIL_NULL(cmd);
+
+	// wgpuCommandEncoderWriteTimestamp requires no active render/compute pass.
+	cmd->end_active_encoder();
+
+	wgpuCommandEncoderWriteTimestamp(cmd->encoder, pool->handle, p_index);
+
+	// Track this pool so we resolve it in command_buffer_end.
+	bool already_tracked = false;
+	for (uint32_t i = 0; i < cmd->written_query_pools.size(); i++) {
+		if (cmd->written_query_pools[i] == pool) {
+			already_tracked = true;
+			break;
+		}
+	}
+	if (!already_tracked) {
+		cmd->written_query_pools.push_back(pool);
+	}
 }
 
 // =============================================================================

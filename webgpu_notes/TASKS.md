@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 13, 2026 — Phase 3 IN PROGRESS. **MILESTONE: 3D geometry VISIBLE in browser** — blue cube + red sphere rendering with lighting and shadows. Task 3.2 (compute shaders) DONE — verified all compute paths, fixed `has_feature()`, `STORAGE_BUFFER_DYNAMIC` visibility, and `limit_get()` to query actual device limits.
+> **Last Updated**: March 13, 2026 — Phase 3 IN PROGRESS. **MILESTONE: 3D geometry VISIBLE in browser** — blue cube + red sphere rendering with lighting and shadows. Task 3.2 (compute shaders) DONE — verified all compute paths, fixed `has_feature()`, `STORAGE_BUFFER_DYNAMIC` visibility, and `limit_get()` to query actual device limits. Task 3.3 (timestamp queries) DONE — full async readback pipeline implemented.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -894,7 +894,7 @@ correct approach, but ALL code paths that read from staging buffers must check `
 ---
 
 ### Task 3.3: Timestamp Queries & Profiling `[PARALLEL with 3.1]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 2-3 hours
 **Dependencies**: Phase 2
 
@@ -910,6 +910,18 @@ correct approach, but ALL code paths that read from staging buffers must check `
 3. **If not available**: Return dummy results, disable GPU profiler features
 
 **Completion Criteria**: Timestamp queries work when the feature is available. No crashes when it's not.
+
+**Completion Notes (March 13, 2026)**:
+- Implemented full timestamp query pipeline with async readback:
+  - `timestamp_query_pool_create()`: Creates WGPUQuerySet (Timestamp), resolve buffer (QueryResolve|CopySrc), readback buffer (CopyDst|MapRead), and CPU shadow array. Falls back to dummy pool (is_real=false) if timestamp-query feature unavailable.
+  - `timestamp_query_pool_free()`: Releases all WebGPU resources.
+  - `timestamp_query_pool_get_results()`: Copies from CPU shadow (populated by async callback).
+  - `command_timestamp_write()`: Ends active encoder, calls `wgpuCommandEncoderWriteTimestamp()`, tracks pool in `cmd->written_query_pools`.
+  - `command_buffer_end()`: Resolves query sets to GPU buffer, copies to readback buffer.
+  - `command_queue_execute_and_present()`: After submit, triggers `wgpuBufferMapAsync()` with `WGPUCallbackMode_AllowSpontaneous`.
+  - `_timestamp_readback_callback()`: Static callback copies mapped data to CPU shadow, unmaps buffer.
+- Device capability detection: `timestamp_supported` flag set via `wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery)` in `_check_capabilities()`.
+- Build verified clean (3 pre-existing warnings only).
 
 ---
 
