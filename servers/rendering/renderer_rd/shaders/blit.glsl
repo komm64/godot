@@ -148,4 +148,8 @@ void main() {
 
 		color.rgb = clamp(color.rgb, vec3(0.0), vec3(1.0));
 	}
+
+	// WebGPU: force opaque alpha — Chrome may ignore CompositeAlphaMode_Opaque
+	// and compositing with alpha<1 produces transparent canvas output.
+	color.a = 1.0;
 }

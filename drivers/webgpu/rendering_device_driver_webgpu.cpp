@@ -1308,6 +1308,14 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 			d.queue._submitPatched = true;
 			console.log('[DIAG-CFG] queue.submit monkey-patched with error scope');
 		}
+		// Catch all uncaptured WebGPU errors (draw-time validation, etc.)
+		if (d && !d._uncapturedPatched) {
+			d.addEventListener('uncapturederror', function(e) {
+				console.error('[UNCAPTURED-GPU-ERROR] ' + e.error.message);
+			});
+			d._uncapturedPatched = true;
+			console.log('[DIAG-CFG] uncaptured error handler registered');
+		}
 	});
 
 	sc->width = width;
@@ -1547,6 +1555,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		const PackedByteArray &spv_bytes = s.code_compressed_bytes;
 		ERR_FAIL_COND_V_MSG(spv_bytes.is_empty(), ShaderID(), "WebGPU: empty SPIR-V for shader stage.");
 		ERR_FAIL_COND_V_MSG(spv_bytes.size() % 4 != 0, ShaderID(), "WebGPU: SPIR-V size must be a multiple of 4.");
+
+		// Store raw SPIR-V for potential re-conversion with specialization constants.
+		shader->stage_spirv[(int)s.shader_stage] = spv_bytes;
 
 		// emdawnwebgpu does NOT support WGPUShaderSourceSPIRV — it's a thin wrapper
 		// around the browser's WebGPU API which only accepts WGSL.
@@ -3100,6 +3111,12 @@ void RenderingDeviceDriverWebGPU::pipeline_free(PipelineID p_pipeline) {
 	} else if (pw->type == WGPipelineWrapper::COMPUTE && pw->compute_handle) {
 		wgpuComputePipelineRelease(pw->compute_handle);
 	}
+	// Release any specialized shader modules owned by this pipeline.
+	for (int i = 0; i < 6; i++) {
+		if (pw->specialized_modules[i]) {
+			wgpuShaderModuleRelease(pw->specialized_modules[i]);
+		}
+	}
 	delete pw;
 }
 
@@ -3457,6 +3474,10 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 				cmd->render_state.render_area_height);
 		_rp_end_log++;
 	}
+
+	// Save swap chain state before ending.
+	bool was_swap_chain = cmd->render_state.render_pass && cmd->render_state.render_pass->is_swap_chain_pass;
+	WGFramebuffer *sc_fb = was_swap_chain ? cmd->render_state.framebuffer : nullptr;
 
 	if (cmd->render_encoder) {
 		wgpuRenderPassEncoderEnd(cmd->render_encoder);
@@ -3870,6 +3891,187 @@ void RenderingDeviceDriverWebGPU::command_render_set_line_width(CommandBufferID 
 	// No-op: WebGPU doesn't support line width > 1.0.
 }
 
+// =============================================================================
+// Specialization Constant Support
+// =============================================================================
+
+// SPIR-V opcodes for specialization constant handling.
+static constexpr uint16_t SPV_OP_DECORATE = 71;
+static constexpr uint16_t SPV_OP_SPEC_CONSTANT_TRUE = 48;
+static constexpr uint16_t SPV_OP_SPEC_CONSTANT_FALSE = 49;
+static constexpr uint16_t SPV_OP_SPEC_CONSTANT = 50;
+static constexpr uint16_t SPV_DECORATION_SPEC_ID = 1;
+
+static inline uint32_t _spv_read_word(const uint8_t *p_data, uint32_t p_word_index) {
+	const uint8_t *p = p_data + p_word_index * 4;
+	return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+}
+
+static inline void _spv_write_word(uint8_t *p_data, uint32_t p_word_index, uint32_t p_value) {
+	uint8_t *p = p_data + p_word_index * 4;
+	p[0] = p_value & 0xFF;
+	p[1] = (p_value >> 8) & 0xFF;
+	p[2] = (p_value >> 16) & 0xFF;
+	p[3] = (p_value >> 24) & 0xFF;
+}
+
+// Patches SPIR-V bytecode to apply specialization constant values.
+// Returns a modified copy with OpSpecConstant* values updated.
+static PackedByteArray _patch_spirv_spec_constants(const PackedByteArray &p_spirv, VectorView<RDD::PipelineSpecializationConstant> p_constants) {
+	if (p_constants.size() == 0 || p_spirv.size() < 20) {
+		return p_spirv;
+	}
+
+	// Build a map: SpecId → value (as uint32_t).
+	HashMap<uint32_t, uint32_t> spec_values;
+	for (uint32_t i = 0; i < p_constants.size(); i++) {
+		const RDD::PipelineSpecializationConstant &c = p_constants[i];
+		uint32_t val = 0;
+		switch (c.type) {
+			case RDD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL:
+				val = c.bool_value ? 1 : 0;
+				break;
+			case RDD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_INT:
+				val = (uint32_t)c.int_value;
+				break;
+			case RDD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_FLOAT:
+				memcpy(&val, &c.float_value, sizeof(float));
+				break;
+		}
+		spec_values[c.constant_id] = val;
+	}
+
+	// First pass: scan OpDecorate for SpecId → result_id mapping.
+	HashMap<uint32_t, uint32_t> spec_id_to_result_id; // SpecId → result_id
+	uint32_t total_words = p_spirv.size() / 4;
+	uint32_t pos = 5; // Skip SPIR-V header (5 words).
+	while (pos < total_words) {
+		uint32_t w0 = _spv_read_word(p_spirv.ptr(), pos);
+		uint32_t wc = w0 >> 16;
+		uint32_t op = w0 & 0xFFFF;
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		// OpDecorate target decoration [literal...]
+		// For SpecId: OpDecorate result_id SpecId(1) literal_spec_id
+		if (op == SPV_OP_DECORATE && wc >= 4) {
+			uint32_t target = _spv_read_word(p_spirv.ptr(), pos + 1);
+			uint32_t decoration = _spv_read_word(p_spirv.ptr(), pos + 2);
+			if (decoration == SPV_DECORATION_SPEC_ID) {
+				uint32_t spec_id = _spv_read_word(p_spirv.ptr(), pos + 3);
+				spec_id_to_result_id[spec_id] = target;
+			}
+		}
+		pos += wc;
+	}
+
+	// Build result_id → value map.
+	HashMap<uint32_t, uint32_t> result_to_value;
+	for (const KeyValue<uint32_t, uint32_t> &kv : spec_id_to_result_id) {
+		if (spec_values.has(kv.key)) {
+			result_to_value[kv.value] = spec_values[kv.key];
+		}
+	}
+
+	if (result_to_value.is_empty()) {
+		return p_spirv; // No matching spec constants to patch.
+	}
+
+	// Second pass: patch the SPIR-V.
+	PackedByteArray out = p_spirv;
+	pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = _spv_read_word(out.ptr(), pos);
+		uint32_t wc = w0 >> 16;
+		uint32_t op = w0 & 0xFFFF;
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+
+		if (op == SPV_OP_SPEC_CONSTANT_TRUE || op == SPV_OP_SPEC_CONSTANT_FALSE) {
+			// OpSpecConstantTrue/False: wc=3, [type_id, result_id]
+			if (wc >= 3) {
+				uint32_t result_id = _spv_read_word(out.ptr(), pos + 2);
+				if (result_to_value.has(result_id)) {
+					uint32_t val = result_to_value[result_id];
+					uint16_t new_op = val ? SPV_OP_SPEC_CONSTANT_TRUE : SPV_OP_SPEC_CONSTANT_FALSE;
+					_spv_write_word(out.ptrw(), pos, (wc << 16) | new_op);
+				}
+			}
+		} else if (op == SPV_OP_SPEC_CONSTANT) {
+			// OpSpecConstant: wc>=4, [type_id, result_id, value...]
+			if (wc >= 4) {
+				uint32_t result_id = _spv_read_word(out.ptr(), pos + 2);
+				if (result_to_value.has(result_id)) {
+					_spv_write_word(out.ptrw(), pos + 3, result_to_value[result_id]);
+				}
+			}
+		}
+
+		pos += wc;
+	}
+
+	return out;
+}
+
+// Creates a WGPUShaderModule from SPIR-V with specialization constants applied.
+// Returns nullptr on failure.
+WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants(
+		const PackedByteArray &p_spirv,
+		VectorView<PipelineSpecializationConstant> p_constants,
+		ShaderStage p_stage) {
+	PackedByteArray patched = _patch_spirv_spec_constants(p_spirv, p_constants);
+
+	char *wgsl_str = (char *)(uintptr_t)MAIN_THREAD_EM_ASM_PTR(
+			{
+				try {
+					if (typeof window.nagaSpirvToWgsl !== 'function') {
+						console.error('naga SPIR-V→WGSL converter not loaded!');
+						return 0;
+					}
+					var spirvBytes = new Uint8Array(HEAPU8.buffer, $0, $1);
+					var wgsl = window.nagaSpirvToWgsl(spirvBytes);
+					if (!wgsl) {
+						return 0;
+					}
+					var len = lengthBytesUTF8(wgsl) + 1;
+					var ptr = _malloc(len);
+					stringToUTF8(wgsl, ptr, len);
+					return ptr;
+				} catch (e) {
+					console.error('[SHADER-SPEC] NAGA conversion exception:', e.message || e);
+					return 0;
+				}
+			},
+			patched.ptr(), (int)patched.size());
+
+	if (!wgsl_str) {
+		ERR_PRINT("WebGPU: SPIR-V→WGSL conversion failed for specialized shader module.");
+		return nullptr;
+	}
+
+	// Demote read_write storage to read for vertex/fragment stages.
+	if (p_stage == SHADER_STAGE_VERTEX || p_stage == SHADER_STAGE_FRAGMENT) {
+		char *q = wgsl_str;
+		while ((q = strstr(q, "var<storage, read_write>")) != nullptr) {
+			memcpy(q, "var<storage, read>      ", 24);
+			q += 24;
+		}
+	}
+
+	WGPUShaderSourceWGSL wgsl_source = {};
+	wgsl_source.chain.sType = WGPUSType_ShaderSourceWGSL;
+	wgsl_source.code = { wgsl_str, WGPU_STRLEN };
+
+	WGPUShaderModuleDescriptor desc = {};
+	desc.nextInChain = &wgsl_source.chain;
+
+	WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &desc);
+	free(wgsl_str);
+
+	return mod;
+}
+
 RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		ShaderID p_shader,
 		VertexFormatID p_vertex_format,
@@ -3892,10 +4094,28 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	const WGRenderPass::SubpassInfo &subpass = rp->subpasses[p_render_subpass];
 
 	// --- Specialization constants ---
-	// freeze_spec_constant_ops bakes spec constants into regular SPIR-V OpConstants
-	// before naga converts to WGSL, so no WGSL 'override' declarations are emitted.
-	// Passing constant overrides to Dawn would cause "not found" pipeline errors.
-	LocalVector<WGPUConstantEntry> spec_entries; // intentionally empty
+	// The default shader modules have spec constants frozen with default values.
+	// If pipeline-specific values are provided, create specialized modules.
+	WGPUShaderModule vertex_module = shader->stage_modules[SHADER_STAGE_VERTEX];
+	WGPUShaderModule fragment_module = shader->stage_modules[SHADER_STAGE_FRAGMENT];
+	WGPUShaderModule specialized_vertex = nullptr;
+	WGPUShaderModule specialized_fragment = nullptr;
+	if (p_specialization_constants.size() > 0) {
+		if (!shader->stage_spirv[SHADER_STAGE_VERTEX].is_empty()) {
+			specialized_vertex = _create_module_with_spec_constants(
+					shader->stage_spirv[SHADER_STAGE_VERTEX], p_specialization_constants, SHADER_STAGE_VERTEX);
+			if (specialized_vertex) {
+				vertex_module = specialized_vertex;
+			}
+		}
+		if (!shader->stage_spirv[SHADER_STAGE_FRAGMENT].is_empty()) {
+			specialized_fragment = _create_module_with_spec_constants(
+					shader->stage_spirv[SHADER_STAGE_FRAGMENT], p_specialization_constants, SHADER_STAGE_FRAGMENT);
+			if (specialized_fragment) {
+				fragment_module = specialized_fragment;
+			}
+		}
+	}
 
 	// --- Vertex state ---
 	LocalVector<WGPUVertexBufferLayout> vb_layouts;
@@ -3943,14 +4163,10 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	}
 
 	WGPUVertexState vertex_state = {};
-	vertex_state.module = shader->stage_modules[SHADER_STAGE_VERTEX];
+	vertex_state.module = vertex_module;
 	vertex_state.entryPoint = { "main", WGPU_STRLEN };
 	vertex_state.bufferCount = vb_layouts.size();
 	vertex_state.buffers = vb_layouts.ptr();
-	if (!spec_entries.is_empty()) {
-		vertex_state.constantCount = spec_entries.size();
-		vertex_state.constants = spec_entries.ptr();
-	}
 
 	// --- Primitive state ---
 	WGPUPrimitiveState primitive = {};
@@ -4172,14 +4388,10 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 
 	// --- Fragment state ---
 	WGPUFragmentState frag = {};
-	frag.module = shader->stage_modules[SHADER_STAGE_FRAGMENT];
+	frag.module = fragment_module;
 	frag.entryPoint = { "main", WGPU_STRLEN };
 	frag.targetCount = color_target_count;
 	frag.targets = color_targets.ptr();
-	if (!spec_entries.is_empty()) {
-		frag.constantCount = spec_entries.size();
-		frag.constants = spec_entries.ptr();
-	}
 
 	// --- Build and create render pipeline ---
 	WGPURenderPipelineDescriptor desc = {};
@@ -4199,6 +4411,8 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	pw->type = WGPipelineWrapper::RENDER;
 	pw->render_handle = pipeline;
 	pw->shader = shader;
+	pw->specialized_modules[SHADER_STAGE_VERTEX] = specialized_vertex;
+	pw->specialized_modules[SHADER_STAGE_FRAGMENT] = specialized_fragment;
 	return PipelineID(pw);
 }
 
@@ -4275,19 +4489,21 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 	ERR_FAIL_COND_V_MSG(!shader->stage_modules[SHADER_STAGE_COMPUTE], PipelineID(),
 			"WebGPU: compute_pipeline_create called with a shader that has no compute stage.");
 
-	// Specialization constants.
-	// freeze_spec_constant_ops bakes spec constants into regular SPIR-V OpConstants
-	// before naga converts to WGSL, so no WGSL 'override' declarations are emitted.
-	LocalVector<WGPUConstantEntry> spec_entries; // intentionally empty
+	// Specialization constants: create a specialized module if values are provided.
+	WGPUShaderModule compute_module = shader->stage_modules[SHADER_STAGE_COMPUTE];
+	WGPUShaderModule specialized_compute = nullptr;
+	if (p_specialization_constants.size() > 0 && !shader->stage_spirv[SHADER_STAGE_COMPUTE].is_empty()) {
+		specialized_compute = _create_module_with_spec_constants(
+				shader->stage_spirv[SHADER_STAGE_COMPUTE], p_specialization_constants, SHADER_STAGE_COMPUTE);
+		if (specialized_compute) {
+			compute_module = specialized_compute;
+		}
+	}
 
 	WGPUComputePipelineDescriptor desc = {};
 	desc.layout = shader->pipeline_layout;
-	desc.compute.module = shader->stage_modules[SHADER_STAGE_COMPUTE];
+	desc.compute.module = compute_module;
 	desc.compute.entryPoint = { "main", WGPU_STRLEN };
-	if (!spec_entries.is_empty()) {
-		desc.compute.constantCount = spec_entries.size();
-		desc.compute.constants = spec_entries.ptr();
-	}
 
 	WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(device, &desc);
 	ERR_FAIL_COND_V_MSG(!pipeline, PipelineID(), "WebGPU: Failed to create compute pipeline.");
@@ -4296,6 +4512,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 	pw->type = WGPipelineWrapper::COMPUTE;
 	pw->compute_handle = pipeline;
 	pw->shader = shader;
+	pw->specialized_modules[SHADER_STAGE_COMPUTE] = specialized_compute;
 	return PipelineID(pw);
 }
 

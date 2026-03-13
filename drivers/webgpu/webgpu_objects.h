@@ -101,6 +101,9 @@ struct WGShader {
 	WGPUShaderModule stage_modules[6] = {}; // SHADER_STAGE_MAX = 6 (vertex/frag/tess×2/compute/max)
 	WGPUShaderModule module = nullptr; // Legacy alias — points to first non-null module.
 
+	// Per-stage raw SPIR-V bytes. Stored for deferred specialization constant patching.
+	PackedByteArray stage_spirv[6];
+
 	WGPUPipelineLayout pipeline_layout = nullptr;
 	LocalVector<WGPUBindGroupLayout> bind_group_layouts; // One per descriptor set.
 
@@ -172,6 +175,9 @@ struct WGPipelineWrapper {
 		WGPUComputePipeline compute_handle;
 	};
 	WGShader *shader = nullptr;
+	// Specialized shader modules created with pipeline-specific specialization constants.
+	// If non-null, these are owned by this pipeline and must be released.
+	WGPUShaderModule specialized_modules[6] = {};
 
 	WGPipelineWrapper() : render_handle(nullptr) {}
 };

@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 13, 2026 — Phase 3 IN PROGRESS. Rendering pipeline runs end-to-end (278 shaders, 0 NAGA failures, 0 Dawn validation errors, shadow passes + scene + tonemap + blit all execute). **BLOCKER**: Canvas output is transparent rgba(0,0,0,0) — draws execute to swap chain but final composited result is not visible. Standalone JS/C++ clears to the canvas DO work (user-verified magenta). Root cause under investigation.
+> **Last Updated**: March 13, 2026 — Phase 3 IN PROGRESS. **MILESTONE: 3D geometry VISIBLE in browser** — blue cube + red sphere rendering with lighting and shadows. Root cause of previous transparency blocker was specialization constants being frozen at shader creation time (before pipeline-specific values were known), causing tonemap to apply AGX tonemapping → white output. Fixed by deferring spec constant patching to pipeline creation via SPIR-V binary rewriting.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -797,14 +797,17 @@ correct approach, but ALL code paths that read from staging buffers must check `
 - ✅ NAGA flatten ArraySize::Dynamic → handled in flatten_binding_arrays
 - ✅ Cube↔2D dimension adaptation in `_get_compatible_bind_group()` during rebind
 - ✅ IMAGE_BUFFER BGL — polymorphic storageTexture detection
-- ❌ **BLOCKER**: Canvas shows transparent rgba(0,0,0,0) despite all draws executing without errors
-  - Standalone JS clear → magenta canvas (user-verified) ✓
-  - Standalone C++ wgpu clear using sc->current_view → visible (green) ✓
-  - Godot's full command buffer submit → canvas transparent ✗
-  - Alpha-strip on all BGRA8Unorm pipelines does not fix it
-  - No SUBMIT-ERROR from error scope monkey-patch
-  - Root cause unknown — could be: command encoder usage pattern, missing present call,
-    texture view lifetime issue, or subtle API misuse not caught by validation
+- ❌ ~~**BLOCKER**: Canvas shows transparent rgba(0,0,0,0)~~ **RESOLVED** (March 13)
+  - **Root cause**: `freeze_spec_constant_ops()` in naga-converter ran at shader creation time,
+    baking all specialization constants to their defaults (false). The tonemap shader's
+    `apply_tonemapping()` fell through all false conditions to `tonemap_agx()`, which produced
+    white from the HDR input with luminance_multiplier=2.0.
+  - **Fix**: Deferred specialization constant patching to pipeline creation time. New
+    `_create_module_with_spec_constants()` patches SPIR-V OpSpecConstantTrue/False opcodes
+    with the pipeline-specific values, then creates a new WGPUShaderModule via Naga conversion.
+    Specialized modules are stored on WGPipelineWrapper and released on pipeline free.
+  - **Also**: Force `color.a = 1.0` in blit.glsl fragment output + uncaptured GPU error handler.
+- ✅ **MILESTONE: 3D geometry VISIBLE** — blue cube + red sphere with lighting and shadows (March 13)
 
 **Key Systems Implemented**:
 - `_get_compatible_bind_group()` — BGL-compatible bind group rebinding with sampler, depth/float, and dimension adaptation
@@ -818,16 +821,14 @@ correct approach, but ALL code paths that read from staging buffers must check `
 - 0 DAWN-ERR (was 7 → 0)
 - 0 NAGA failures (was 17 → 0)
 - 278 successful shader conversions
-- Rendering pipeline runs fully: 5 shadow cascade passes, 1 scene pass, 1 tonemap pass, 1 blit-to-swap-chain
-- BlitShaderRD:0 draws 6-index quad to swap chain (IDRAW sc=1)
-- **Canvas output: transparent rgba(0,0,0,0)** — page background (white) shows through
-- Screenshot pixel analysis: 100% white in canvas area = transparent canvas over white page
-- Shadow cascades rendering (4x 4096x4096 depth passes)
-- Tonemap pass rendering (fullscreen triangle)
-- Blit-to-screen executing (BlitShaderRD, 6-index quad) — but canvas transparent
+- Rendering pipeline runs fully: shadow cascades, scene pass, tonemap, blit-to-swap-chain
+- **3D scene visible**: blue cube + red sphere with directional lighting and shadow cascades
+- Specialization constants patched at pipeline creation (SPIR-V OpSpecConstant rewriting)
+- Tonemap correctly applies linear pass-through (was incorrectly defaulting to AGX)
+- Blit forces alpha=1 for opaque canvas compositing
 - 2 expected warnings only (texture limit → Mobile renderer, first-frame swap chain resize)
 
-**Next Steps**: Debug and fix the canvas transparency blocker. Then verify 3D scene visually renders.
+**Next Steps**: Continue with Task 3.2 (compute shaders) and Task 3.3 (timestamp queries). Visual polish: verify lighting, shadows, textures render correctly. Fix any remaining rendering artifacts.
 
 **Transparency Debugging Done So Far**:
 - Confirmed standalone JS clear (magenta) works — canvas pipeline functional
