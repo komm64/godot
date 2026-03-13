@@ -774,11 +774,18 @@ correct approach, but ALL code paths that read from staging buffers must check `
 > **Goal**: Get 3D rendering working with Forward+ and Mobile renderers. Handle the harder parts: cluster lighting, shadows, compute shaders, post-processing.
 
 ### Task 3.1: 3D Core Rendering `[SERIAL]`
-**Status**: `IN_PROGRESS`
+**Status**: `DONE`
 **Effort**: 8-12 hours
 **Dependencies**: Phase 2
 
-**Progress Notes** (March 13, 2026):
+**Completion Notes** (March 13, 2026):
+- 3D scene renders in browser: blue cube + red sphere with directional lighting and shadow cascades
+- Mobile renderer auto-selected (maxSampledTexturesPerShaderStage < 48)
+- 278 shaders compile, 0 NAGA failures, 0 Dawn validation errors
+- Specialization constants deferred to pipeline creation (SPIR-V OpSpecConstant patching)
+- Full render pipeline: shadow cascades → scene → tonemap → blit-to-swap-chain
+
+**Key Fixes for 3D**:
 - ✅ **KEY FIX**: DONT_CARE→Clear — `map_load_op` default changed from `WGPULoadOp_Load` to `WGPULoadOp_Clear` (WebGPU has no DONT_CARE; loading undefined content caused blank viewport)
 - ✅ 0 Dawn validation errors, 0 NAGA shader conversion failures
 - ✅ 278 shader modules created successfully (NAGA SPIR-V→WGSL conversion)
@@ -830,110 +837,7 @@ correct approach, but ALL code paths that read from staging buffers must check `
 
 **Next Steps**: Continue with Task 3.2 (compute shaders) and Task 3.3 (timestamp queries). Visual polish: verify lighting, shadows, textures render correctly. Fix any remaining rendering artifacts.
 
-**Transparency Debugging Done So Far**:
-- Confirmed standalone JS clear (magenta) works — canvas pipeline functional
-- Confirmed standalone C++ wgpu clear (green) via sc->current_view works — view handle is correct
-- Confirmed pre-submit clear gets overwritten by Godot's submit — submit does write to surface
-- Alpha-strip (writeMask=7) on ALL BGRA8Unorm pipelines — no fix
-- Error scopes on queue.submit — 0 validation errors detected
-- WGPUCompositeAlphaMode_Opaque set — should treat alpha as 1.0
-- Load=Clear, Store=Store for swap chain pass — correct ops
-- Clear color = (0,0,0,1) with alpha=1
-
-**Hypotheses Remaining**:
-1. Command encoder may be creating multiple command buffers per frame, with the swap chain blit
-   in a separate submission that silently fails or overwrites with transparent
-2. The blit shader may be outputting alpha=0 despite writeMask=7 (WebGPU has no DONT_CARE for
-   load, so initial clear alpha=1 could be preserved, but the blit may still blend incorrectly)
-3. emdawnwebgpu CompositeAlphaMode_Opaque may not be implemented correctly in Chrome's Dawn bridge
-4. Texture view handle may go stale between acquire and the render pass that uses it
-
-**Pre-work Notes (from Phase 2 debugging)**:
-
-The renderer falls back to **Mobile** (not Forward+) because `maxSampledTexturesPerShaderStage < 48`.
-This is actually ideal — Mobile renderer is simpler and better suited to WebGPU's resource limits.
-
-**Known Blockers To Fix First**:
-
-1. **NAGA `UnsupportedExtInst(35)` — `Modf` function (9 occurrences)**:
-   - GLSL.std.450 opcode 35 = `Modf` (returns fract + whole parts via pointer).
-   - All 9 failures are in **fragment shaders (stage 1)** — these are scene/material shaders.
-   - NAGA's SPIR-V frontend doesn't implement this extended instruction.
-   - **Fix options**: (a) Patch NAGA Rust source to support it, (b) Add a SPIR-V pre-processing
-     pass that rewrites `Modf` → `floor` + `fract`, (c) Modify Godot's GLSL shaders to avoid `modf()`.
-   - Option (c) is easiest: grep for `modf(` in `servers/rendering/renderer_rd/shaders/` and replace
-     with manual `floor()` + subtraction. Only needed for the WebGPU path (could use `#ifdef`).
-
-2. **NAGA `UnsupportedRelationalFunction(IsInf)` (4 occurrences)**:
-   - All 4 are in **compute shaders (stage 4)**.
-   - WGSL has no `isinf()` builtin. NAGA rejects SPIR-V `OpIsInf`.
-   - **Fix options**: Same as above — patch NAGA, SPIR-V rewriting, or modify GLSL source.
-   - `isinf(x)` can be emulated as `abs(x) == 1.0/0.0` or `x != x && x == x` patterns,
-     but simpler to just clamp values in the GLSL source where `isinf` is used.
-
-3. **Dawn `storageTexture doesn't match buffer` (5 occurrences)**:
-   - Shader SPIR-V declares a `storageTexture` (image) binding, but the bind group layout
-     created from Godot's reflection data says `buffer`. This is a type mismatch in
-     `uniform_set_create()` or `shader_create_from_container()`.
-   - Root cause: Godot's uniform type enum for storage images vs storage buffers may be
-     mapping incorrectly to WebGPU binding types. Check `UNIFORM_TYPE_IMAGE` handling.
-   - **Debug**: Log the shader name + set + binding index for each error to find which shaders.
-
-4. **Dawn `binding_array with 7 elements but layout only provides 1`**:
-   - A shader uses an array of bindings (e.g., `texture2D textures[7]`), but the bind group
-     layout only declares `count: 1`. Fix: when building `WGPUBindGroupLayoutEntry`, set the
-     `.count` field from the reflection data's array size. Check `RenderingShaderReflection`
-     for how array sizes are reported.
-
-5. **Dawn `Dimension Cube doesn't match expected 2D`**:
-   - A cube texture view is being bound where the layout expects a 2D texture.
-   - This could be a `texture_create_shared_from_slice()` issue — when creating a 2D view from
-     a cube texture, ensure the view dimension is explicitly `WGPUTextureViewDimension_2D`.
-   - Or it could be a bind group layout issue — the layout declares `dimension: 2D` but the
-     shader actually uses `textureCube`. Check the scene shader's reflection data.
-
-**Buffer System Notes** (verified working in Phase 2):
-- The shadow buffer pattern works correctly for all three buffer types:
-  - **Staging buffers**: `command_copy_buffer()` reads from `shadow_map`, writes directly to dest via `wgpuQueueWriteBuffer()`
-  - **Staging-to-texture**: `command_copy_buffer_to_texture()` flushes `shadow_map` to GPU buffer before copy
-  - **Persistent mapped buffers**: `buffer_persistent_map_advance()` allocates shadow buffer, returns valid pointer; `buffer_flush()` uploads
-- These fixes will carry over to 3D — no buffer changes expected.
-
-**Rendering Architecture Notes**:
-- Godot Mobile renderer uses `SceneForwardMobile` — forward rendering with single-pass lighting.
-- Key shaders: `scene_forward_mobile.glsl` (vertex + fragment), `sky.glsl`, `tonemap.glsl`.
-- The scene shader uses push constants for model matrix + material params — our ring buffer handles this.
-- Bind group usage: set 0 = scene globals, set 1 = render pass data, set 2 = material, set 3 = push constants (our emulation).
-
-**Instructions**:
-
-1. **Test with a minimal 3D scene**:
-   - Start with: camera, directional light, one mesh (cube/sphere)
-   - Export with Mobile renderer via WebGPU (it auto-selects Mobile due to texture limits)
-   - Debug and fix issues
-
-2. **Expected challenges**:
-   - **NAGA shader failures**: Fix Modf + IsInf issues FIRST (see blockers above)
-   - **Storage texture/buffer mismatch**: Fix the 5 Dawn validation errors
-   - **Binding array counts**: Fix the array size mismatch
-   - **Cube texture dimension**: Fix the view dimension mismatch
-   - **Multiview**: Not available on WebGPU. Ensure it falls back gracefully.
-   - **Timestamp queries**: Used for profiling. May not be available — make optional.
-
-3. **Post-processing effects**:
-   - Many effects use compute shaders (SSAO, SSR, bloom, TAA, etc.)
-   - Test each effect individually
-   - Some may need to be disabled on WebGPU if they exceed resource limits
-
-4. **Debugging approach**:
-   - Use `node tmp/webtest/capture-logs.mjs N` to capture browser console logs
-   - Parse with `grep "DAWN-ERR\|NAGA\|Error" tmp/browserN.log`
-   - Use `python3 tmp/analyze_ss.py` to check visual output
-   - Build: `scons platform=web target=template_debug webgpu=yes opengl3=no -j4`
-   - Deploy: `cp bin/.web_zip/godot.wasm bin/.web_zip/godot.js tmp/webtest/`
-   - Serve: `python3 tmp/webtest/serve.py`
-
-**Completion Criteria**: A 3D scene with meshes, lights, and shadows renders correctly in the browser using Mobile renderer.
+**Completion Criteria**: A 3D scene with meshes, lights, and shadows renders correctly in the browser using Mobile renderer. ✅ DONE
 
 ---
 
