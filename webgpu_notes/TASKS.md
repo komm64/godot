@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 13, 2026 — **Phase 4 IN PROGRESS.** Phase 3 complete. Task 4.1 (export preset integration) DONE — WebGPU rendering driver auto-detected from project settings, Engine.js auto-initializes WebGPU device, HTML shell shows clear WebGPU error messages.
+> **Last Updated**: March 13, 2026 — **Phase 4 IN PROGRESS.** Task 4.1 (export preset integration) and Task 4.2 (HTML shell & fallback) DONE. Task 4.3 (documentation) remains.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -1007,7 +1007,7 @@ All three optimizations were already implemented during Phase 2:
 ---
 
 ### Task 4.2: HTML Shell & Fallback `[PARALLEL with 4.1]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 4-6 hours
 **Dependencies**: Phase 3
 
@@ -1035,6 +1035,17 @@ All three optimizations were already implemented during Phase 2:
    - Unsupported features: warn in console but continue
 
 **Completion Criteria**: WebGPU web exports work out of the box. Fallback to WebGL works when WebGPU is unavailable.
+
+**Completion Notes (March 13, 2026)**:
+- **Item 1 (WebGPU detection)**: Already implemented in Task 4.1 — HTML shell checks `navigator.gpu`, shows clear error if missing.
+- **Item 1 (Loading indicator)**: Added "Initializing WebGPU..." notice displayed while async WebGPU device request is in-flight, before WASM download progress takes over.
+- **Item 2 (Fallback)**: The architecture already supports renderer choice via project settings. `rendering/renderer/rendering_method.web = gl_compatibility` uses WebGL2/GLES3; `forward_plus` or `mobile` uses WebGPU. Build system supports `webgpu=yes opengl3=yes` for a single binary with both drivers. Runtime fallback (Option B) deferred — current approach follows Godot's standard per-platform project settings pattern.
+- **Item 3 (Canvas setup)**: The `<canvas id="canvas">` element in the HTML template requires no special WebGPU attributes. The C++ side creates the WebGPU surface via `WGPUEmscriptenSurfaceSourceCanvasHTMLSelector` targeting `#canvas`. Device pixel ratio is handled by Godot's `DisplayServerWeb`.
+- **Item 4 (Error handling)**:
+  - Device lost: `Engine.requestWebGPUDevice()` now installs a `device.lost` promise handler that logs reason and message via `console.error`.
+  - Uncaptured errors: Event listener on device logs all uncaptured WebGPU validation errors. C++ side also has an `uncapturederror` handler + per-submit error scopes.
+  - Missing features: The HTML shell shows a clear error notice listing missing features (including WebGPU) before WASM loads.
+- Build verified clean.
 
 ---
 

@@ -314,7 +314,18 @@ const Engine = (function () {
 			if (adapter.features.has('timestamp-query')) {
 				desc.requiredFeatures = (desc.requiredFeatures || []).concat(['timestamp-query']);
 			}
-			return adapter.requestDevice(desc);
+			return adapter.requestDevice(desc).then(function (device) {
+				// Monitor device loss (non-blocking — just log).
+				device.lost.then(function (info) {
+					const reason = info.reason || 'unknown';
+					const msg = info.message || '';
+					console.error(`[Godot] WebGPU device lost (reason: ${reason}): ${msg}`);
+				});
+				device.addEventListener('uncapturederror', function (event) {
+					console.error('[Godot] WebGPU uncaptured error:', event.error);
+				});
+				return device;
+			});
 		});
 	};
 

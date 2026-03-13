@@ -202,8 +202,14 @@ const engine = new Engine(GODOT_CONFIG);
 		}
 	} else {
 		setStatusMode('progress');
+		// Show WebGPU initialization status if applicable.
+		if (GODOT_RENDERING_DRIVER === 'webgpu') {
+			setStatusNotice('Initializing WebGPU...');
+			setStatusMode('notice');
+		}
 		engine.startGame({
 			'onProgress': function (current, total) {
+				setStatusMode('progress');
 				if (current > 0 && total > 0) {
 					statusProgress.value = current;
 					statusProgress.max = total;
