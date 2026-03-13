@@ -851,6 +851,11 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	RendererRD::MaterialStorage::Samplers samplers;
 	bool hdr_render_target = false;
 
+#ifdef WEB_ENABLED
+	// WebGPU does not support subpasses or input attachments.
+	using_subpass_post_process = false;
+#endif
+
 	RS::ViewportMSAA msaa = rb->get_msaa_3d();
 	bool use_msaa = msaa != RS::VIEWPORT_MSAA_DISABLED;
 	bool resolve_depth_buffer = (use_msaa && has_depth_texture_override); // We'll check more conditions later.

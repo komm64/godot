@@ -76,6 +76,23 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// Bind group backed by the ring buffer (also created once, reused every frame with dynamic offsets).
 	WGPUBindGroup push_constant_bind_group = nullptr;
 
+	// --- Fallback Textures ---
+	// Small float texture used when a depth-format fallback texture is bound
+	// to a BGL entry that expects Float sample type (depth textures can't be
+	// sampled as Float in WebGPU, unlike Vulkan).
+	WGPUTexture fallback_float_texture = nullptr;
+	WGPUTextureView fallback_float_texture_view = nullptr;
+
+	// --- Dummy Samplers for BGL Rebinding ---
+	// When a bind group must be re-created with a different BGL (e.g., because
+	// the original BGL has a Comparison sampler but the target has Filtering),
+	// these dummy samplers are used as substitutes.
+	WGPUSampler dummy_filtering_sampler = nullptr;
+	WGPUSampler dummy_comparison_sampler = nullptr;
+
+	// --- BGL Rebinding Helper ---
+	WGPUBindGroup _get_compatible_bind_group(WGUniformSet *p_us, WGShader *p_target_shader, uint32_t p_set_idx);
+
 	// --- Pixel Format Mapping ---
 	// TODO: Move to dedicated pixel_formats_webgpu.h/cpp when ready.
 

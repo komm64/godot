@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 12, 2026 — Phase 2 COMPLETE. 2D rendering milestone achieved: Blue ColorRect (30,90,252) pixel-perfect in browser. Phase 3 (3D rendering) is next.
+> **Last Updated**: March 13, 2026 — Phase 3 IN PROGRESS. Rendering pipeline runs end-to-end (278 shaders, 0 NAGA failures, 0 Dawn validation errors, shadow passes + scene + tonemap + blit all execute). **BLOCKER**: Canvas output is transparent rgba(0,0,0,0) — draws execute to swap chain but final composited result is not visible. Standalone JS/C++ clears to the canvas DO work (user-verified magenta). Root cause under investigation.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -774,9 +774,78 @@ correct approach, but ALL code paths that read from staging buffers must check `
 > **Goal**: Get 3D rendering working with Forward+ and Mobile renderers. Handle the harder parts: cluster lighting, shadows, compute shaders, post-processing.
 
 ### Task 3.1: 3D Core Rendering `[SERIAL]`
-**Status**: `TODO`
+**Status**: `IN_PROGRESS`
 **Effort**: 8-12 hours
 **Dependencies**: Phase 2
+
+**Progress Notes** (March 13, 2026):
+- ✅ **KEY FIX**: DONT_CARE→Clear — `map_load_op` default changed from `WGPULoadOp_Load` to `WGPULoadOp_Clear` (WebGPU has no DONT_CARE; loading undefined content caused blank viewport)
+- ✅ 0 Dawn validation errors, 0 NAGA shader conversion failures
+- ✅ 278 shader modules created successfully (NAGA SPIR-V→WGSL conversion)
+- ✅ Full rendering pipeline runs: shadow cascades (4x 4096x4096), scene pass, tonemap, blit-to-swap-chain
+- ✅ BlitShaderRD draws 6-index quad to swap chain surface (IDRAW sc=1 confirmed)
+- ✅ Alpha-strip applied to all BGRA8Unorm pipelines (writeMask=7, no alpha write)
+- ✅ Swap chain configured with CompositeAlphaMode_Opaque, BGRA8Unorm, clear=(0,0,0,1)
+- ✅ BGL rebind cache system — adapts bind groups across shader variants
+- ✅ Depth alias fix — fallback float texture view for depth alias entries
+- ✅ Entry filtering — filters adapted entries to only include bindings present in target BGL
+- ✅ Stale PC bind group fix — checks merged_pc_group_layout before using cached bind group
+- ✅ NAGA Modf (opcode 35) — patched SPIR-V frontend to emit Math{Modf} struct expression
+- ✅ NAGA IsInf/IsNan — patched WGSL writer to emit `(abs(x) > 3.4e+38)` / `(x != x)`
+- ✅ NAGA SubpassData — mapped Dim::SubpassData → 2D in convert.rs
+- ✅ NAGA NotIOShareableType — relaxed IO_SHAREABLE validation for @location bindings
+- ✅ NAGA flatten ArraySize::Dynamic → handled in flatten_binding_arrays
+- ✅ Cube↔2D dimension adaptation in `_get_compatible_bind_group()` during rebind
+- ✅ IMAGE_BUFFER BGL — polymorphic storageTexture detection
+- ❌ **BLOCKER**: Canvas shows transparent rgba(0,0,0,0) despite all draws executing without errors
+  - Standalone JS clear → magenta canvas (user-verified) ✓
+  - Standalone C++ wgpu clear using sc->current_view → visible (green) ✓
+  - Godot's full command buffer submit → canvas transparent ✗
+  - Alpha-strip on all BGRA8Unorm pipelines does not fix it
+  - No SUBMIT-ERROR from error scope monkey-patch
+  - Root cause unknown — could be: command encoder usage pattern, missing present call,
+    texture view lifetime issue, or subtle API misuse not caught by validation
+
+**Key Systems Implemented**:
+- `_get_compatible_bind_group()` — BGL-compatible bind group rebinding with sampler, depth/float, and dimension adaptation
+- Dummy samplers (filtering + comparison) for BGL rebinding
+- Fallback 4x4 RGBA8Unorm float texture for depth alias substitution
+- WGUniformSet with `cached_entries`, `source_shader`, `rebind_cache`, `bound_textures`
+- `_flush_push_constants` guarded by `p_shader->merged_pc_group_layout` check
+- NAGA v28 patched source at `tmp/naga-converter/naga-patched/`
+
+**Browser Test Results** (March 13):
+- 0 DAWN-ERR (was 7 → 0)
+- 0 NAGA failures (was 17 → 0)
+- 278 successful shader conversions
+- Rendering pipeline runs fully: 5 shadow cascade passes, 1 scene pass, 1 tonemap pass, 1 blit-to-swap-chain
+- BlitShaderRD:0 draws 6-index quad to swap chain (IDRAW sc=1)
+- **Canvas output: transparent rgba(0,0,0,0)** — page background (white) shows through
+- Screenshot pixel analysis: 100% white in canvas area = transparent canvas over white page
+- Shadow cascades rendering (4x 4096x4096 depth passes)
+- Tonemap pass rendering (fullscreen triangle)
+- Blit-to-screen executing (BlitShaderRD, 6-index quad) — but canvas transparent
+- 2 expected warnings only (texture limit → Mobile renderer, first-frame swap chain resize)
+
+**Next Steps**: Debug and fix the canvas transparency blocker. Then verify 3D scene visually renders.
+
+**Transparency Debugging Done So Far**:
+- Confirmed standalone JS clear (magenta) works — canvas pipeline functional
+- Confirmed standalone C++ wgpu clear (green) via sc->current_view works — view handle is correct
+- Confirmed pre-submit clear gets overwritten by Godot's submit — submit does write to surface
+- Alpha-strip (writeMask=7) on ALL BGRA8Unorm pipelines — no fix
+- Error scopes on queue.submit — 0 validation errors detected
+- WGPUCompositeAlphaMode_Opaque set — should treat alpha as 1.0
+- Load=Clear, Store=Store for swap chain pass — correct ops
+- Clear color = (0,0,0,1) with alpha=1
+
+**Hypotheses Remaining**:
+1. Command encoder may be creating multiple command buffers per frame, with the swap chain blit
+   in a separate submission that silently fails or overwrites with transparent
+2. The blit shader may be outputting alpha=0 despite writeMask=7 (WebGPU has no DONT_CARE for
+   load, so initial clear alpha=1 could be preserved, but the blit may still blend incorrectly)
+3. emdawnwebgpu CompositeAlphaMode_Opaque may not be implemented correctly in Chrome's Dawn bridge
+4. Texture view handle may go stale between acquire and the render pass that uses it
 
 **Pre-work Notes (from Phase 2 debugging)**:
 

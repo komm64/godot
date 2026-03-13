@@ -118,11 +118,16 @@ struct WGShader {
 	struct BindGroupEntry {
 		WGPUBindGroupLayoutEntry layout_entry = {};
 		RDD::UniformType godot_type = RDD::UNIFORM_TYPE_MAX;
+		uint32_t array_length = 0; // >1 for binding_array (e.g., texture arrays)
 	};
 	struct BindGroupInfo {
 		LocalVector<BindGroupEntry> entries;
 	};
 	LocalVector<BindGroupInfo> bind_group_infos;
+
+	// Depth alias bindings: maps (set << 16 | alias_binding) → depth_binding.
+	// Used by uniform_set_create to add extra bind group entries for split depth textures.
+	HashMap<uint32_t, uint32_t> depth_alias_bindings;
 
 	String name;
 };
@@ -141,6 +146,7 @@ struct WGRenderPass {
 	LocalVector<RDD::Attachment> attachments;
 	LocalVector<SubpassInfo> subpasses;
 	uint32_t view_count = 0;
+	bool is_swap_chain_pass = false; // True for swap chain render passes — used to strip alpha writes.
 };
 
 // =============================================================================
@@ -177,6 +183,18 @@ struct WGPipelineWrapper {
 struct WGUniformSet {
 	WGPUBindGroup handle = nullptr;
 	uint32_t set_index = 0;
+	LocalVector<WGPUTextureView> temp_views; // Re-dimensioned views for Cube↔2D fixups.
+
+	// Rebind cache: when a bind group is created with shader A's BGL but
+	// needs to be used with shader B's pipeline (different BGL), we
+	// re-create the bind group with the correct BGL and cache it.
+	LocalVector<WGPUBindGroupEntry> cached_entries;
+	WGShader *source_shader = nullptr;
+	HashMap<WGPUBindGroupLayout, WGPUBindGroup> rebind_cache;
+
+	// Maps binding index → WGTexture* for texture entries, used during rebind
+	// to create compatible views when the target BGL has a different dimension.
+	HashMap<uint32_t, WGTexture *> bound_textures;
 };
 
 // =============================================================================

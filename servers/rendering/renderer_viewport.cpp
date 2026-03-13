@@ -763,15 +763,6 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 
 	GodotProfileZoneGrouped(_profile_zone, "render viewports");
 
-	// Diagnostic: print viewport count on first few frames.
-	{
-		static uint64_t vp_frame = 0;
-		vp_frame++;
-		if (vp_frame <= 3) {
-			WARN_PRINT(vformat("WebGPU VP diag: frame=%d active_viewports=%d", vp_frame, sorted_active_viewports.size()));
-		}
-	}
-
 	//determine what is visible
 	draw_viewports_pass++;
 
@@ -826,13 +817,6 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 
 		// Diagnostic: log each viewport's visibility on first 3 frames.
 		{
-			static uint64_t vp_log_frame = 0;
-			if (vp_log_frame < 3) {
-				vp_log_frame++;
-				WARN_PRINT(vformat("WebGPU VP: visible=%d size=(%dx%d) to_screen=%d update_mode=%d",
-						(int)visible, (int)vp->size.x, (int)vp->size.y,
-						(int)vp->viewport_to_screen, (int)vp->update_mode));
-			}
 		}
 
 		if (visible) {
@@ -963,12 +947,9 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 
 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->blit_render_targets_to_screen");
 	if (p_swap_buffers && !blit_to_screen_list.is_empty()) {
-		WARN_PRINT_ONCE(vformat("WebGPU VP blit: blit_to_screen_list has %d entries, calling blit_render_targets_to_screen", blit_to_screen_list.size()));
 		for (const KeyValue<int, Vector<BlitToScreen>> &E : blit_to_screen_list) {
 			RSG::rasterizer->blit_render_targets_to_screen(E.key, E.value.ptr(), E.value.size());
 		}
-	} else {
-		WARN_PRINT_ONCE(vformat("WebGPU VP blit: skipped (p_swap_buffers=%d blit_list_empty=%d)", (int)p_swap_buffers, (int)blit_to_screen_list.is_empty()));
 	}
 }
 

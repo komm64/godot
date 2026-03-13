@@ -1055,7 +1055,8 @@ hvec4 fog_process(vec3 vertex) {
 		float mip_level = mix(1.0 / MAX_ROUGHNESS_LOD, 1.0, 1.0 - (abs(vertex.z) - scene_data_block.data.z_near) / (scene_data_block.data.z_far - scene_data_block.data.z_near));
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 		float roughness_lod, blend;
-		blend = modf(mip_level * MAX_ROUGHNESS_LOD, roughness_lod);
+		roughness_lod = floor(mip_level * MAX_ROUGHNESS_LOD);
+		blend = mip_level * MAX_ROUGHNESS_LOD - roughness_lod;
 		float cube_lod = vec3_to_oct_lod(dFdx(cube_view), dFdy(cube_view), scene_data_block.data.radiance_pixel_size);
 		vec2 cube_uv = vec3_to_oct_with_border(cube_view, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
 		vec3 sky_sample_a = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(cube_uv, roughness_lod), cube_lod).rgb;
@@ -1603,7 +1604,8 @@ void main() {
 		ref_vec = hvec3(scene_data.radiance_inverse_xform * vec3(ref_vec));
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 		float lod;
-		half blend = half(modf(float(sqrt(roughness) * MAX_ROUGHNESS_LOD), lod));
+		lod = floor(float(sqrt(roughness) * MAX_ROUGHNESS_LOD));
+		half blend = half(float(sqrt(roughness) * MAX_ROUGHNESS_LOD) - lod);
 
 		float ref_lod = vec3_to_oct_lod(dFdx(vec3(ref_vec)), dFdy(vec3(ref_vec)), scene_data_block.data.radiance_pixel_size);
 		vec2 ref_uv = vec3_to_oct_with_border(ref_vec, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
@@ -1668,7 +1670,8 @@ void main() {
 		float roughness_lod = mix(0.001, 0.1, sqrt(float(clearcoat_roughness))) * MAX_ROUGHNESS_LOD;
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 		float lod;
-		half blend = half(modf(roughness_lod, lod));
+		lod = floor(roughness_lod);
+		half blend = half(roughness_lod - lod);
 
 		float ref_lod = vec3_to_oct_lod(dFdx(vec3(ref_vec)), dFdy(vec3(ref_vec)), scene_data_block.data.radiance_pixel_size);
 		vec2 ref_uv = vec3_to_oct_with_border(ref_vec, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
