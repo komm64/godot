@@ -3181,31 +3181,6 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 		return; // Shader has no push constants.
 	}
 
-	// Diagnostic: log push constant data for blit (swap chain) draws.
-	if (p_cmd_buf->render_state.render_pass && p_cmd_buf->render_state.render_pass->is_swap_chain_pass) {
-		static int _pc_log = 0;
-		if (_pc_log < 10) {
-			const float *f = (const float *)p_cmd_buf->push_constant_data;
-			const uint32_t *u = (const uint32_t *)p_cmd_buf->push_constant_data;
-			int nf = p_cmd_buf->push_constant_data_len / 4;
-			if (nf >= 8) {
-				EM_ASM({ console.log('[SC-PUSHC] len=' + $0 + ' src_rect=(' + $1.toFixed(3) + ',' + $2.toFixed(3) + ',' + $3.toFixed(3) + ',' + $4.toFixed(3) + ') dst_rect=(' + $5.toFixed(3) + ',' + $6.toFixed(3) + ',' + $7.toFixed(3) + ',' + $8.toFixed(3) + ')'); },
-						p_cmd_buf->push_constant_data_len, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
-			}
-			if (nf >= 16) {
-				// Log remaining fields: rotation_sin(8), rotation_cos(9), eye_center(10,11), k1(12), k2(13), upscale(14), aspect_ratio(15)
-				EM_ASM({ console.log('[SC-PUSHC2] rot_sin=' + $0.toFixed(3) + ' rot_cos=' + $1.toFixed(3) + ' eye=(' + $2.toFixed(3) + ',' + $3.toFixed(3) + ') k1=' + $4.toFixed(3) + ' k2=' + $5.toFixed(3) + ' upscale=' + $6.toFixed(3) + ' aspect=' + $7.toFixed(3)); },
-						f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
-			}
-			if (nf >= 20) {
-				// Log layer(16), convert_to_srgb(17), use_debanding(18), pad(19) - as uint32
-				EM_ASM({ console.log('[SC-PUSHC3] layer=' + $0 + ' convert_to_srgb=' + $1 + ' use_debanding=' + $2 + ' pad=' + $3); },
-						u[16], u[17], u[18], u[19]);
-			}
-			_pc_log++;
-		}
-	}
-
 	// Write push constant data to ring buffer.
 	uint32_t aligned_size = (p_cmd_buf->push_constant_data_len + PUSH_CONSTANT_SLOT_ALIGNMENT - 1) & ~(PUSH_CONSTANT_SLOT_ALIGNMENT - 1);
 

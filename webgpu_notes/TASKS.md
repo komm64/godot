@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 13, 2026 — Phase 3 IN PROGRESS. **MILESTONE: 3D geometry VISIBLE in browser** — blue cube + red sphere rendering with lighting and shadows. Task 3.2 (compute shaders) DONE — verified all compute paths, fixed `has_feature()`, `STORAGE_BUFFER_DYNAMIC` visibility, and `limit_get()` to query actual device limits. Task 3.3 (timestamp queries) DONE — full async readback pipeline implemented.
+> **Last Updated**: March 13, 2026 — **Phase 3 COMPLETE.** All tasks done: 3.1 (3D core), 3.2 (compute shaders), 3.3 (timestamp queries), 3.4 (push constant optimization). Ready for Phase 4 (export integration & polish).
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -926,7 +926,7 @@ correct approach, but ALL code paths that read from staging buffers must check `
 ---
 
 ### Task 3.4: Performance Optimization — Push Constant Fast Path `[PARALLEL with 3.1]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 4-6 hours
 **Dependencies**: Phase 2
 
@@ -947,6 +947,13 @@ The push constant emulation from Task 2.2 may cause performance issues due to fr
 3. **Benchmark**: Compare draw call throughput before and after optimization
 
 **Completion Criteria**: Push constant updates are efficient enough to maintain 60 FPS in draw-call-heavy scenes.
+
+**Completion Notes (March 13, 2026)**:
+All three optimizations were already implemented during Phase 2:
+- **Ring buffer**: 256KB buffer with 256-byte aligned slots (1024 draws/frame), created once at init. Dynamic offsets via `hasDynamicOffset=true` — no per-draw bind group creation.
+- **Dirty-state batching**: `push_constants_dirty` flag in `WGCommandBuffer` checked before every draw/dispatch in `_flush_push_constants()`. Skips GPU upload when data hasn't changed.
+- **Bind group reuse**: Universal PC-only bind group shared across all shaders. Merged bind group (material + PC) created once per uniform set for group 3.
+- **Cleanup**: Removed development-time `[SC-PUSHC]` diagnostic logging from `_flush_push_constants()` that added unnecessary overhead per swap-chain draw.
 
 ---
 
