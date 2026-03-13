@@ -227,9 +227,16 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 }
 
 void RenderingDeviceDriverWebGPU::_check_capabilities() {
-	capabilities.device_family = DEVICE_UNKNOWN; // TODO: Consider adding DEVICE_WEBGPU to enum.
+	capabilities.device_family = DEVICE_UNKNOWN;
 	capabilities.version_major = 1;
 	capabilities.version_minor = 0;
+
+	// Query actual device limits.
+	device_limits = WGPU_LIMITS_INIT;
+	WGPUStatus status = wgpuDeviceGetLimits(device, &device_limits);
+	if (status != WGPUStatus_Success) {
+		WARN_PRINT("WebGPU: Failed to query device limits, using spec minimums.");
+	}
 
 	// Multiview not supported in WebGPU.
 	multiview_capabilities.is_supported = false;
@@ -2036,6 +2043,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					  } else {
 						  bool is_readonly = wgsl_ssbo_readonly.has(k) ? wgsl_ssbo_readonly[k] : !u.writable;
 						  entry.buffer.type = is_readonly ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
+						  if (!is_readonly) { entry.visibility = entry.visibility & ~(WGPUShaderStage)WGPUShaderStage_Vertex; }
 					  } }
 					entry.buffer.hasDynamicOffset = false;
 					entry.buffer.minBindingSize = 0;
@@ -4639,36 +4647,39 @@ uint64_t RenderingDeviceDriverWebGPU::get_lazily_memory_used() {
 }
 
 uint64_t RenderingDeviceDriverWebGPU::limit_get(Limit p_limit) {
-	// TODO: Query from WGPUSupportedLimits. See RESEARCH.md Appendix C for full mapping.
 	switch (p_limit) {
-		case LIMIT_MAX_BOUND_UNIFORM_SETS: return 4;
-		case LIMIT_MAX_FRAMEBUFFER_COLOR_ATTACHMENTS: return 8;
-		case LIMIT_MAX_TEXTURES_PER_UNIFORM_SET: return 16;
-		case LIMIT_MAX_SAMPLERS_PER_UNIFORM_SET: return 16;
-		case LIMIT_MAX_STORAGE_BUFFERS_PER_UNIFORM_SET: return 10;
-		case LIMIT_MAX_STORAGE_IMAGES_PER_UNIFORM_SET: return 4;
-		case LIMIT_MAX_UNIFORM_BUFFERS_PER_UNIFORM_SET: return 12;
-		case LIMIT_MAX_PUSH_CONSTANT_SIZE: return 128;
-		case LIMIT_MAX_UNIFORM_BUFFER_SIZE: return 65536;
-		case LIMIT_MAX_TEXTURES_PER_SHADER_STAGE: return 16; // WebGPU default: maxSampledTexturesPerShaderStage=16
-		// WebGPU spec minimum-guaranteed texture limits.
-		case LIMIT_MAX_TEXTURE_ARRAY_LAYERS: return 256;
-		case LIMIT_MAX_TEXTURE_SIZE_1D: return 8192;
-		case LIMIT_MAX_TEXTURE_SIZE_2D: return 8192;
-		case LIMIT_MAX_TEXTURE_SIZE_3D: return 2048;
-		case LIMIT_MAX_TEXTURE_SIZE_CUBE: return 8192;
-		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTE_OFFSET: return 2048;
-		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTES: return 16;
-		case LIMIT_MAX_VERTEX_INPUT_BINDINGS: return 8;
-		case LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X: return 65535;
-		case LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_Y: return 65535;
-		case LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_Z: return 65535;
-		case LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_X: return 256;
-		case LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_Y: return 256;
-		case LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_Z: return 64;
-		case LIMIT_SUBGROUP_SIZE: return 0; // Subgroups not guaranteed.
+		case LIMIT_MAX_BOUND_UNIFORM_SETS: return device_limits.maxBindGroups;
+		case LIMIT_MAX_FRAMEBUFFER_COLOR_ATTACHMENTS: return device_limits.maxColorAttachments;
+		case LIMIT_MAX_TEXTURES_PER_UNIFORM_SET: return device_limits.maxSampledTexturesPerShaderStage;
+		case LIMIT_MAX_SAMPLERS_PER_UNIFORM_SET: return device_limits.maxSamplersPerShaderStage;
+		case LIMIT_MAX_STORAGE_BUFFERS_PER_UNIFORM_SET: return device_limits.maxStorageBuffersPerShaderStage;
+		case LIMIT_MAX_STORAGE_IMAGES_PER_UNIFORM_SET: return device_limits.maxStorageTexturesPerShaderStage;
+		case LIMIT_MAX_UNIFORM_BUFFERS_PER_UNIFORM_SET: return device_limits.maxUniformBuffersPerShaderStage;
+		case LIMIT_MAX_PUSH_CONSTANT_SIZE: return 128; // Emulated via ring buffer.
+		case LIMIT_MAX_UNIFORM_BUFFER_SIZE: return device_limits.maxUniformBufferBindingSize;
+		case LIMIT_MAX_TEXTURES_PER_SHADER_STAGE: return device_limits.maxSampledTexturesPerShaderStage;
+		case LIMIT_MAX_TEXTURE_ARRAY_LAYERS: return device_limits.maxTextureArrayLayers;
+		case LIMIT_MAX_TEXTURE_SIZE_1D: return device_limits.maxTextureDimension1D;
+		case LIMIT_MAX_TEXTURE_SIZE_2D: return device_limits.maxTextureDimension2D;
+		case LIMIT_MAX_TEXTURE_SIZE_3D: return device_limits.maxTextureDimension3D;
+		case LIMIT_MAX_TEXTURE_SIZE_CUBE: return device_limits.maxTextureDimension2D; // Cube faces are 2D.
+		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTE_OFFSET: return device_limits.maxVertexBufferArrayStride;
+		case LIMIT_MAX_VERTEX_INPUT_ATTRIBUTES: return device_limits.maxVertexAttributes;
+		case LIMIT_MAX_VERTEX_INPUT_BINDINGS: return device_limits.maxVertexBuffers;
+		case LIMIT_MAX_COMPUTE_SHARED_MEMORY_SIZE: return device_limits.maxComputeWorkgroupStorageSize;
+		case LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X: return device_limits.maxComputeWorkgroupsPerDimension;
+		case LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_Y: return device_limits.maxComputeWorkgroupsPerDimension;
+		case LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_Z: return device_limits.maxComputeWorkgroupsPerDimension;
+		case LIMIT_MAX_COMPUTE_WORKGROUP_INVOCATIONS: return device_limits.maxComputeInvocationsPerWorkgroup;
+		case LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_X: return device_limits.maxComputeWorkgroupSizeX;
+		case LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_Y: return device_limits.maxComputeWorkgroupSizeY;
+		case LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_Z: return device_limits.maxComputeWorkgroupSizeZ;
+		case LIMIT_MAX_SHADER_VARYINGS: return device_limits.maxInterStageShaderVariables;
+		case LIMIT_SUBGROUP_SIZE: return 0; // Subgroups not available in WebGPU.
 		case LIMIT_SUBGROUP_MIN_SIZE: return 0;
 		case LIMIT_SUBGROUP_MAX_SIZE: return 0;
+		case LIMIT_SUBGROUP_IN_SHADERS: return 0;
+		case LIMIT_SUBGROUP_OPERATIONS: return 0;
 		default: return 0;
 	}
 }
@@ -4689,8 +4700,31 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 }
 
 bool RenderingDeviceDriverWebGPU::has_feature(Features p_feature) {
-	// TODO: Check WebGPU device features.
-	return false;
+	switch (p_feature) {
+		case SUPPORTS_HALF_FLOAT:
+			return true; // WebGPU supports float16 via shader-f16 extension (if available).
+		case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
+			return true; // WebGPU render passes work with no color attachments.
+		case SUPPORTS_IMAGE_ATOMIC_32_BIT:
+			return false; // WebGPU has no image atomics support.
+		case SUPPORTS_MULTIVIEW:
+			return false; // Not available in WebGPU.
+		case SUPPORTS_ATTACHMENT_VRS:
+			return false; // Not available in WebGPU.
+		case SUPPORTS_METALFX_SPATIAL:
+		case SUPPORTS_METALFX_TEMPORAL:
+			return false; // Metal-only features.
+		case SUPPORTS_BUFFER_DEVICE_ADDRESS:
+			return false; // Not available in WebGPU.
+		case SUPPORTS_VULKAN_MEMORY_MODEL:
+			return false; // Not available in WebGPU.
+		case SUPPORTS_FRAMEBUFFER_DEPTH_RESOLVE:
+			return false; // Not available in WebGPU.
+		case SUPPORTS_POINT_SIZE:
+			return false; // Point size not controllable in WebGPU.
+		default:
+			return false;
+	}
 }
 
 const RDD::MultiviewCapabilities &RenderingDeviceDriverWebGPU::get_multiview_capabilities() {

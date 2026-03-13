@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 13, 2026 — Phase 3 IN PROGRESS. **MILESTONE: 3D geometry VISIBLE in browser** — blue cube + red sphere rendering with lighting and shadows. Root cause of previous transparency blocker was specialization constants being frozen at shader creation time (before pipeline-specific values were known), causing tonemap to apply AGX tonemapping → white output. Fixed by deferring spec constant patching to pipeline creation via SPIR-V binary rewriting.
+> **Last Updated**: March 13, 2026 — Phase 3 IN PROGRESS. **MILESTONE: 3D geometry VISIBLE in browser** — blue cube + red sphere rendering with lighting and shadows. Task 3.2 (compute shaders) DONE — verified all compute paths, fixed `has_feature()`, `STORAGE_BUFFER_DYNAMIC` visibility, and `limit_get()` to query actual device limits.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -842,9 +842,31 @@ correct approach, but ALL code paths that read from staging buffers must check `
 ---
 
 ### Task 3.2: Compute Shader Support `[PARALLEL with 3.1]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 4-6 hours
 **Dependencies**: Phase 2
+
+**Completion Notes** (March 13, 2026):
+- Compute shader infrastructure was already implemented during Phase 2 (pipeline creation, dispatch, pass encoding, push constants).
+- Verified all compute code paths are correct: compute pass lifecycle, encoder transitions, push constant flushing for compute.
+- **Three fixes applied**:
+  1. **`has_feature()` — was returning `false` for all features.** Now returns `true` for `SUPPORTS_HALF_FLOAT` and `SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS`. WebGPU-unsupported features (multiview, VRS, MetalFX, buffer device address, image atomics, etc.) correctly return `false`.
+  2. **`STORAGE_BUFFER_DYNAMIC` — missing vertex visibility filtering.** WebGPU forbids read-write storage buffers in vertex shaders. The non-dynamic `STORAGE_BUFFER` case had `entry.visibility &= ~WGPUShaderStage_Vertex` for read-write, but the DYNAMIC variant was missing it. Fixed.
+  3. **`limit_get()` — was hardcoded to spec minimums.** Now queries actual device limits via `wgpuDeviceGetLimits()`, stored in a `WGPULimits device_limits` member. Also added missing limits: `LIMIT_MAX_COMPUTE_SHARED_MEMORY_SIZE`, `LIMIT_MAX_COMPUTE_WORKGROUP_INVOCATIONS`, `LIMIT_MAX_SHADER_VARYINGS`, `LIMIT_SUBGROUP_IN_SHADERS`, `LIMIT_SUBGROUP_OPERATIONS`.
+- Build compiles clean (3 pre-existing warnings, zero new warnings/errors).
+- **Key compute features already working since Phase 2/3.1**: cluster builder, shadow cascades (uses compute for culling), scene pass compute (GI, luminance), tonemap post-processing.
+
+**Verified Correct (no changes needed)**:
+- ✅ `compute_pipeline_create()` — spec constants, pipeline layout, error handling
+- ✅ `command_bind_compute_pipeline()` — auto-creates compute pass, ends active render pass
+- ✅ `command_bind_compute_uniform_sets()` — binds via `_get_compatible_bind_group()`
+- ✅ `command_compute_dispatch()` / `command_compute_dispatch_indirect()` — push constant flush + dispatch
+- ✅ `_flush_push_constants()` — handles both render and compute encoders
+- ✅ `command_pipeline_barrier()` — no-op (WebGPU auto-tracks hazards)
+- ✅ All copy/clear commands end active compute pass before operating on command encoder
+- ✅ `command_begin_render_pass()` ends active compute pass via `end_active_encoder()`
+- ✅ `command_buffer_end()` ends active compute pass before finishing encoder
+- ✅ `pipeline_free()` releases compute pipeline handle and specialized modules
 
 **Instructions**:
 

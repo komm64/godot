@@ -54,6 +54,7 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	MultiviewCapabilities multiview_capabilities;
 	FragmentShadingRateCapabilities fsr_capabilities;
 	FragmentDensityMapCapabilities fdm_capabilities;
+	WGPULimits device_limits = WGPU_LIMITS_INIT;
 
 	RenderingShaderContainerFormatWebGPU *shader_container_format = nullptr;
 
