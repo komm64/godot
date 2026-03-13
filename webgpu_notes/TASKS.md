@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 13, 2026 — **Phase 4 IN PROGRESS.** Task 4.1 (export preset integration) and Task 4.2 (HTML shell & fallback) DONE. Task 4.3 (documentation) remains.
+> **Last Updated**: March 13, 2026 — **Phase 4 COMPLETE.** All tasks done: 4.1 (export preset), 4.2 (HTML shell & fallback), 4.3 (documentation). Ready for Phase 5 (testing & verification).
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -1050,7 +1050,7 @@ All three optimizations were already implemented during Phase 2:
 ---
 
 ### Task 4.3: Documentation `[PARALLEL with 4.1, 4.2]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Effort**: 2-3 hours
 **Dependencies**: Phase 3
 
@@ -1072,6 +1072,11 @@ All three optimizations were already implemented during Phase 2:
    - Browser compatibility notes
 
 **Completion Criteria**: Documentation exists for developers and users.
+
+**Completion Notes (March 13, 2026)**:
+- **`drivers/webgpu/README.md`** created (~120 lines): Architecture diagram, file listing with line counts, all key design decisions (push constants, subpasses, shaders, barriers, buffers, BGL rebinding), known limitations, build instructions, project settings, browser compatibility table.
+- **`webgpu_notes/IMPLEMENTATION.md`** created (~110 lines): Final architecture decisions with rationale, performance characteristics table, browser compatibility matrix with known per-browser issues, export workflow steps, complete list of files modified outside `drivers/webgpu/`.
+- **`doc/` class docs**: Not modified — Godot's RenderingDevice class docs are auto-generated from source comments and don't have a per-driver section. The driver README and webgpu_notes serve this purpose instead.
 
 ---
 
