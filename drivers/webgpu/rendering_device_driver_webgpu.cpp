@@ -1463,7 +1463,7 @@ RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(C
 	if (!sc->configured || context_driver->surface_get_needs_resize(sc->surface_id)) {
 		// Not yet sized or surface dimensions changed — request a resize.
 		if (!sc->configured) {
-			WARN_PRINT("WebGPU: swap_chain_acquire_framebuffer: not configured, requesting resize");
+			print_verbose("WebGPU: swap_chain_acquire_framebuffer: not configured, requesting resize");
 		}
 		r_resize_required = true;
 		return FramebufferID();
