@@ -63,7 +63,7 @@ WebGPU (run one at a time — the next command auto-kills the previous server):
 bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_a_sprites --export-release WebGPU
 # 5k sprites @ 120fps (maxed out)
 # 10k sprites @ 120fps (still)
-# 20k sprites @ 60fps (vsync cap hit)
+# 20k sprites @ 30fps (vsync cap hit)
 cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_a && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene B - PBR
@@ -125,8 +125,23 @@ cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/we
 
 ## WebGPU scene E: Skeletal Animation
 
-fps: TODO
-visual: TODO
+fps: ~120fps (expected after fix)
+visual: 20 GPU-skinned cylinders animating
+
+**Root cause of original bug**: WGSL scanner in `rendering_device_driver_webgpu.cpp` matched `var<storage, read>` (never produced by NAGA) but missed `var<storage>` (NAGA's actual read-only format). Skeleton shader's `BlendShapeWeights` and `BlendShapeData` fallbacks (`default_rd_storage_buffer`, 16 bytes) were both incorrectly marked as `WGPUBufferBindingType_Storage` (writable) → Chrome rejected the dispatch with "writable storage buffer aliasing".
+
+**Fix**: Added `var<storage>` detection as read-only in the WGSL scanner (March 2026). Rebuild required — see **rebuild note** below.
+
+---
+
+**Rebuild note** (after WGSL scanner fix):
+```bash
+EMSDK_QUIET=1 source /Users/dwalter/Documents/projects/godot/emsdk/emsdk_env.sh && \
+scons platform=web target=template_release webgpu=yes opengl3=no threads=no -j$(sysctl -n hw.ncpu) && \
+cp bin/godot.web.template_release.wasm32.nothreads.zip tmp/benchmarks/templates/webgpu_release.zip
+```
+
+**Re-export and serve**:
 
 bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_e/naga_wasm_bg.wasm
 

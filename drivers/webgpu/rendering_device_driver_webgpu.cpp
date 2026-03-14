@@ -2077,8 +2077,12 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			}
 		}
 
-		// Scan WGSL for storage buffer access modes: var<storage, read> vs var<storage, read_write>.
-		// NAGA format: "@group(G) @binding(B) var<storage, read>" or "@group(G) @binding(B) var<storage, read_write>"
+		// Scan WGSL for storage buffer access modes.
+		// NAGA actual output formats:
+		//   - Read-write: "var<storage, read_write>"  (space after comma)
+		//   - Read-only:  "var<storage>"              (NO access modifier — NAGA omits "read" for LOAD-only)
+		// Note: "var<storage, read>" and "var<storage,read>" are valid WGSL but NOT emitted by NAGA;
+		// we match them anyway for robustness.
 		{
 			const char *p = wgsl_str;
 			while ((p = strstr(p, "@group(")) != nullptr) {
@@ -2087,11 +2091,19 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					const char *fwd = p;
 					const char *limit = fwd + 256;
 					while (fwd < limit && *fwd && *fwd != ';') {
-						if (strncmp(fwd, "var<storage, read_write>", 24) == 0) {
+						if (strncmp(fwd, "var<storage, read_write>", 24) == 0 ||
+								strncmp(fwd, "var<storage,read_write>", 23) == 0) {
 							uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
 							wgsl_ssbo_readonly[key] = false;
 							break;
-						} else if (strncmp(fwd, "var<storage, read>", 18) == 0) {
+						} else if (strncmp(fwd, "var<storage, read>", 18) == 0 ||
+								strncmp(fwd, "var<storage,read>", 17) == 0) {
+							uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
+							wgsl_ssbo_readonly[key] = true;
+							break;
+						} else if (strncmp(fwd, "var<storage>", 12) == 0) {
+							// NAGA emits var<storage> (no access mode) for LOAD-only (read-only) storage:
+							// address_space_str returns (Some("storage"), None) when !access.contains(STORE).
 							uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
 							wgsl_ssbo_readonly[key] = true;
 							break;

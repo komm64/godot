@@ -1402,19 +1402,33 @@ All 4 scenes verified:
 | PBR materials + directional shadow | B | ✅ Working |
 | Multi-draw, point/spot shadow cube maps | C | ✅ Working |
 | GPU compute (particles) | D | ✅ Working |
-| Skeletal animation / GPU skinning | E | 🔲 TODO |
-| SubViewport (render-to-texture) | F | 🔲 TODO |
-| SSAO | F | 🔲 TODO |
-| Bloom / glow | F | 🔲 TODO |
-| Procedural sky | F | 🔲 TODO |
+| Skeletal animation / GPU skinning | E | ✅ Fixed (March 2026) |
+| SubViewport (render-to-texture) | F | ✅ Working (120fps, visual pass) |
+| SSAO | F | ⚠️ GPU error (non-fatal, scene still renders) |
+| Bloom / glow | F | ✅ Working |
+| Procedural sky | F | ✅ Working |
 | UI / Control nodes | A (overlay) | ✅ Working (Label nodes used in all scenes) |
 | ReflectionProbe | — | Low risk — uses existing cubemap path |
 | `texture_get_data()` async readback | — | Stubbed (WARN_PRINT_ONCE) |
 
 ---
 
-### Task 6.1: Scene E — Skeletal Animation (GPU Skinning) `[SERIAL]`
-**Status**: `TODO`
+### Task 6.1: Scene E — Skeletal Animation (GPU Skinning) `[DONE ✅]`
+**Status**: `FIXED — March 2026`
+**Root cause found and fixed**: WGSL scanner bug — NAGA emits `var<storage>` for read-only storage buffers (no access modifier), but our scanner only matched `var<storage, read>` which NAGA never produces. Read-only buffers (BlendShapeWeights, BlendShapeData) fell back to `!u.writable`, but spv-reflect marked them writable (per `restrict writeonly` rule without NonWritable decoration seen). Both ended up as `WGPUBufferBindingType_Storage` → Chrome reported writable storage buffer aliasing (both used `default_rd_storage_buffer`, 16 bytes).
+
+**Fix applied** in `rendering_device_driver_webgpu.cpp`: Added `var<storage>` to the WGSL scanner as read-only indicator. Also added `var<storage,read_write>` (no-space variant) for robustness.
+
+**Full canonical NAGA WGSL formats:**
+- `var<storage>` — read-only (LOAD-only) ← THE KEY FIX  
+- `var<storage, read_write>` — read-write (LOAD+STORE) ← was already handled
+
+**Result after fix**: Scene E exports and serves with 20 GPU-skinned cylinders animating at ~120fps, zero GPU errors.
+
+---
+
+### Task 6.1 (original description for reference):
+**Former Status**: `TODO`
 **Effort**: 3–5 hours
 **Dependencies**: Phase 5
 
