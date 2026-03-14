@@ -56,6 +56,7 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	FragmentDensityMapCapabilities fdm_capabilities;
 	WGPULimits device_limits = WGPU_LIMITS_INIT;
 	bool timestamp_supported = false;
+	bool has_texture_formats_tier1 = false;
 
 	RenderingShaderContainerFormatWebGPU *shader_container_format = nullptr;
 
@@ -84,6 +85,9 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// sampled as Float in WebGPU, unlike Vulkan).
 	WGPUTexture fallback_float_texture = nullptr;
 	WGPUTextureView fallback_float_texture_view = nullptr;
+	// Cube variant (6 layers) for BGL entries expecting TextureViewDimension::Cube.
+	WGPUTexture fallback_cube_texture = nullptr;
+	WGPUTextureView fallback_cube_texture_view = nullptr;
 
 	// --- Dummy Samplers for BGL Rebinding ---
 	// When a bind group must be re-created with a different BGL (e.g., because

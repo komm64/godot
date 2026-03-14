@@ -197,6 +197,27 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		}
 	}
 
+	// Create fallback cube texture (4x4, 6 layers) for BGL entries expecting Cube views.
+	{
+		WGPUTextureDescriptor td = {};
+		td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+		td.dimension = WGPUTextureDimension_2D;
+		td.size = { 4, 4, 6 };
+		td.format = WGPUTextureFormat_RGBA8Unorm;
+		td.mipLevelCount = 1;
+		td.sampleCount = 1;
+		fallback_cube_texture = wgpuDeviceCreateTexture(device, &td);
+		if (fallback_cube_texture) {
+			WGPUTextureViewDescriptor vd = {};
+			vd.format = WGPUTextureFormat_RGBA8Unorm;
+			vd.dimension = WGPUTextureViewDimension_Cube;
+			vd.mipLevelCount = 1;
+			vd.arrayLayerCount = 6;
+			vd.aspect = WGPUTextureAspect_All;
+			fallback_cube_texture_view = wgpuTextureCreateView(fallback_cube_texture, &vd);
+		}
+	}
+
 	// Create dummy samplers for BGL rebinding.
 	// When a bind group must be re-created with a different BGL (Comparison↔Filtering),
 	// these dummy samplers are substituted for the mismatched entries.
@@ -245,6 +266,14 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	timestamp_supported = wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery);
 	if (timestamp_supported) {
 		print_verbose("WebGPU: Timestamp query feature is available.");
+	}
+
+	// Check for 16-bit SNORM/UNORM texture format support (texture-formats-tier1).
+	has_texture_formats_tier1 = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier1);
+	if (has_texture_formats_tier1) {
+		print_verbose("WebGPU: texture-formats-tier1 feature is available.");
+	} else {
+		WARN_PRINT("WebGPU: texture-formats-tier1 not available. R16/RG16/RGBA16 SNORM/UNORM textures will be remapped to float.");
 	}
 
 	// Multiview not supported in WebGPU.
@@ -417,6 +446,49 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	tex->layers = p_format.array_layers;
 	tex->sample_count = 1 << p_format.samples;
 	tex->usage = _texture_usage_to_wgpu(p_format.usage_bits);
+
+	// WebGPU does not support R8/RG8/R16/RG16 as storage texel formats.
+	// Upgrade to 32-bit equivalents when storage binding is needed.
+	if (tex->usage & WGPUTextureUsage_StorageBinding) {
+		switch (tex->format) {
+			case WGPUTextureFormat_R8Unorm:
+			case WGPUTextureFormat_R8Snorm:
+			case WGPUTextureFormat_R16Float:
+			case WGPUTextureFormat_R16Snorm:
+			case WGPUTextureFormat_R16Unorm:
+				tex->format = WGPUTextureFormat_R32Float;
+				break;
+			case WGPUTextureFormat_R8Uint:
+			case WGPUTextureFormat_R16Uint:
+				tex->format = WGPUTextureFormat_R32Uint;
+				break;
+			case WGPUTextureFormat_R8Sint:
+			case WGPUTextureFormat_R16Sint:
+				tex->format = WGPUTextureFormat_R32Sint;
+				break;
+			case WGPUTextureFormat_RG8Unorm:
+			case WGPUTextureFormat_RG8Snorm:
+			case WGPUTextureFormat_RG16Float:
+			case WGPUTextureFormat_RG16Snorm:
+			case WGPUTextureFormat_RG16Unorm:
+				tex->format = WGPUTextureFormat_RG32Float;
+				break;
+			case WGPUTextureFormat_RG8Uint:
+			case WGPUTextureFormat_RG16Uint:
+				tex->format = WGPUTextureFormat_RG32Uint;
+				break;
+			case WGPUTextureFormat_RG8Sint:
+			case WGPUTextureFormat_RG16Sint:
+				tex->format = WGPUTextureFormat_RG32Sint;
+				break;
+			case WGPUTextureFormat_RGBA16Snorm:
+			case WGPUTextureFormat_RGBA16Unorm:
+				tex->format = WGPUTextureFormat_RGBA16Float;
+				break;
+			default:
+				break;
+		}
+	}
 
 	WGPUTextureDescriptor desc = {};
 	desc.dimension = tex->dimension;
@@ -714,11 +786,26 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_
 
 	// Storage binding: only formats explicitly listed in the WebGPU spec support it.
 	// See https://gpuweb.github.io/gpuweb/#storage-texel-format-capability-matrix
+	// Formats not natively supported (R8, RG8, R16, RG16) are included here because
+	// Godot's renderer uses them with storage; they are silently upgraded to 32-bit
+	// equivalents at WGPUTexture creation time and in WGSL text.
 	switch (p_format) {
+		case DATA_FORMAT_R8_UNORM:
+		case DATA_FORMAT_R8_SNORM:
+		case DATA_FORMAT_R8G8_UNORM:
+		case DATA_FORMAT_R8G8_SNORM:
 		case DATA_FORMAT_R8G8B8A8_UNORM:
 		case DATA_FORMAT_R8G8B8A8_SNORM:
 		case DATA_FORMAT_R8G8B8A8_UINT:
 		case DATA_FORMAT_R8G8B8A8_SINT:
+		case DATA_FORMAT_R16_SFLOAT:
+		case DATA_FORMAT_R16_SNORM:
+		case DATA_FORMAT_R16_UNORM:
+		case DATA_FORMAT_R16G16_SFLOAT:
+		case DATA_FORMAT_R16G16_SNORM:
+		case DATA_FORMAT_R16G16_UNORM:
+		case DATA_FORMAT_R16G16_SINT:
+		case DATA_FORMAT_R16G16_UINT:
 		case DATA_FORMAT_R16G16B16A16_SFLOAT:
 		case DATA_FORMAT_R16G16B16A16_UINT:
 		case DATA_FORMAT_R16G16B16A16_SINT:
@@ -814,12 +901,18 @@ WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p
 		case DATA_FORMAT_R8G8B8A8_SRGB: return WGPUTextureFormat_RGBA8UnormSrgb;
 		case DATA_FORMAT_B8G8R8A8_UNORM: return WGPUTextureFormat_BGRA8Unorm;
 		case DATA_FORMAT_B8G8R8A8_SRGB: return WGPUTextureFormat_BGRA8UnormSrgb;
+		case DATA_FORMAT_R16_UNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_R16Unorm : WGPUTextureFormat_R16Float;
+		case DATA_FORMAT_R16_SNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_R16Snorm : WGPUTextureFormat_R16Float;
 		case DATA_FORMAT_R16_UINT: return WGPUTextureFormat_R16Uint;
 		case DATA_FORMAT_R16_SINT: return WGPUTextureFormat_R16Sint;
 		case DATA_FORMAT_R16_SFLOAT: return WGPUTextureFormat_R16Float;
+		case DATA_FORMAT_R16G16_UNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_RG16Unorm : WGPUTextureFormat_RG16Float;
+		case DATA_FORMAT_R16G16_SNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_RG16Snorm : WGPUTextureFormat_RG16Float;
 		case DATA_FORMAT_R16G16_UINT: return WGPUTextureFormat_RG16Uint;
 		case DATA_FORMAT_R16G16_SINT: return WGPUTextureFormat_RG16Sint;
 		case DATA_FORMAT_R16G16_SFLOAT: return WGPUTextureFormat_RG16Float;
+		case DATA_FORMAT_R16G16B16A16_UNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_RGBA16Unorm : WGPUTextureFormat_RGBA16Float;
+		case DATA_FORMAT_R16G16B16A16_SNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_RGBA16Snorm : WGPUTextureFormat_RGBA16Float;
 		case DATA_FORMAT_R16G16B16A16_UINT: return WGPUTextureFormat_RGBA16Uint;
 		case DATA_FORMAT_R16G16B16A16_SINT: return WGPUTextureFormat_RGBA16Sint;
 		case DATA_FORMAT_R16G16B16A16_SFLOAT: return WGPUTextureFormat_RGBA16Float;
@@ -1643,6 +1736,77 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		// DEPTH_ALIAS parsing removed — depth=2 images are now depth=1 in SPIR-V,
 		// and a single texture_depth_2d variable handles both sampling modes.
 
+		// Remap unsupported 8-bit storage texture format names in WGSL.
+		// r8* and rg8* are not valid WebGPU storage texel formats — remap to 32-bit equivalents.
+		// This changes string length, so we rebuild the string via Godot's String class.
+		if (strstr(wgsl_str, "r8unorm") || strstr(wgsl_str, "r8snorm") ||
+				strstr(wgsl_str, "r8uint") || strstr(wgsl_str, "r8sint") ||
+				strstr(wgsl_str, "rg8unorm") || strstr(wgsl_str, "rg8snorm") ||
+				strstr(wgsl_str, "rg8uint") || strstr(wgsl_str, "rg8sint")) {
+			String ws(wgsl_str);
+			ws = ws.replace("rg8unorm", "rg32float");
+			ws = ws.replace("rg8snorm", "rg32float");
+			ws = ws.replace("rg8uint", "rg32uint");
+			ws = ws.replace("rg8sint", "rg32sint");
+			ws = ws.replace("r8unorm", "r32float");
+			ws = ws.replace("r8snorm", "r32float");
+			ws = ws.replace("r8uint", "r32uint");
+			ws = ws.replace("r8sint", "r32sint");
+			free(wgsl_str);
+			CharString cs = ws.utf8();
+			wgsl_str = (char *)malloc(cs.length() + 1);
+			memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
+		}
+
+		// If texture-formats-tier1 is not available, remap 16-bit SNORM/UNORM storage
+		// texture format names to their float equivalents in the WGSL text. The format
+		// string lengths are preserved (pad with spaces) so scan offsets remain valid.
+		// r16snorm  → r16float  (same 8 chars)
+		// r16unorm  → r16float  (same 8 chars)
+		// rg16snorm → rg16float (same 9 chars — "rg16float" is 9 chars, perfect)
+		// rg16unorm → rg16float (same 9 chars)
+		// rgba16snorm → rgba16float (11 vs 11 — perfect)
+		// rgba16unorm → rgba16float (11 vs 11 — perfect)
+		if (!has_texture_formats_tier1) {
+			char *q = wgsl_str;
+			while (*q) {
+				if (strncmp(q, "rgba16snorm", 11) == 0) { memcpy(q, "rgba16float", 11); q += 11; }
+				else if (strncmp(q, "rgba16unorm", 11) == 0) { memcpy(q, "rgba16float", 11); q += 11; }
+				else if (strncmp(q, "rg16snorm", 9) == 0) { memcpy(q, "rg16float", 9); q += 9; }
+				else if (strncmp(q, "rg16unorm", 9) == 0) { memcpy(q, "rg16float", 9); q += 9; }
+				else if (strncmp(q, "r16snorm", 8) == 0) { memcpy(q, "r16float", 8); q += 8; }
+				else if (strncmp(q, "r16unorm", 8) == 0) { memcpy(q, "r16float", 8); q += 8; }
+				else { q++; }
+			}
+		}
+
+		// WebGPU only supports a limited set of storage texel formats (see spec §26.1.1).
+		// 16-bit single/dual-channel formats (r16*, rg16*) are NOT valid for storage.
+		// Remap them to 32-bit equivalents. Also handles rgba16snorm/unorm → rgba32float.
+		// Format names only appear in texture_storage_*<format, access> declarations in WGSL.
+		// All replacements preserve string length (in-place memcpy).
+		{
+			char *q = wgsl_str;
+			while (*q) {
+				// RGBA16 snorm/unorm → rgba16float (rgba16float IS a valid storage format)
+				if (strncmp(q, "rgba16snorm", 11) == 0) { memcpy(q, "rgba16float", 11); q += 11; }
+				else if (strncmp(q, "rgba16unorm", 11) == 0) { memcpy(q, "rgba16float", 11); q += 11; }
+				// RG16 all variants → rg32 equivalents
+				else if (strncmp(q, "rg16float", 9) == 0) { memcpy(q, "rg32float", 9); q += 9; }
+				else if (strncmp(q, "rg16snorm", 9) == 0) { memcpy(q, "rg32float", 9); q += 9; }
+				else if (strncmp(q, "rg16unorm", 9) == 0) { memcpy(q, "rg32float", 9); q += 9; }
+				else if (strncmp(q, "rg16uint", 8) == 0) { memcpy(q, "rg32uint", 8); q += 8; }
+				else if (strncmp(q, "rg16sint", 8) == 0) { memcpy(q, "rg32sint", 8); q += 8; }
+				// R16 all variants → r32 equivalents
+				else if (strncmp(q, "r16float", 8) == 0) { memcpy(q, "r32float", 8); q += 8; }
+				else if (strncmp(q, "r16snorm", 8) == 0) { memcpy(q, "r32float", 8); q += 8; }
+				else if (strncmp(q, "r16unorm", 8) == 0) { memcpy(q, "r32float", 8); q += 8; }
+				else if (strncmp(q, "r16uint", 7) == 0) { memcpy(q, "r32uint", 7); q += 7; }
+				else if (strncmp(q, "r16sint", 7) == 0) { memcpy(q, "r32sint", 7); q += 7; }
+				else { q++; }
+			}
+		}
+
 		// WebGPU restriction: Storage buffers with read_write access cannot be used in vertex shaders.
 		// NAGA generates var<storage, read_write> for any SSBO without NonWritable decoration.
 		// For render stages (vertex + fragment), demote all read_write storage to read (in-place,
@@ -1655,6 +1819,92 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				memcpy(q, "var<storage, read>      ", 24);
 				q += 24;
 			}
+		}
+
+		// Chrome doesn't support the 'sized_binding_array' WGSL language feature.
+		// Naga converts GLSL sampler arrays like "sampler2DArray tex[1]" to
+		// "binding_array<texture_2d_array<f32>, 1>" in WGSL. Fix: replace
+		// "binding_array<T, 1>" with just "T", and fix "varname[0]" → "varname".
+		if (strstr(wgsl_str, "binding_array<")) {
+			String ws(wgsl_str);
+			Vector<String> binding_array_vars;
+			int64_t search_from = 0;
+			while (true) {
+				int64_t ba_pos = ws.find(": binding_array<", search_from);
+				if (ba_pos == -1) break;
+				int64_t inner_start = ba_pos + (int64_t)strlen(": binding_array<");
+				int depth = 1;
+				int64_t p = inner_start;
+				int64_t ws_len = (int64_t)ws.length();
+				while (p < ws_len && depth > 0) {
+					char32_t c = ws[p];
+					if (c == '<') depth++;
+					else if (c == '>') depth--;
+					p++;
+				}
+				// ws[inner_start .. p-2] = "TYPE, COUNT"
+				String inner = ws.substr(inner_start, p - 1 - inner_start);
+				int64_t last_comma = inner.rfind(",");
+				if (last_comma == -1) { search_from = p; continue; }
+				String type_part = inner.substr(0, last_comma).strip_edges();
+				int count_val = inner.substr(last_comma + 1).strip_edges().to_int();
+				if (count_val == 1) {
+					// Extract variable name (identifier immediately before the ':')
+					int64_t name_end = ba_pos;
+					while (name_end > 0 && ws[name_end - 1] == ' ') name_end--;
+					int64_t name_start = name_end;
+					while (name_start > 0) {
+						char32_t c = ws[name_start - 1];
+						if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+							name_start--;
+						else break;
+					}
+					String var_name = ws.substr(name_start, name_end - name_start);
+					if (!var_name.is_empty()) {
+						binding_array_vars.push_back(var_name);
+					}
+					// Replace ": binding_array<TYPE, 1>" with ": TYPE"
+					String new_type = ": " + type_part;
+					ws = ws.substr(0, ba_pos) + new_type + ws.substr(p);
+					search_from = ba_pos + (int64_t)new_type.length();
+				} else {
+					search_from = p;
+				}
+			}
+			// Replace VAR_NAME[any_expr] with VAR_NAME for all unwrapped size-1 binding arrays.
+			// Naga may use a variable index (e.g. varname[_e889]) not just varname[0].
+			for (const String &var : binding_array_vars) {
+				int64_t vlen = (int64_t)var.length();
+				int64_t search_pos = 0;
+				while (true) {
+					String needle = var + "[";
+					int64_t idx_pos = ws.find(needle, search_pos);
+					if (idx_pos == -1) break;
+					// Ensure 'var' is not a suffix of a longer identifier
+					if (idx_pos > 0) {
+						char32_t before = ws[idx_pos - 1];
+						if (before == '_' || (before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') || (before >= '0' && before <= '9')) {
+							search_pos = idx_pos + 1;
+							continue;
+						}
+					}
+					// Scan past the matching ']'
+					int64_t p = idx_pos + vlen + 1; // skip var + '['
+					int depth = 1;
+					int64_t ws_len2 = (int64_t)ws.length();
+					while (p < ws_len2 && depth > 0) {
+						if (ws[p] == '[') depth++;
+						else if (ws[p] == ']') depth--;
+						p++;
+					}
+					ws = ws.substr(0, idx_pos) + var + ws.substr(p);
+					search_pos = idx_pos + vlen;
+				}
+			}
+			free(wgsl_str);
+			CharString cs = ws.utf8();
+			wgsl_str = (char *)malloc(cs.length() + 1);
+			memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
 		}
 
 		WGPUShaderSourceWGSL wgsl_source = {};
@@ -2404,25 +2654,37 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 						if (expected_sample == WGPUTextureSampleType_Float &&
 								_is_depth_format(tex->format) &&
 								fallback_float_texture_view != nullptr) {
-							entry.textureView = fallback_float_texture_view;
+							// Also check if we need cube dimension for the depth fallback.
+							if (expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
+								entry.textureView = fallback_cube_texture_view;
+							} else {
+								entry.textureView = fallback_float_texture_view;
+							}
 						} else if (expected_dim != WGPUTextureViewDimension_Undefined &&
-								expected_dim != tex->view_dimension &&
-								tex->view_source != nullptr) {
+								expected_dim != tex->view_dimension) {
 							// Fix dimension mismatch: if the layout expects a different dimension
 							// than the texture's default view (e.g., 2D vs Cube), create a
-							// compatible view. This commonly happens with fallback textures.
-							WGPUTextureViewDescriptor vd = {};
-							vd.format = tex->format;
-							vd.dimension = expected_dim;
-							vd.baseMipLevel = 0;
-							vd.mipLevelCount = tex->mipmaps;
-							vd.baseArrayLayer = 0;
-							vd.arrayLayerCount = (expected_dim == WGPUTextureViewDimension_2D) ? 1 : tex->layers;
-							vd.aspect = WGPUTextureAspect_All;
-							WGPUTextureView fixed_view = wgpuTextureCreateView(tex->view_source, &vd);
-							if (fixed_view) {
-								entry.textureView = fixed_view;
-								us->temp_views.push_back(fixed_view);
+							// compatible view or use a fallback texture.
+							if (expected_dim == WGPUTextureViewDimension_Cube && tex->layers < 6 &&
+									fallback_cube_texture_view != nullptr) {
+								// Can't create a cube view from a texture with < 6 layers.
+								entry.textureView = fallback_cube_texture_view;
+							} else if (tex->view_source != nullptr) {
+								WGPUTextureViewDescriptor vd = {};
+								vd.format = tex->format;
+								vd.dimension = expected_dim;
+								vd.baseMipLevel = 0;
+								vd.mipLevelCount = tex->mipmaps;
+								vd.baseArrayLayer = 0;
+								vd.arrayLayerCount = (expected_dim == WGPUTextureViewDimension_2D) ? 1 : tex->layers;
+								vd.aspect = WGPUTextureAspect_All;
+								WGPUTextureView fixed_view = wgpuTextureCreateView(tex->view_source, &vd);
+								if (fixed_view) {
+									entry.textureView = fixed_view;
+									us->temp_views.push_back(fixed_view);
+								} else {
+									entry.textureView = tex->default_view;
+								}
 							} else {
 								entry.textureView = tex->default_view;
 							}
@@ -2468,23 +2730,33 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 						// are always Float. If a depth fallback texture is provided,
 						// substitute a float fallback.
 						if (_is_depth_format(tex->format) && fallback_float_texture_view != nullptr) {
-							te.textureView = fallback_float_texture_view;
+							if (swt_expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
+								te.textureView = fallback_cube_texture_view;
+							} else {
+								te.textureView = fallback_float_texture_view;
+							}
 						} else if (swt_expected_dim != WGPUTextureViewDimension_Undefined &&
-								swt_expected_dim != tex->view_dimension &&
-								tex->view_source != nullptr) {
+								swt_expected_dim != tex->view_dimension) {
 							// Fix dimension mismatch (e.g., Cube↔2D with fallback textures).
-							WGPUTextureViewDescriptor vd = {};
-							vd.format = tex->format;
-							vd.dimension = swt_expected_dim;
-							vd.baseMipLevel = 0;
-							vd.mipLevelCount = tex->mipmaps;
-							vd.baseArrayLayer = 0;
-							vd.arrayLayerCount = (swt_expected_dim == WGPUTextureViewDimension_2D) ? 1 : tex->layers;
-							vd.aspect = WGPUTextureAspect_All;
-							WGPUTextureView fixed_view = wgpuTextureCreateView(tex->view_source, &vd);
-							if (fixed_view) {
-								te.textureView = fixed_view;
-								us->temp_views.push_back(fixed_view);
+							if (swt_expected_dim == WGPUTextureViewDimension_Cube && tex->layers < 6 &&
+									fallback_cube_texture_view != nullptr) {
+								te.textureView = fallback_cube_texture_view;
+							} else if (tex->view_source != nullptr) {
+								WGPUTextureViewDescriptor vd = {};
+								vd.format = tex->format;
+								vd.dimension = swt_expected_dim;
+								vd.baseMipLevel = 0;
+								vd.mipLevelCount = tex->mipmaps;
+								vd.baseArrayLayer = 0;
+								vd.arrayLayerCount = (swt_expected_dim == WGPUTextureViewDimension_2D) ? 1 : tex->layers;
+								vd.aspect = WGPUTextureAspect_All;
+								WGPUTextureView fixed_view = wgpuTextureCreateView(tex->view_source, &vd);
+								if (fixed_view) {
+									te.textureView = fixed_view;
+									us->temp_views.push_back(fixed_view);
+								} else {
+									te.textureView = tex->default_view;
+								}
 							} else {
 								te.textureView = tex->default_view;
 							}
@@ -4810,7 +5082,7 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 bool RenderingDeviceDriverWebGPU::has_feature(Features p_feature) {
 	switch (p_feature) {
 		case SUPPORTS_HALF_FLOAT:
-			return true; // WebGPU supports float16 via shader-f16 extension (if available).
+			return false; // WebGPU shader-f16 extension not reliably available; avoid f16 in generated SPIR-V.
 		case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
 			return true; // WebGPU render passes work with no color attachments.
 		case SUPPORTS_IMAGE_ATOMIC_32_BIT:
