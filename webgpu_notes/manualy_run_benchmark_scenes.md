@@ -78,7 +78,20 @@ cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/we
 bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_d_particles --export-release WebGPU
 # 37.7fps on 500k particles
 cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_d && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
+
+# Scene E - Skeletal Animation  tmp/benchmarks/scene_e_animated/benchmark.gd
+bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_e/naga_wasm_bg.wasm
+# Expected: 20 GPU-skinned cylinders visibly bending/swinging ~120fps
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
+
+# Scene F - SubViewport + SSAO + Bloom  tmp/benchmarks/scene_f_postfx/benchmark.gd
+bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_f_postfx --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_f/naga_wasm_bg.wasm
+# Expected: 5 spinning PBR cubes, procedural sky, SSAO, bloom, SubViewport torus on quad
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 ```
+
+
+
 
 
 WebGL (same pattern):
@@ -103,5 +116,110 @@ cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/we
 bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_d_particles --export-release WebGL
 # 23.4fps on 500k particles
 cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_d && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
+
+# Scene E - Skeletal Animation (WebGL/Compatibility renderer does not support GPU skinning the same way — no WebGL equivalent)
+# Scene F - SubViewport + SSAO + Bloom (WebGL/Compatibility renderer has different post-FX path — no WebGL equivalent)
 ```
 
+---
+
+## WebGPU scene E: Skeletal Animation
+
+fps: TODO
+visual: TODO
+
+bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_e/naga_wasm_bg.wasm
+
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
+
+expected: 20 GPU-skinned cylinders visibly bending/swinging. FPS ~120. Zero GPU errors in console.
+
+---
+
+## WebGPU scene F: SubViewport + SSAO + Bloom
+
+fps: 120fps
+visual: passing as expected
+
+bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_f_postfx --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_f/naga_wasm_bg.wasm
+
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
+
+expected: 5 spinning PBR cubes on a ground plane, procedural sky visible, SSAO darkening corners/edges, bloom/glow around bright areas, floating quad showing a live SubViewport torus render. Zero GPU errors in console.
+
+
+Scene F errors: (only these errors:)
+```
+installHook.js:1 [Godot] WebGPU uncaptured error: GPUValidationError
+overrideMethod @ installHook.js:1Understand this error
+installHook.js:1 [UNCAPTURED-GPU-ERROR] [Texture (unlabeled 640x640 px, 7 layer, TextureFormat::RGB10A2Unorm)] usage (TextureBinding|RenderAttachment) includes writable usage and another usage in the same synchronization scope.
+ - While validating render pass usage.
+ - While finishing [CommandEncoder (unlabeled)].
+
+overrideMethod @ installHook.js:1Understand this error
+installHook.js:1 [Godot] WebGPU uncaptured error: GPUValidationError
+overrideMethod @ installHook.js:1Understand this error
+installHook.js:1 [UNCAPTURED-GPU-ERROR] [Invalid CommandBuffer] is invalid.
+ - While calling [Queue].Submit([[Invalid CommandBuffer]])
+```
+
+___
+
+
+Scene E errors: black screen
+```
+[UNCAPTURED-GPU-ERROR] Writable storage buffer binding aliasing found between [BindGroup (unlabeled)] set at bind group index 0, binding index 1, and [BindGroup (unlabeled)] set at bind group index 1, binding index 2, with overlapping ranges (offset: 0, size: 16) and (offset: 0, size: 16) in [Buffer (unlabeled)].
+ - While encoding [ComputePassEncoder (unlabeled)].DispatchWorkgroups(3, 1, 1).
+ - While finishing [CommandEncoder (unlabeled)].
+
+(anonymous) @ index.js:1Understand this error
+index.js:1 [SUBMIT-ERROR] #1789 bufs=1 err=[Invalid CommandBuffer] is invalid.
+ - While calling [Queue].Submit([[Invalid CommandBuffer]])
+
+(anonymous) @ index.js:1
+Promise.then
+d.queue.submit @ index.js:1
+_wgpuQueueSubmit @ index.js:1
+$func16169 @ 09cbb00a:0xac83c1
+$func47952 @ 09cbb00a:0x16b5b64
+$func48083 @ 09cbb00a:0x16db329
+$func51387 @ 09cbb00a:0x1835217
+$func50056 @ 09cbb00a:0x1789b31
+$func50088 @ 09cbb00a:0x178e6a9
+$func798 @ 09cbb00a:0x16fedb
+$func659 @ 09cbb00a:0xaf044
+callUserCallback @ index.js:1
+runIter @ index.js:1
+MainLoop_runner @ index.js:1
+requestAnimationFrame
+requestAnimationFrame @ index.js:1
+MainLoop_scheduler_rAF @ index.js:1
+MainLoop_runner @ index.js:1
+requestAnimationFrame
+requestAnimationFrame @ index.js:1
+MainLoop_scheduler_rAF @ index.js:1
+MainLoop_runner @ index.js:1
+requestAnimationFrame
+requestAnimationFrame @ index.js:1
+MainLoop_scheduler_rAF @ index.js:1
+MainLoop_runner @ index.js:1
+requestAnimationFrame
+requestAnimationFrame @ index.js:1
+MainLoop_scheduler_rAF @ index.js:1
+MainLoop_runner @ index.js:1
+requestAnimationFrame
+requestAnimationFrame @ index.js:1
+MainLoop_scheduler_rAF @ index.js:1
+MainLoop_runner @ index.js:1
+requestAnimationFrame
+requestAnimationFrame @ index.js:1
+MainLoop_scheduler_rAF @ index.js:1
+MainLoop_runner @ index.js:1
+requestAnimationFrame
+requestAnimationFrame @ index.js:1
+MainLoop_scheduler_rAF @ index.js:1
+MainLoop_runner @ index.js:1
+requestAnimationFrame
+requestAnimationFrame @ index.js:1
+MainLoop_scheduler_rAF @ index.js:1
+```
