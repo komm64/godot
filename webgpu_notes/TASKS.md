@@ -1388,6 +1388,210 @@ All 4 scenes verified:
 
 ---
 
+## Phase 6: Filling Gaps — Additional Mobile Renderer Features (Days 15–17)
+
+> **Goal**: Close the remaining coverage gaps in the Mobile renderer. Forward+ is explicitly out of scope — it requires features (clustered lighting, large UBO arrays, many textures) that hit hard WebGPU browser limits and are not needed for typical web-targeted games. This phase adds two new test scenes covering the highest-risk untested code paths, and fixes any bugs found.
+>
+> **Scope boundary**: Mobile renderer only. All test scenes use `renderer/rendering_method.web="mobile"`.
+
+### Feature Coverage Map (Mobile renderer only)
+
+| Feature | Covered by scene | Status |
+|---------|-----------------|--------|
+| 2D sprites / canvas | A | ✅ Working |
+| PBR materials + directional shadow | B | ✅ Working |
+| Multi-draw, point/spot shadow cube maps | C | ✅ Working |
+| GPU compute (particles) | D | ✅ Working |
+| Skeletal animation / GPU skinning | E | 🔲 TODO |
+| SubViewport (render-to-texture) | F | 🔲 TODO |
+| SSAO | F | 🔲 TODO |
+| Bloom / glow | F | 🔲 TODO |
+| Procedural sky | F | 🔲 TODO |
+| UI / Control nodes | A (overlay) | ✅ Working (Label nodes used in all scenes) |
+| ReflectionProbe | — | Low risk — uses existing cubemap path |
+| `texture_get_data()` async readback | — | Stubbed (WARN_PRINT_ONCE) |
+
+---
+
+### Task 6.1: Scene E — Skeletal Animation (GPU Skinning) `[SERIAL]`
+**Status**: `TODO`
+**Effort**: 3–5 hours
+**Dependencies**: Phase 5
+
+**Why this matters**: GPU skinning uses SSBO reads in the vertex stage — the same code path that had the writable-SSBO vertex-visibility bug (fixed in Task 5.3b). The read-only skinning path (skeleton bone matrices) has never been explicitly tested. This is the most common feature in 3D games that hasn't been exercised.
+
+**What to build**:
+A scene with 20 `Skeleton3D` + skinned `MeshInstance3D` instances, all animating every frame:
+- 2 bones per skeleton (`lower`, `upper`)
+- Procedural cylindrical mesh with bone weights (SurfaceTool — bottom vertices weight 1.0 on bone 0, top vertices weight 1.0 on bone 1, midpoint 0.5/0.5 blend)
+- Bone 1 rotation animated in `_process` via `set_bone_pose_rotation()` — a sine-wave swing
+- Directional light + shadow, PBR materials, basic environment
+
+**Project location**: `tmp/benchmarks/scene_e_animated/`
+
+**Key GPU skinning code path in Godot**:
+- `SkeletonShader` in `servers/rendering/renderer_rd/shaders/skeleton.glsl` — compute shader that writes skinned vertices
+- Reads bone matrices from a `STORAGE_BUFFER` (read-only) in set 1
+- Output is a staging vertex buffer read back in the render pass
+- The Mobile renderer runs this as a compute dispatch before each draw
+
+**Instructions**:
+
+1. **Create the project** (see completion notes for full GDScript):
+   ```
+   tmp/benchmarks/scene_e_animated/
+   ├── project.godot
+   ├── main.tscn
+   ├── benchmark.gd   ← procedural skinned mesh + 20 skeleton instances
+   └── export_presets.cfg
+   ```
+
+2. **Export headlessly** using the WebGPU template:
+   ```bash
+   ./bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated \
+       --export-release "WebGPU" tmp/benchmarks/exports/webgpu/scene_e/index.html
+   cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm \
+       tmp/benchmarks/exports/webgpu/scene_e/naga_wasm_bg.wasm
+   ```
+
+3. **Serve and verify** — expected console output: no GPU errors, meshes visibly deforming, FPS label updating.
+
+4. **Fix any issues** — likely candidates:
+   - BGL mismatch for skeleton compute shader (different bind group layout per skeleton count)
+   - `STORAGE_BUFFER_DYNAMIC` visibility flag for read-only skinning SSBO
+   - Missing `SUPPORTS_SKELETON_TRANSFORM` feature flag returning false
+
+**Completion Criteria**: 20 animated skeleton instances render and deform correctly in browser. Zero GPU validation errors. FPS stable (GPU-skinning compute overhead is small — expect ~120fps).
+
+---
+
+### Task 6.2: Scene F — SubViewport + SSAO + Bloom `[SERIAL, after 6.1]`
+**Status**: `TODO`
+**Effort**: 4–6 hours
+**Dependencies**: Task 6.1 (to reuse any BGL fix)
+
+**Why this matters**: SubViewport creates an off-screen framebuffer with its own render world, camera, and environment — different lifecycle from the swap-chain framebuffer. Shadow cascades (an implicit off-screen render) worked, but SubViewport also involves `ViewportTexture` (a texture that wraps the viewport's output) being bound as a regular 2D texture in a material, which exercises the depth/attachment texture → sampled texture transition path.
+
+SSAO and bloom are both screen-space multi-pass effects with unique shader permutations:
+- SSAO reads the depth buffer as a sampled texture
+- Bloom does 5 downsample + 5 upsample compute dispatches
+- Both are major features users expect in their Mobile renderer games
+
+**What to build**:
+A main 3D scene with:
+- 5 spinning PBR cubes around a center point
+- WorldEnvironment with `ssao_enabled=true`, `glow_enabled=true`, procedural sky
+- A `SubViewport` (512×512) with its own Camera3D and a spinning torus mesh
+- A `QuadMesh` / `PlaneMesh` in the main scene displaying the SubViewport's texture (via `viewport.get_texture()`)
+- Directional shadow on the main scene
+
+**Project location**: `tmp/benchmarks/scene_f_postfx/`
+
+**Instructions**:
+
+1. **Create the project**:
+   ```
+   tmp/benchmarks/scene_f_postfx/
+   ├── project.godot
+   ├── main.tscn
+   ├── benchmark.gd   ← SubViewport + SSAO + bloom + spinning cubes
+   └── export_presets.cfg
+   ```
+
+2. **Enable SSAO and bloom in the environment**:
+   ```gdscript
+   env.ssao_enabled = true
+   env.ssao_radius = 1.0
+   env.ssao_intensity = 2.0
+   env.glow_enabled = true
+   env.glow_intensity = 0.8
+   env.background_mode = Environment.BG_SKY  # procedural sky
+   var sky := Sky.new()
+   sky.sky_material = ProceduralSkyMaterial.new()
+   env.sky = sky
+   ```
+
+3. **SubViewport setup**:
+   ```gdscript
+   var vp := SubViewport.new()
+   vp.size = Vector2i(512, 512)
+   vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+   # ... add camera, light, torus
+   var monitor_mat := StandardMaterial3D.new()
+   monitor_mat.albedo_texture = vp.get_texture()
+   monitor_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+   ```
+
+4. **Export and test** using same steps as Task 6.1 but for scene_f.
+
+5. **Fix any issues** — likely candidates:
+   - SSAO depth texture sampling: depth format read as sampled texture may hit NAGA issue (depth textures need special sampler type in WGSL)
+   - SubViewport texture binding: `ViewportTexture` may have different format/usage than a regular texture; may need `TEXTURE_USAGE_SAMPLING_BIT` added
+   - Bloom compute passes: likely fine (same dispatch path as particles), but verify no validation errors
+   - Procedural sky shader: new GLSL → SPIR-V → NAGA path, may have shader-specific conversion issues
+
+**Completion Criteria**: SubViewport renders a spinning torus visible on the monitor quad. SSAO darkens corners. Bloom/glow visible around bright areas. Procedural sky visible. Zero GPU errors.
+
+---
+
+### Task 6.3: SSAO Depth Texture Sampling Fix (if needed) `[SERIAL, after 6.2 diagnosis]`
+**Status**: `TODO`
+**Effort**: 2–4 hours
+**Dependencies**: Task 6.2
+
+**Background**: SSAO and other screen-space passes sample the depth buffer as a regular 2D texture. In WebGPU / WGSL, depth textures have a special type (`texture_depth_2d`) and are sampled with `textureSampleCompare()` or via `textureLoad()`. NAGA may emit the wrong texture type binding for depth formats, causing a BGL mismatch.
+
+**Symptoms to watch for**:
+- GPU error: `Validation error: ... texture_depth_2d vs texture_2d mismatch`
+- SSAO renders as solid black or all-white
+- NAGA conversion warnings mentioning `Depth` texture type
+
+**Potential fix location**: `_get_compatible_bind_group()` in `rendering_device_driver_webgpu.cpp` — already has a depth↔float texture adaptation path (added during Phase 3). May need extension to cover screen-space passes.
+
+**Instructions**:
+1. If Task 6.2 reports SSAO errors, read the specific GPU validation message
+2. Check `_get_compatible_bind_group()` — the existing depth alias fallback (`fallback_float_texture`) handles the Depth→FloatTexture direction; may also need Float→Depth
+3. If needed, add a reverse adaptation: when BGL expects `texture_depth_2d` but uniform set has a `texture_2d`, substitute with the correct depth view
+
+**Completion Criteria**: SSAO renders correctly with no depth texture type errors. (If Task 6.2 passes with no errors, mark this SKIPPED.)
+
+---
+
+### Task 6.4: `texture_get_data()` Async Readback `[PARALLEL with 6.1]`
+**Status**: `TODO`
+**Effort**: 3–4 hours
+**Dependencies**: Phase 5
+
+**Background**: `texture_get_data()` is currently stubbed with `WARN_PRINT_ONCE("texture_get_data not yet implemented")`. This blocks screenshot capture, GPU readback for game logic, and any feature that needs CPU-side texture data (e.g. `Image.save_png()` from a viewport). Most games don't call this in the hot path, but it's a correctness gap.
+
+**Implementation plan**:
+The WebGPU async map pattern requires a staging buffer with `MapRead` usage:
+1. Create a `WGPUBuffer` (CopyDst | MapRead) sized for the texture slice
+2. `wgpuCommandEncoderCopyTextureToBuffer()` into the staging buffer
+3. Submit + `wgpuBufferMapAsync()` with `WGPUCallbackMode_AllowSpontaneous`
+4. In callback: `memcpy` from mapped range into the output `PackedByteArray`
+
+Since `texture_get_data()` is called synchronously but WebGPU map is async, use the same pattern as timestamp readback (Task 3.3): trigger map after submit, copy to CPU shadow on callback, return shadow data on next call.
+
+**Warning**: This means `texture_get_data()` returns stale data on the first call after a write (returns the previous frame's data). This is acceptable for screenshots but may be surprising for game logic. Document this in the function comment.
+
+**Completion Criteria**: `texture_get_data()` returns valid pixel data. `RenderingServer.texture_get_data()` / `Image.create_from_data()` + `save_png()` works from GDScript. No crash or WARN_PRINT in hot path.
+
+---
+
+### Task 6.5: Verify ReflectionProbe and OmniLight Shadow Cubemaps `[PARALLEL with 6.1]`
+**Status**: `TODO`
+**Effort**: 1–2 hours
+**Dependencies**: Phase 5
+
+**Background**: Scene C uses `OmniLight3D` with `shadow_enabled=true`, which exercises the shadow cubemap rendering path (6 faces). `ReflectionProbe` also renders 6 cubemap faces to a `TEXTURE_TYPE_CUBE` target — a different code path (off-screen render pass to a cube layer). This has not been explicitly tested.
+
+**Instructions**: Add a `ReflectionProbe` node to Scene B or Scene C's GDScript, confirm it renders without errors and metallic/mirror surfaces reflect the environment.
+
+**Completion Criteria**: Reflection probe renders; metallic spheres (Scene B) show correct reflections. No GPU errors. (If already working due to shadow cube path, mark DONE.)
+
+---
+
 ## Appendix: Task Dependency Graph
 
 ```
