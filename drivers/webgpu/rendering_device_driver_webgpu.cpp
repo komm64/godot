@@ -244,6 +244,18 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		dummy_comparison_sampler = wgpuDeviceCreateSampler(device, &csd);
 	}
 
+	// Create aliasing stub buffer — substituted for duplicate writable storage buffer bindings
+	// in the same uniform set. WebGPU forbids two writable storage bindings that alias the same
+	// underlying buffer (Vulkan allows it via barriers). When Godot passes the same buffer for
+	// both SourceEmission and DestEmission in the particle compute shader, we redirect the
+	// second occurrence to this dummy buffer so the bind group passes validation.
+	{
+		WGPUBufferDescriptor stub_desc = {};
+		stub_desc.size = ALIASING_STUB_BUFFER_SIZE;
+		stub_desc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+		aliasing_stub_buffer = wgpuDeviceCreateBuffer(device, &stub_desc);
+	}
+
 	// Create shader container format.
 	shader_container_format = memnew(RenderingShaderContainerFormatWebGPU);
 
@@ -2877,6 +2889,50 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 			default: {
 				WARN_PRINT_ONCE(vformat("WebGPU: unhandled uniform type %d in uniform_set_create.", (int)uniform.type));
 			} break;
+		}
+	}
+
+	// De-alias writable storage buffer bindings: WebGPU forbids two writable storage
+	// bindings in the same bind group pointing at the same underlying WGPUBuffer with
+	// overlapping byte ranges (e.g. particles.glsl set=1 binding=2/3 SourceEmission vs
+	// DestEmission when no sub-emitter particles exist and Godot passes one buffer for both).
+	// Vulkan allows this because it inserts barriers; WebGPU tracks hazards automatically
+	// but rejects aliased writable bindings at validation time.
+	// Solution: redirect duplicate occurrences to aliasing_stub_buffer (a small dummy).
+	if (aliasing_stub_buffer && p_set_index < (uint32_t)shader->bind_group_infos.size()) {
+		const auto &bgi = shader->bind_group_infos[p_set_index];
+		// Build a map from NAGA-doubled binding index → BGL buffer type.
+		HashMap<uint32_t, WGPUBufferBindingType> binding_type_map;
+		for (const auto &bge : bgi.entries) {
+			if (bge.layout_entry.buffer.type != WGPUBufferBindingType_BindingNotUsed) {
+				binding_type_map[bge.layout_entry.binding * 2] = bge.layout_entry.buffer.type;
+			}
+		}
+		// Scan entries for duplicate WGPUBuffer handles among writable storage bindings.
+		HashMap<WGPUBuffer, uint32_t> seen_writable; // buffer handle → first entry index
+		for (uint32_t ei = 0; ei < entries.size(); ei++) {
+			WGPUBindGroupEntry &e = entries[ei];
+			if (e.buffer == nullptr || e.buffer == aliasing_stub_buffer) {
+				continue;
+			}
+			WGPUBufferBindingType *btype = binding_type_map.getptr(e.binding);
+			if (!btype || *btype != WGPUBufferBindingType_Storage) {
+				continue; // Only care about writable storage.
+			}
+			if (seen_writable.has(e.buffer)) {
+				// Alias detected: redirect to stub buffer so the dispatch passes validation.
+				static bool alias_logged = false;
+				if (!alias_logged) {
+					alias_logged = true;
+					EM_ASM({ console.warn('[ALIAS-STUB] Writable storage buffer aliasing at set=' + $0 + ' binding=' + $1 + ', redirecting to stub buffer'); },
+							(int)p_set_index, (int)e.binding);
+				}
+				e.buffer = aliasing_stub_buffer;
+				e.offset = 0;
+				e.size = ALIASING_STUB_BUFFER_SIZE;
+			} else {
+				seen_writable[e.buffer] = ei;
+			}
 		}
 	}
 

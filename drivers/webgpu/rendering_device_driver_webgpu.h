@@ -89,6 +89,15 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	WGPUTexture fallback_cube_texture = nullptr;
 	WGPUTextureView fallback_cube_texture_view = nullptr;
 
+	// --- Aliasing Stub Buffer ---
+	// Substituted for the second writable storage buffer binding when two
+	// bindings in the same uniform set alias the same WGPUBuffer. WebGPU
+	// forbids two writable storage bindings overlapping the same buffer in
+	// a single dispatch (Vulkan allows it via barriers). The shader writes
+	// to this throwaway buffer instead of triggering a validation error.
+	WGPUBuffer aliasing_stub_buffer = nullptr;
+	static constexpr uint64_t ALIASING_STUB_BUFFER_SIZE = 65536; // 64KB — large enough for any sub-emitter emission buffer
+
 	// --- Dummy Samplers for BGL Rebinding ---
 	// When a bind group must be re-created with a different BGL (e.g., because
 	// the original BGL has a Comparison sampler but the target has Filtering),
