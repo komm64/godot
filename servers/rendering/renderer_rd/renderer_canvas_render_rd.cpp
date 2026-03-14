@@ -678,9 +678,7 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 
 		Transform3D screen_transform;
 		screen_transform.translate_local(-(ssize.width / 2.0f), -(ssize.height / 2.0f), 0.0f);
-		// Vulkan NDC: y=-1 is TOP. WebGPU NDC: y=+1 is TOP. Negate y for WebGPU.
-		const float y_scale = (RD::get_singleton()->get_device_api_name() == "WebGPU") ? -2.0f / ssize.height : 2.0f / ssize.height;
-		screen_transform.scale(Vector3(2.0f / ssize.width, y_scale, 1.0f));
+		screen_transform.scale(Vector3(2.0f / ssize.width, 2.0f / ssize.height, 1.0f));
 		_update_transform_to_mat4(screen_transform, state_buffer.screen_transform);
 		_update_transform_2d_to_mat4(p_canvas_transform, state_buffer.canvas_transform);
 

@@ -46,3 +46,45 @@ cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/we
 ```
 
 You should see a single red circle bouncing around. If WebGPU still shows a black screen, it confirms the rendering pipeline issue (not a scene complexity problem).
+
+
+
+___
+
+
+
+
+
+**IMPORTANT:** Use `serve.py` (not `python3 -m http.server`) to avoid browser caching between scenes. All scenes share the same filenames (index.pck, index.wasm, etc.) so the browser will serve stale cached data otherwise.
+
+WebGPU (run one at a time, kill the server between each with Ctrl+C):
+```
+# Scene A - Sprites
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_a && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+
+# Scene B - PBR
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_b && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+
+# Scene C - Instances
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_c && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+
+# Scene D - Particles
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_d && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+```
+
+
+WebGL (same pattern):
+```
+# Scene A - Sprites
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_a && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+
+# Scene B - PBR
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_b && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+
+# Scene C - Instances
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_c && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+
+# Scene D - Particles
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_d && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+```
+
