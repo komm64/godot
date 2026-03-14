@@ -50,6 +50,28 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	uint32_t frame_index = 0;
 	uint32_t frames_drawn = 0;
 
+	// Per-frame performance counters (logged once per second via EM_ASM).
+	struct PerfCounters {
+		uint32_t draw_calls = 0;
+		uint32_t set_bind_group_calls = 0;
+		uint32_t set_bind_group_skipped = 0;
+		uint32_t push_constant_writes = 0;
+		uint32_t push_constant_skipped = 0;
+		uint32_t render_passes = 0;
+		uint32_t bind_group_cache_misses = 0;
+		double last_log_time = 0;
+		uint32_t frames_since_log = 0;
+		void reset() {
+			draw_calls = 0;
+			set_bind_group_calls = 0;
+			set_bind_group_skipped = 0;
+			push_constant_writes = 0;
+			push_constant_skipped = 0;
+			render_passes = 0;
+			bind_group_cache_misses = 0;
+		}
+	} perf;
+
 	Capabilities capabilities;
 	MultiviewCapabilities multiview_capabilities;
 	FragmentShadingRateCapabilities fsr_capabilities;
@@ -71,6 +93,12 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// (original binding N → sampler@N*2, image@N*2+1; max original ~20 → max split ~41).
 	static constexpr uint32_t PUSH_CONSTANT_RING_BINDING = 120;
 	uint32_t push_constant_ring_offset = 0;
+
+	// CPU-side shadow of the ring buffer for batched writes.
+	// Accumulated during command recording, flushed once before queue submit.
+	uint8_t push_constant_shadow[PUSH_CONSTANT_RING_SIZE] = {};
+	uint32_t push_constant_shadow_dirty_start = UINT32_MAX;
+	uint32_t push_constant_shadow_dirty_end = 0;
 
 	// Universal push constant bind group layout: group N, binding 0,
 	// uniform buffer with hasDynamicOffset=true. Created once at initialize().

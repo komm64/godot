@@ -263,6 +263,19 @@ struct WGCommandBuffer {
 		uint32_t render_area_height = 0;
 	} render_state;
 
+	// Bind group state tracking for redundancy elimination.
+	// Tracks what's currently bound at each bind group slot to skip redundant SetBindGroup calls.
+	static constexpr uint32_t MAX_BIND_GROUPS = 4;
+	WGPUBindGroup bound_bind_groups[MAX_BIND_GROUPS] = {};
+	WGShader *bound_shader = nullptr; // Shader whose BGL the bound groups were created for.
+
+	void invalidate_bind_groups() {
+		for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
+			bound_bind_groups[i] = nullptr;
+		}
+		bound_shader = nullptr;
+	}
+
 	// Track query pools that had timestamps written, for resolve at command buffer end.
 	LocalVector<WGQueryPool *> written_query_pools;
 

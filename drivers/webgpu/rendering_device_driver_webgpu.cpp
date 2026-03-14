@@ -1217,6 +1217,15 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 	}
 
 	if (wgpu_cmd_buffers.size() > 0) {
+		// Flush batched push constant data to GPU before submitting command buffers.
+		if (push_constant_shadow_dirty_start < push_constant_shadow_dirty_end) {
+			wgpuQueueWriteBuffer(queue, push_constant_ring_buffer, push_constant_shadow_dirty_start,
+					push_constant_shadow + push_constant_shadow_dirty_start,
+					push_constant_shadow_dirty_end - push_constant_shadow_dirty_start);
+			push_constant_shadow_dirty_start = UINT32_MAX;
+			push_constant_shadow_dirty_end = 0;
+		}
+
 		wgpuQueueSubmit(queue, wgpu_cmd_buffers.size(), wgpu_cmd_buffers.ptr());
 		// Diagnostic: log submit count for the first few frames.
 		static int _submit_log = 0;
@@ -3180,6 +3189,7 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 	}
 
 	// Create re-bound bind group with target layout.
+	perf.bind_group_cache_misses++;
 	WGPUBindGroupDescriptor desc = {};
 	desc.layout = target_layout;
 	desc.entryCount = filtered.size();
@@ -3513,21 +3523,42 @@ void RenderingDeviceDriverWebGPU::command_bind_push_constants(CommandBufferID p_
 
 void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_buf, WGShader *p_shader) {
 	if (!p_cmd_buf->push_constants_dirty || p_cmd_buf->push_constant_data_len == 0 || !p_shader) {
+		perf.push_constant_skipped++;
 		return;
 	}
 	if (p_shader->push_constant_bind_group == UINT32_MAX || !push_constant_bind_group) {
 		p_cmd_buf->push_constants_dirty = false;
+		perf.push_constant_skipped++;
 		return; // Shader has no push constants.
 	}
 
-	// Write push constant data to ring buffer.
+	perf.push_constant_writes++;
+
+	// Write push constant data to CPU shadow buffer (batched GPU write at submit time).
 	uint32_t aligned_size = (p_cmd_buf->push_constant_data_len + PUSH_CONSTANT_SLOT_ALIGNMENT - 1) & ~(PUSH_CONSTANT_SLOT_ALIGNMENT - 1);
 
 	if (push_constant_ring_offset + aligned_size > PUSH_CONSTANT_RING_SIZE) {
+		// Flush the accumulated shadow buffer before wrapping.
+		if (push_constant_shadow_dirty_start < push_constant_shadow_dirty_end) {
+			wgpuQueueWriteBuffer(queue, push_constant_ring_buffer, push_constant_shadow_dirty_start,
+					push_constant_shadow + push_constant_shadow_dirty_start,
+					push_constant_shadow_dirty_end - push_constant_shadow_dirty_start);
+			push_constant_shadow_dirty_start = UINT32_MAX;
+			push_constant_shadow_dirty_end = 0;
+		}
 		push_constant_ring_offset = 0; // Wrap around.
 	}
 
-	wgpuQueueWriteBuffer(queue, push_constant_ring_buffer, push_constant_ring_offset, p_cmd_buf->push_constant_data, p_cmd_buf->push_constant_data_len);
+	memcpy(push_constant_shadow + push_constant_ring_offset, p_cmd_buf->push_constant_data, p_cmd_buf->push_constant_data_len);
+
+	// Track dirty range for batched flush.
+	if (push_constant_ring_offset < push_constant_shadow_dirty_start) {
+		push_constant_shadow_dirty_start = push_constant_ring_offset;
+	}
+	uint32_t end = push_constant_ring_offset + aligned_size;
+	if (end > push_constant_shadow_dirty_end) {
+		push_constant_shadow_dirty_end = end;
+	}
 
 	uint32_t dynamic_offset = push_constant_ring_offset;
 
@@ -3608,32 +3639,13 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	ERR_FAIL_NULL(rp);
 	ERR_FAIL_NULL(fb);
 
-	// Temporary: log render passes for first 2 frames (~30 render passes).
-	static int _rp_log = 0;
-	if (_rp_log < 30) {
-		int has_color = rp->subpasses.size() > 0 ? (int)rp->subpasses[0].color_references.size() : 0;
-		int has_depth = (rp->subpasses.size() > 0 && rp->subpasses[0].depth_stencil_reference.attachment != AttachmentReference::UNUSED) ? 1 : 0;
-		int n_sub = (int)rp->subpasses.size();
-		int load_op = (rp->attachments.size() > 0) ? (int)rp->attachments[0].load_op : -1;
-		int store_op = (rp->attachments.size() > 0) ? (int)rp->attachments[0].store_op : -1;
-		float cr = 0, cg = 0, cb = 0, ca = 0;
-		if (load_op == (int)ATTACHMENT_LOAD_OP_CLEAR && p_clear_values.size() > 0) {
-			cr = p_clear_values[0].color.r;
-			cg = p_clear_values[0].color.g;
-			cb = p_clear_values[0].color.b;
-			ca = p_clear_values[0].color.a;
-		}
-		// Check if this is the swap chain pass by comparing view pointer.
-		int is_sc = rp->is_swap_chain_pass ? 1 : 0;
-		int fmt = (rp->attachments.size() > 0) ? (int)rp->attachments[0].format : -1;
-		int views = (int)fb->attachment_views.size();
-		EM_ASM({ console.log('[RP#' + $0 + '] ' + $1 + 'x' + $2 + ' colors=' + $3 + ' depth=' + $4 + ' subs=' + $5 + ' load=' + $6 + ' store=' + $7 + ' clear=(' + $8.toFixed(4) + ',' + $9.toFixed(4) + ',' + $10.toFixed(4) + ',' + $11.toFixed(4) + ') sc=' + $12 + ' fmt=' + $13 + ' views=' + $14); },
-				_rp_log, fb->width, fb->height, has_color, has_depth, n_sub, load_op, store_op, cr, cg, cb, ca, is_sc, fmt, views);
-		_rp_log++;
-	}
+	perf.render_passes++;
 
 	// End any active encoder.
 	cmd->end_active_encoder();
+
+	// Invalidate bind group state tracking (new encoder = clean state).
+	cmd->invalidate_bind_groups();
 
 	// Store render state.
 	cmd->render_state.render_pass = rp;
@@ -4053,39 +4065,10 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 	WGShader *pipeline_shader = cmd->render_state.current_pipeline ? cmd->render_state.current_pipeline->shader : nullptr;
 
 	// Diagnostic: log texture bindings and push constant info on swap chain pass.
-	if (cmd->render_state.render_pass && cmd->render_state.render_pass->is_swap_chain_pass) {
-		static int _sc_bind_log = 0;
-		if (_sc_bind_log < 10) {
-			EM_ASM({ console.log('[SC-BIND] sets=' + $0 + ' first=' + $1); },
-					(int)p_set_count, (int)p_first_set_index);
-			for (uint32_t i = 0; i < p_set_count; i++) {
-				WGUniformSet *us2 = (WGUniformSet *)(p_uniform_sets[i].id);
-				EM_ASM({ console.log('[SC-SET] i=' + $0 + ' null=' + $1 + ' handle=' + $2 + ' textures=' + $3); },
-						(int)i, us2 ? 0 : 1,
-						us2 ? (us2->handle ? 1 : 0) : -1,
-						us2 ? (int)us2->bound_textures.size() : -1);
-				if (us2) {
-					for (const KeyValue<uint32_t, WGTexture *> &kv : us2->bound_textures) {
-						WGTexture *t = kv.value;
-						EM_ASM({ console.log('[SC-TEX] set=' + $0 + ' binding=' + $1 + ' size=' + $2 + 'x' + $3 + ' fmt=' + $4 + ' view=' + $5 + ' src=' + $6); },
-								p_first_set_index + i, kv.key,
-								t ? (int)t->width : -1, t ? (int)t->height : -1,
-								t ? (int)t->format : -1,
-								t ? (t->default_view ? 1 : 0) : -1,
-								t ? (t->view_source ? 1 : 0) : -1);
-					}
-				}
-			}
-			if (pipeline_shader) {
-				EM_ASM({ console.log('[SC-PC] pc_size=' + $0 + ' pc_group=' + $1 + ' pc_binding=' + $2 + ' merged=' + $3 + ' name=' + UTF8ToString($4)); },
-						(int)pipeline_shader->push_constant_size,
-						(int)pipeline_shader->push_constant_bind_group,
-						(int)pipeline_shader->push_constant_binding,
-						pipeline_shader->merged_pc_group_layout ? 1 : 0,
-						pipeline_shader->name.utf8().get_data());
-			}
-			_sc_bind_log++;
-		}
+	// Invalidate bind group tracking if the pipeline shader changed.
+	if (pipeline_shader != cmd->bound_shader) {
+		cmd->invalidate_bind_groups();
+		cmd->bound_shader = pipeline_shader;
 	}
 
 	for (uint32_t i = 0; i < p_set_count; i++) {
@@ -4106,13 +4089,22 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 					uint32_t zero_offset = 0;
 					wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, 1, &zero_offset);
 				} else {
-					// No merged layout — shader uses the universal PC-only bind group.
-					// Clear stale merged bind group so _flush_push_constants uses the universal one.
 					cmd->current_pc_bind_group = nullptr;
 					wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, 0, nullptr);
 				}
+				perf.set_bind_group_calls++;
+				// PC group always needs rebind (dynamic offset changes per draw).
 			} else {
+				// Skip redundant SetBindGroup calls for non-PC groups.
+				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS && cmd->bound_bind_groups[set_idx] == bg_to_bind) {
+					perf.set_bind_group_skipped++;
+					continue; // Already bound — skip.
+				}
 				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, 0, nullptr);
+				perf.set_bind_group_calls++;
+				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					cmd->bound_bind_groups[set_idx] = bg_to_bind;
+				}
 			}
 		}
 	}
@@ -4123,21 +4115,11 @@ void RenderingDeviceDriverWebGPU::command_render_draw(CommandBufferID p_cmd_buff
 	ERR_FAIL_NULL(cmd);
 	ERR_FAIL_COND(!cmd->render_encoder);
 
-	// Temporary: log draw calls for first 2 frames.
-	static int _draw_log = 0;
-	if (_draw_log < 60) {
-		const char *sname = (cmd->render_state.current_pipeline && cmd->render_state.current_pipeline->shader)
-			? cmd->render_state.current_pipeline->shader->name.utf8().get_data() : "?";
-		EM_ASM({ console.log('[DRAW#' + $0 + '] verts=' + $1 + ' inst=' + $2 + ' size=' + $3 + 'x' + $4 + ' shader=' + UTF8ToString($5)); },
-				_draw_log, p_vertex_count, p_instance_count,
-				cmd->render_state.render_area_width, cmd->render_state.render_area_height, sname);
-		_draw_log++;
-	}
-
 	if (cmd->render_state.current_pipeline) {
 		_flush_push_constants(cmd, cmd->render_state.current_pipeline->shader);
 	}
 
+	perf.draw_calls++;
 	wgpuRenderPassEncoderDraw(cmd->render_encoder, p_vertex_count, p_instance_count, p_base_vertex, p_first_instance);
 }
 
@@ -4146,22 +4128,11 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_
 	ERR_FAIL_NULL(cmd);
 	ERR_FAIL_COND(!cmd->render_encoder);
 
-	// Temporary: log indexed draw calls for first 2 frames.
-	static int _idraw_log = 0;
-	if (_idraw_log < 60) {
-		const char *sname = (cmd->render_state.current_pipeline && cmd->render_state.current_pipeline->shader)
-			? cmd->render_state.current_pipeline->shader->name.utf8().get_data() : "?";
-		int is_sc = cmd->render_state.render_pass ? (cmd->render_state.render_pass->is_swap_chain_pass ? 1 : 0) : -1;
-		EM_ASM({ console.log('[IDRAW#' + $0 + '] idx=' + $1 + ' inst=' + $2 + ' size=' + $3 + 'x' + $4 + ' shader=' + UTF8ToString($5) + ' sc=' + $6); },
-				_idraw_log, p_index_count, p_instance_count,
-				cmd->render_state.render_area_width, cmd->render_state.render_area_height, sname, is_sc);
-		_idraw_log++;
-	}
-
 	if (cmd->render_state.current_pipeline) {
 		_flush_push_constants(cmd, cmd->render_state.current_pipeline->shader);
 	}
 
+	perf.draw_calls++;
 	wgpuRenderPassEncoderDrawIndexed(cmd->render_encoder, p_index_count, p_instance_count, p_first_index, p_vertex_offset, p_first_instance);
 }
 
@@ -5095,8 +5066,27 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 	frame_index = p_frame_index;
 	frames_drawn = p_frames_drawn;
 
-	// Reset push constant ring buffer offset at the start of each frame.
+	// Log performance counters once per second.
+	perf.frames_since_log++;
+	double now = EM_ASM_DOUBLE({ return performance.now(); });
+	if (perf.last_log_time == 0) {
+		perf.last_log_time = now;
+	} else if (now - perf.last_log_time >= 1000.0) {
+		double elapsed = (now - perf.last_log_time) / 1000.0;
+		uint32_t fps = (uint32_t)(perf.frames_since_log / elapsed);
+		EM_ASM({
+			console.log('[PERF] fps=' + $0 + ' draws=' + $1 + ' SetBG=' + $2 + ' SetBG_skip=' + $3 + ' PC_write=' + $4 + ' PC_skip=' + $5 + ' RP=' + $6 + ' BG_miss=' + $7);
+		}, fps, perf.draw_calls, perf.set_bind_group_calls, perf.set_bind_group_skipped,
+				perf.push_constant_writes, perf.push_constant_skipped, perf.render_passes, perf.bind_group_cache_misses);
+		perf.reset();
+		perf.frames_since_log = 0;
+		perf.last_log_time = now;
+	}
+
+	// Reset push constant ring buffer offset and shadow buffer tracking at the start of each frame.
 	push_constant_ring_offset = 0;
+	push_constant_shadow_dirty_start = UINT32_MAX;
+	push_constant_shadow_dirty_end = 0;
 }
 
 void RenderingDeviceDriverWebGPU::end_segment() {
