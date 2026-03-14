@@ -1439,6 +1439,38 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 			d.queue._submitPatched = true;
 			console.log('[DIAG-CFG] queue.submit monkey-patched with error scope');
 		}
+		// Monkey-patch createRenderPipeline to capture creation-time errors with full messages.
+		if (d && !d._pipelinePatched) {
+			var origCreate = d.createRenderPipeline.bind(d);
+			d.createRenderPipeline = function(desc) {
+				d.pushErrorScope('validation');
+				var pipeline = origCreate(desc);
+				d.popErrorScope().then(function(err) {
+					if (err) {
+						console.error('[PIPELINE-CREATE-ERROR] ' + err.message.substring(0, 1200));
+					}
+				});
+				return pipeline;
+			};
+			d._pipelinePatched = true;
+			console.log('[DIAG-CFG] createRenderPipeline monkey-patched');
+		}
+		// Monkey-patch createShaderModule to capture WGSL compilation errors.
+		if (d && !d._shaderModPatched) {
+			var origCreateMod = d.createShaderModule.bind(d);
+			d.createShaderModule = function(desc) {
+				d.pushErrorScope('validation');
+				var mod = origCreateMod(desc);
+				d.popErrorScope().then(function(err) {
+					if (err) {
+						console.error('[SHADER-COMPILE-ERROR] ' + err.message.substring(0, 1200));
+					}
+				});
+				return mod;
+			};
+			d._shaderModPatched = true;
+			console.log('[DIAG-CFG] createShaderModule monkey-patched');
+		}
 		// Catch all uncaptured WebGPU errors (draw-time validation, etc.)
 		if (d && !d._uncapturedPatched) {
 			d.addEventListener('uncapturederror', function(e) {
