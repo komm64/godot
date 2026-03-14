@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 13, 2026 — **Phase 5 IN PROGRESS.** Tasks 5.1 (build tests), 5.3 (benchmarking) complete. Task 5.2 skipped. Task 5.4 remaining.
+> **Last Updated**: March 14, 2026 — **Phase 5 IN PROGRESS.** Tasks 5.1 (build tests), 5.3 (benchmarking) complete. Task 5.2 skipped. Task 5.3b (scene D particle bugs) DONE. Task 5.4 remaining.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -1170,6 +1170,91 @@ All three optimizations were already implemented during Phase 2:
 - **Qualitative note**: WebGPU enables Forward+/Mobile renderers with clustered lighting, compute shaders, GPU particles, SSAO, SSR, and full PBR — features not available in the WebGL Compatibility renderer. Direct FPS comparison is therefore not entirely apples-to-apples (WebGPU renders a higher-quality image).
 
 **Completion Criteria**: Performance data collected and documented. WebGPU shows measurable improvement over WebGL. ✓ Binary size target met; FPS tables prepared for manual testing.
+
+---
+
+### Task 5.3b: Scene D (GPU Particles) Bug Fixes `[SERIAL, after 5.3]`
+**Status**: `DONE`
+**Effort**: ~2 hours (debugging + 2 builds)
+**Dependencies**: Task 5.3 benchmark infrastructure
+
+**Summary**: Scene D (`GPUParticles3D`, 10,000 particles) showed a dark blue screen with continuous WebGPU validation errors. Three separate bugs were found and fixed over two build iterations.
+
+---
+
+#### Bug 1 — `command_bind_compute_uniform_sets`: wrong dynamic-offset count for push-constant group
+
+**Error message**:
+```
+The number of dynamic offsets (0) does not match the number of dynamic buffers (1)
+```
+at `ComputePassEncoder.SetBindGroup(3, ...)`.
+
+**Root cause**: `command_bind_compute_uniform_sets` was calling
+`wgpuComputePassEncoderSetBindGroup(..., 0, nullptr)` for **all** bind group indices, including
+group 3 which is the push-constant group. When a shader has a merged PC group layout (the ring
+buffer is colocated with material uniforms in the same BGL), that layout has `hasDynamicOffset=true`
+on the ring buffer, so WebGPU expects exactly 1 dynamic offset. The render path already handled
+this correctly; the compute path was missing the same check.
+
+**Fix** (`command_bind_compute_uniform_sets`): Mirrored the render-path logic — detect when
+`set_idx == shader->push_constant_bind_group && shader->merged_pc_group_layout != nullptr` and
+pass `1, &zero_offset` instead of `0, nullptr`.
+
+---
+
+#### Bug 2 — Writable storage buffer aliasing in particle compute shader (first attempt — broken)
+
+**Error message**:
+```
+Writable storage buffer binding aliasing found between bind group index 1, binding index 2,
+and bind group index 1, binding index 3, with overlapping ranges (offset: 0, size: 128)
+```
+
+**Root cause**: `particles.glsl` declares two writable `restrict buffer` bindings at set=1:
+- binding 2: `SourceEmission` (writable SSBO)
+- binding 3: `DestEmission` (writable SSBO)
+
+When no sub-emitter particles are pending, Godot passes the **same underlying `WGPUBuffer`** for
+both. Vulkan allows this (it inserts barriers between uses); WebGPU's hazard tracking rejects it
+at dispatch time.
+
+**First fix attempt** (broken): A post-loop dedup pass that built a `HashMap<uint32_t, WGPUBufferBindingType>`
+keyed on `bge.layout_entry.binding * 2`. This was wrong because `bge.layout_entry.binding` is
+**already** the NAGA-doubled value (`u.binding * 2`), so the map was keyed at `binding * 4` and
+the lookup against `e.binding` (= `binding * 2`) never matched. The `[ALIAS-STUB]` log never
+printed and the aliasing error continued.
+
+---
+
+#### Bug 3 — Writable storage buffer aliasing (corrected fix)
+
+**Fix**: Dropped the broken post-loop approach entirely. Added an inline `HashMap<WGPUBuffer, uint32_t> dup_storage_seen`
+**before** the uniform loop. Inside the `UNIFORM_TYPE_STORAGE_BUFFER` case, if `buf->handle`
+has already been seen in this set, the entry's `.buffer` is redirected to `aliasing_stub_buffer`
+(a 64 KB `Storage | CopyDst` dummy buffer created at `initialize()` time). No binding-index
+arithmetic is involved — the dedup is purely on `WGPUBuffer` pointer identity.
+
+**Files changed**:
+- `drivers/webgpu/rendering_device_driver_webgpu.h`: added `aliasing_stub_buffer = nullptr` and
+  `ALIASING_STUB_BUFFER_SIZE = 65536` constant.
+- `drivers/webgpu/rendering_device_driver_webgpu.cpp`:
+  - `initialize()`: create `aliasing_stub_buffer` after dummy samplers.
+  - `uniform_set_create()`: `dup_storage_seen` map + inline redirect in `UNIFORM_TYPE_STORAGE_BUFFER` case.
+  - `command_bind_compute_uniform_sets()`: dynamic-offset fix for Bug 1.
+
+**Result**: Particles visible, zero GPU errors. `[ALIAS-STUB]` warning fires once in console
+confirming the fix is active.
+
+---
+
+#### Scene C fix — colinear look-at warning (found during same session)
+
+`scene_c_instances/benchmark.gd` created a `DirectionalLight3D` at `Vector3(0, 10, 0)` and
+called `looking_at(Vector3.ZERO, Vector3.UP)`. Since the forward vector `(0,-1,0)` is antiparallel
+to the up hint `Vector3.UP`, `Transform3D::looking_at` emitted "Target and up vectors are colinear".
+
+**Fix**: Changed the up hint from `Vector3.UP` to `Vector3.FORWARD`. No rebuild required (GDScript only).
 
 ---
 
