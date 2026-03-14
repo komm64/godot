@@ -50,6 +50,12 @@ def create_template_zip(env, js, wasm, side):
         in_files.append(side)  # Side wasm (contains the actual Godot code).
         out_files.append(zip_dir.File(binary_name + ".side.wasm"))
 
+    # WebGPU: include the naga SPIR-V→WGSL converter WASM alongside the template
+    # so it is automatically extracted next to the game HTML during export.
+    if env.get("webgpu", False):
+        in_files.append("#drivers/webgpu/naga-converter/prebuilt/naga_wasm_bg.wasm")
+        out_files.append(zip_dir.File("naga_wasm_bg.wasm"))
+
     service_worker = "#misc/dist/html/service-worker.js"
     if env.editor_build:
         # HTML
