@@ -2653,6 +2653,12 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 	WGUniformSet *us = new WGUniformSet();
 	us->set_index = p_set_index;
 
+	// Track WGPUBuffer handles that have already been bound as STORAGE_BUFFER in this set.
+	// WebGPU forbids aliased writable storage buffer bindings in a single dispatch
+	// (Vulkan allows this via barriers). When the same buffer appears a second time,
+	// redirect it to aliasing_stub_buffer so the bind group passes validation.
+	HashMap<WGPUBuffer, uint32_t> dup_storage_seen; // buffer handle → first uniform index
+
 	for (uint32_t i = 0; i < p_uniforms.size(); i++) {
 		const BoundUniform &uniform = p_uniforms[i];
 		// WebGPU has no immutable sampler concept — always provide the sampler
@@ -2844,9 +2850,26 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 				ERR_CONTINUE_MSG(buf == nullptr, "WebGPU: null buffer in storage uniform.");
 				WGPUBindGroupEntry entry = {};
 				entry.binding = uniform.binding * 2; // NAGA doubles all non-combined bindings.
-				entry.buffer = buf->handle;
 				entry.offset = 0;
-				entry.size = buf->size;
+				// Alias detection: if this exact WGPUBuffer handle was already added as a
+				// storage binding in this set, redirect the duplicate to the stub buffer.
+				// This avoids the WebGPU "writable storage buffer aliasing" validation error
+				// that fires when e.g. the particle system passes the same buffer for both
+				// SourceEmission (binding 2) and DestEmission (binding 3).
+				if (aliasing_stub_buffer && dup_storage_seen.has(buf->handle)) {
+					static bool alias_stub_logged = false;
+					if (!alias_stub_logged) {
+						alias_stub_logged = true;
+						EM_ASM({ console.warn('[ALIAS-STUB] Writable storage buffer aliasing at set=' + $0 + ' binding=' + $1 + ', redirected to stub buffer'); },
+								(int)p_set_index, (int)uniform.binding);
+					}
+					entry.buffer = aliasing_stub_buffer;
+					entry.size = ALIASING_STUB_BUFFER_SIZE;
+				} else {
+					dup_storage_seen[buf->handle] = i;
+					entry.buffer = buf->handle;
+					entry.size = buf->size;
+				}
 				entries.push_back(entry);
 			} break;
 
@@ -2889,50 +2912,6 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 			default: {
 				WARN_PRINT_ONCE(vformat("WebGPU: unhandled uniform type %d in uniform_set_create.", (int)uniform.type));
 			} break;
-		}
-	}
-
-	// De-alias writable storage buffer bindings: WebGPU forbids two writable storage
-	// bindings in the same bind group pointing at the same underlying WGPUBuffer with
-	// overlapping byte ranges (e.g. particles.glsl set=1 binding=2/3 SourceEmission vs
-	// DestEmission when no sub-emitter particles exist and Godot passes one buffer for both).
-	// Vulkan allows this because it inserts barriers; WebGPU tracks hazards automatically
-	// but rejects aliased writable bindings at validation time.
-	// Solution: redirect duplicate occurrences to aliasing_stub_buffer (a small dummy).
-	if (aliasing_stub_buffer && p_set_index < (uint32_t)shader->bind_group_infos.size()) {
-		const auto &bgi = shader->bind_group_infos[p_set_index];
-		// Build a map from NAGA-doubled binding index → BGL buffer type.
-		HashMap<uint32_t, WGPUBufferBindingType> binding_type_map;
-		for (const auto &bge : bgi.entries) {
-			if (bge.layout_entry.buffer.type != WGPUBufferBindingType_BindingNotUsed) {
-				binding_type_map[bge.layout_entry.binding * 2] = bge.layout_entry.buffer.type;
-			}
-		}
-		// Scan entries for duplicate WGPUBuffer handles among writable storage bindings.
-		HashMap<WGPUBuffer, uint32_t> seen_writable; // buffer handle → first entry index
-		for (uint32_t ei = 0; ei < entries.size(); ei++) {
-			WGPUBindGroupEntry &e = entries[ei];
-			if (e.buffer == nullptr || e.buffer == aliasing_stub_buffer) {
-				continue;
-			}
-			WGPUBufferBindingType *btype = binding_type_map.getptr(e.binding);
-			if (!btype || *btype != WGPUBufferBindingType_Storage) {
-				continue; // Only care about writable storage.
-			}
-			if (seen_writable.has(e.buffer)) {
-				// Alias detected: redirect to stub buffer so the dispatch passes validation.
-				static bool alias_logged = false;
-				if (!alias_logged) {
-					alias_logged = true;
-					EM_ASM({ console.warn('[ALIAS-STUB] Writable storage buffer aliasing at set=' + $0 + ' binding=' + $1 + ', redirecting to stub buffer'); },
-							(int)p_set_index, (int)e.binding);
-				}
-				e.buffer = aliasing_stub_buffer;
-				e.offset = 0;
-				e.size = ALIASING_STUB_BUFFER_SIZE;
-			} else {
-				seen_writable[e.buffer] = ei;
-			}
 		}
 	}
 
