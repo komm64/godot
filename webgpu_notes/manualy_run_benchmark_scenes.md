@@ -55,36 +55,36 @@ ___
 
 
 
-**IMPORTANT:** Use `serve.py` (not `python3 -m http.server`) to avoid browser caching between scenes. All scenes share the same filenames (index.pck, index.wasm, etc.) so the browser will serve stale cached data otherwise.
+**IMPORTANT:** `serve.py` now auto-kills any old server on port 8080. Start the server first (background `&`), wait 0.5s, then open Chrome. This ensures the right scene is served.
 
-WebGPU (run one at a time, kill the server between each with Ctrl+C):
+WebGPU (run one at a time — the next command auto-kills the previous server):
 ```
 # Scene A - Sprites
-cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_a && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_a && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene B - PBR
-cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_b && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_b && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene C - Instances
-cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_c && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_c && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene D - Particles
-cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_d && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_d && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 ```
 
 
 WebGL (same pattern):
 ```
 # Scene A - Sprites
-cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_a && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_a && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene B - PBR
-cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_b && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_b && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene C - Instances
-cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_c && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_c && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene D - Particles
-cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_d && open -a "Google Chrome" http://localhost:8080 && python3 ../../../serve.py
+cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgl/scene_d && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 ```
 

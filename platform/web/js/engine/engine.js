@@ -434,6 +434,8 @@ const Engine = (function () {
 				'texture-formats-tier2',
 				'float32-filterable',
 				'rg11b10ufloat-renderable',
+				'clip-distances',
+				'dual-source-blending',
 			];
 			for (var i = 0; i < optionalFeatures.length; i++) {
 				if (adapter.features.has(optionalFeatures[i])) {
