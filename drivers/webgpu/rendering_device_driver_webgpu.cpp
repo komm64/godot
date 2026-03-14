@@ -4722,7 +4722,21 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		desc.fragment = &frag;
 	}
 
+	// Push a validation error scope so we can capture the exact creation error message.
+	static int _pcreate_id = 0;
+	int _pid = _pcreate_id++;
+	const char *_shader_name = shader->name.utf8().get_data();
+	EM_ASM({ Module['preinitializedWebGPUDevice'].pushErrorScope('validation'); });
 	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
+	EM_ASM({
+		var pid = $0;
+		var sname = UTF8ToString($1);
+		Module['preinitializedWebGPUDevice'].popErrorScope().then(function(err) {
+			if (err) {
+				console.error('[PCREATE-FAIL] id=' + pid + ' shader=' + sname + ' | ' + err.message.substring(0, 1600));
+			}
+		});
+	}, _pid, _shader_name);
 	ERR_FAIL_COND_V_MSG(!pipeline, PipelineID(), "WebGPU: Failed to create render pipeline.");
 
 	WGPipelineWrapper *pw = new WGPipelineWrapper();
