@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 14, 2026 — **Phase 5 IN PROGRESS.** Tasks 5.1 (build tests), 5.3 (benchmarking), 5.3b (scene D particle bugs), 5.3c (performance optimization) complete. Task 5.2 skipped. Task 5.4 remaining.
+> **Last Updated**: March 14, 2026 — **Phase 6 IN PROGRESS.** Task 6.1 (Scene E skeletal animation) fully fixed: 2 bugs in naga-converter WASM (`infer_readonly_storage` missed atomic writes + WGSL scanner missed `var<storage>`). Scene E: 120fps, zero GPU errors. Scene F: 120fps, non-fatal sync error (acceptable). Task 5.4 still TODO.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -1402,7 +1402,7 @@ All 4 scenes verified:
 | PBR materials + directional shadow | B | ✅ Working |
 | Multi-draw, point/spot shadow cube maps | C | ✅ Working |
 | GPU compute (particles) | D | ✅ Working |
-| Skeletal animation / GPU skinning | E | ✅ Fixed (March 2026) |
+| Skeletal animation / GPU skinning | E | ✅ Fixed (March 14, 2026 — 2 bugs) |
 | SubViewport (render-to-texture) | F | ✅ Working (120fps, visual pass) |
 | SSAO | F | ⚠️ GPU error (non-fatal, scene still renders) |
 | Bloom / glow | F | ✅ Working |
@@ -1414,16 +1414,23 @@ All 4 scenes verified:
 ---
 
 ### Task 6.1: Scene E — Skeletal Animation (GPU Skinning) `[DONE ✅]`
-**Status**: `FIXED — March 2026`
-**Root cause found and fixed**: WGSL scanner bug — NAGA emits `var<storage>` for read-only storage buffers (no access modifier), but our scanner only matched `var<storage, read>` which NAGA never produces. Read-only buffers (BlendShapeWeights, BlendShapeData) fell back to `!u.writable`, but spv-reflect marked them writable (per `restrict writeonly` rule without NonWritable decoration seen). Both ended up as `WGPUBufferBindingType_Storage` → Chrome reported writable storage buffer aliasing (both used `default_rd_storage_buffer`, 16 bytes).
+**Status**: `FIXED — March 14, 2026`
 
-**Fix applied** in `rendering_device_driver_webgpu.cpp`: Added `var<storage>` to the WGSL scanner as read-only indicator. Also added `var<storage,read_write>` (no-space variant) for robustness.
+**Two bugs found and fixed (both in `tmp/naga-converter/src/lib.rs`)**:
 
-**Full canonical NAGA WGSL formats:**
-- `var<storage>` — read-only (LOAD-only) ← THE KEY FIX  
-- `var<storage, read_write>` — read-write (LOAD+STORE) ← was already handled
+**Bug 1 — SSBO aliasing (`Writable storage buffer binding aliasing`):**
+NAGA emits `var<storage>` (no access mode) for read-only SSBOs, but the C++ WGSL scanner only matched `var<storage, read>` — a format NAGA never produces. Read-only skeleton buffers (BlendShapeWeights, BlendShapeData) fell back to writable → two of them used `default_rd_storage_buffer` as placeholder → Chrome aliasing error.
+- Fix in `rendering_device_driver_webgpu.cpp`: added `var<storage>` as read-only in WGSL scanner.
 
-**Result after fix**: Scene E exports and serves with 20 GPU-skinned cylinders animating at ~120fps, zero GPU errors.
+**Bug 2 — `InvalidGlobalUsage(READ | WRITE)` NAGA validation error:**
+`infer_readonly_storage` in the naga-converter WASM scans SPIR-V to add NonWritable decorations to read-only SSBOs (since glslang never emits them). The scan only checked `OpStore` (62) for writes but missed:
+- Atomic ops: `OpAtomicStore` (228), `OpAtomicExchange`..`OpAtomicXor` (229–242) — pointer at pos+3
+- `OpCopyMemory` (38) / `OpCopyMemorySized` (39) — target at pos+1
+- `OpFunctionCall` (57) — storage var passed as function argument (conservative: mark all such vars writable)
+The failing shader was `cluster_render.glsl` which uses `atomicAdd()` on a storage buffer. Our pass missed the atomic write → added NonWritable → NAGA rejected with `InvalidGlobalUsage([4], READ | WRITE)`.
+- Fix: added all atomic opcode handlers + `OpFunctionCall` argument tracking to `infer_readonly_storage`.
+
+**Verification**: Puppeteer 20s capture — 120fps, zero `[ERROR]` messages, no aliasing, no NAGA conversion exceptions. All 18 "GPU/error" matches are false positives (contain "GPU"/"WebGPU" in informational messages).
 
 ---
 
