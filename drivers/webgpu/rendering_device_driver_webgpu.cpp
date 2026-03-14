@@ -4784,7 +4784,23 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_uniform_sets(CommandBuffe
 		if (us && us->handle) {
 			uint32_t set_idx = p_first_set_index + i;
 			WGPUBindGroup bg_to_bind = _get_compatible_bind_group(us, pipeline_shader, set_idx);
-			wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, 0, nullptr);
+
+			// Mirror the render path: if this is the PC group with a merged layout,
+			// the BGL has 1 dynamic buffer — must pass 1 dynamic offset (0 initially;
+			// _flush_push_constants will rebind with the real offset before dispatch).
+			if (pipeline_shader && pipeline_shader->push_constant_size > 0 &&
+					set_idx == pipeline_shader->push_constant_bind_group) {
+				if (pipeline_shader->merged_pc_group_layout) {
+					cmd->current_pc_bind_group = bg_to_bind;
+					uint32_t zero_offset = 0;
+					wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, 1, &zero_offset);
+				} else {
+					cmd->current_pc_bind_group = nullptr;
+					wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, 0, nullptr);
+				}
+			} else {
+				wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, 0, nullptr);
+			}
 		}
 	}
 }
