@@ -65,6 +65,14 @@ Error RenderingContextDriverWebGPU::initialize() {
 	// Note: emdawnwebgpu is a thin JS wrapper around the browser's WebGPU API.
 	// SPIR-V is NOT supported — we use naga (WASM) for SPIR-V → WGSL conversion
 	// in shader_create_from_container() instead.
+	// Create a WGPUInstance — needed for wgpuInstanceProcessEvents() which
+	// processes async callbacks (buffer map readback, query results, etc.).
+	WGPUInstanceDescriptor inst_desc = {};
+	instance = wgpuCreateInstance(&inst_desc);
+	if (!instance) {
+		WARN_PRINT("WebGPU: wgpuCreateInstance returned null — async readback may not work.");
+	}
+
 	device = (WGPUDevice)(uintptr_t)EM_ASM_PTR({
 		var d = Module["preinitializedWebGPUDevice"];
 		if (!d) { return 0; }

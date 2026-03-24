@@ -350,7 +350,23 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_allocation_size(BufferID p_buff
 	return buf->size;
 }
 
-// Callback for async buffer map — copies GPU data to shadow buffer.
+// Callback for deferred buffer map readback (same signature as _timestamp_readback_callback).
+// Copies GPU buffer data into the WGBuffer shadow_map when the async map resolves.
+static void _buffer_deferred_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	WGBuffer *buf = (WGBuffer *)p_userdata1;
+	if (!buf) return;
+
+	if (p_status == WGPUMapAsyncStatus_Success) {
+		const void *mapped = wgpuBufferGetConstMappedRange(buf->handle, 0, buf->size);
+		if (mapped && buf->shadow_map) {
+			memcpy(buf->shadow_map, mapped, buf->size);
+		}
+		wgpuBufferUnmap(buf->handle);
+	}
+	buf->map_complete = true;
+}
+
+// Callback for timestamp readback.
 static void _buffer_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
 	WGBuffer *buf = (WGBuffer *)p_userdata1;
 	if (!buf) return;
@@ -382,38 +398,32 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_map(BufferID p_buffer) {
 	// then wgpuQueueSubmit (empty) to flush, followed by polling via
 	// wgpuBufferGetMapState until the map completes.
 	if (buf->is_readback && buf->handle) {
-		buf->map_complete = false;
-
-		WGPUBufferMapCallbackInfo cb_info = {};
-		cb_info.mode = WGPUCallbackMode_AllowSpontaneous;
-		cb_info.callback = _buffer_readback_callback;
-		cb_info.userdata1 = buf;
-		cb_info.userdata2 = nullptr;
-
-		wgpuBufferMapAsync(buf->handle, WGPUMapMode_Read, 0, buf->size, cb_info);
-
-		// Submit an empty queue flush to ensure the GPU work (copy commands)
-		// that populated this buffer has completed before we try to map it.
-		wgpuQueueSubmit(queue, 0, nullptr);
-
-		// Poll until the map callback fires.  AllowSpontaneous callbacks are
-		// delivered during any Dawn/emdawnwebgpu API call, so we repeatedly
-		// call wgpuQueueSubmit(0) to pump the callback queue.
-		int max_polls = 50000;
-		while (!buf->map_complete && max_polls > 0) {
-			// Empty submit pumps the Dawn callback queue in emdawnwebgpu.
-			wgpuQueueSubmit(queue, 0, nullptr);
-			max_polls--;
+		// Frame-deferred readback for WebGPU.
+		// Buffer map callbacks fire when the JS event loop runs (between frames).
+		// First call: initiate map, return zeros.
+		// Subsequent calls: callback has fired, return real data.
+		if (!buf->shadow_map) {
+			buf->shadow_map = (uint8_t *)memalloc(buf->size);
+			memset(buf->shadow_map, 0, buf->size);
 		}
 
-		if (!buf->map_complete) {
-			WARN_PRINT("WebGPU buffer_map: async readback did not complete after polling");
-			// Fallback: return zeroed shadow buffer.
-			if (!buf->shadow_map) {
-				buf->shadow_map = (uint8_t *)memalloc(buf->size);
-				memset(buf->shadow_map, 0, buf->size);
-			}
+		if (buf->map_complete) {
+			// Previous map completed — shadow has fresh data. Start next map.
+			buf->map_complete = false;
+			WGPUBufferMapCallbackInfo cb = {};
+			cb.mode = WGPUCallbackMode_AllowSpontaneous;
+			cb.callback = _buffer_deferred_map_cb;
+			cb.userdata1 = buf;
+			wgpuBufferMapAsync(buf->handle, WGPUMapMode_Read, 0, buf->size, cb);
+			return buf->shadow_map;
 		}
+
+		// First call: initiate async map.
+		WGPUBufferMapCallbackInfo cb = {};
+		cb.mode = WGPUCallbackMode_AllowSpontaneous;
+		cb.callback = _buffer_deferred_map_cb;
+		cb.userdata1 = buf;
+		wgpuBufferMapAsync(buf->handle, WGPUMapMode_Read, 0, buf->size, cb);
 
 		return buf->shadow_map;
 	}
@@ -1230,8 +1240,16 @@ RDD::FenceID RenderingDeviceDriverWebGPU::fence_create() {
 Error RenderingDeviceDriverWebGPU::fence_wait(FenceID p_fence) {
 	WGFence *fence = (WGFence *)(p_fence.id);
 	ERR_FAIL_NULL_V(fence, ERR_INVALID_PARAMETER);
-	// TODO: Poll with wgpuDeviceTick() or use callback-based completion.
-	// For now, assume completion is immediate (single-threaded browser context).
+
+	// In the browser's single-threaded model, GPU work submitted via
+	// wgpuQueueSubmit completes asynchronously.  However, the emdawnwebgpu
+	// implementation resolves AllowSpontaneous callbacks during
+	// wgpuInstanceProcessEvents.  Poll the instance to allow pending
+	// callbacks (including buffer maps and work completion) to resolve.
+	WGPUInstance inst = context_driver ? context_driver->get_instance() : nullptr;
+	if (inst) {
+		wgpuInstanceProcessEvents(inst);
+	}
 	fence->signaled = true;
 	return OK;
 }
