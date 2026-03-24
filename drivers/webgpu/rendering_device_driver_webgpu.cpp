@@ -309,12 +309,9 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitFie
 	buf->usage |= WGPUBufferUsage_CopyDst; // Always allow writes.
 	buf->size = aligned_size;
 
-	// CPU-allocation staging buffers need MapRead so buffer_get_data() can read
-	// GPU results back via async map.  This is critical for compute shader readback.
-	if (p_allocation_type == MEMORY_ALLOCATION_TYPE_CPU) {
-		buf->usage |= WGPUBufferUsage_MapRead;
-		buf->is_readback = true;
-	}
+	// Don't add MapRead to generic CPU buffers — it conflicts with CopySrc.
+	// Compute readback uses buffer_get_data_direct() which creates its own
+	// staging buffer with the correct CopyDst|MapRead usage.
 
 	WGPUBufferDescriptor desc = {};
 	desc.size = aligned_size;
