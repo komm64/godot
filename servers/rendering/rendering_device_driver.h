@@ -199,6 +199,12 @@ public:
 	// Only for a buffer with BUFFER_USAGE_DEVICE_ADDRESS_BIT.
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) = 0;
 
+	/// Optional override for buffer readback.  Backends with async readback
+	/// (WebGPU) implement this to manage their own persistent staging buffers.
+	/// Returns true if handled (data written to r_data), false to use the
+	/// default staging-buffer path in RenderingDevice::buffer_get_data().
+	virtual bool buffer_get_data_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, Vector<uint8_t> &r_data) { return false; }
+
 	/*****************/
 	/**** TEXTURE ****/
 	/*****************/

@@ -35,6 +35,7 @@
 #include "webgpu_objects.h"
 
 #include "servers/rendering/rendering_device_driver.h"
+#include "core/templates/hash_map.h"
 
 #include <webgpu/webgpu.h>
 
@@ -176,6 +177,18 @@ public:
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
 	virtual void buffer_flush(BufferID p_buffer) override final;
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override final;
+	virtual bool buffer_get_data_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, Vector<uint8_t> &r_data) override final;
+
+	// Persistent readback infrastructure for async buffer map.
+	struct ReadbackEntry {
+		WGPUBuffer staging = nullptr;   // Persistent staging buffer (CopyDst | MapRead)
+		uint8_t *shadow = nullptr;      // CPU-side shadow buffer
+		uint64_t size = 0;
+		bool map_complete = false;
+		bool has_data = false;          // True after first successful readback
+	};
+	HashMap<uint64_t, ReadbackEntry> _readback_cache; // Keyed by source buffer pointer
+	static void _readback_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
 	// -----------------------------------------------------------------------
 	// TEXTURES

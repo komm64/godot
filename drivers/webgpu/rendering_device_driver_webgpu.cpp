@@ -470,6 +470,110 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_device_address(BufferID p_buffe
 	return 0; // No device addresses in WebGPU.
 }
 
+// =============================================================================
+// ASYNC BUFFER READBACK (WebGPU-specific)
+// =============================================================================
+
+void RenderingDeviceDriverWebGPU::_readback_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	ReadbackEntry *entry = (ReadbackEntry *)p_userdata1;
+	if (!entry || !entry->staging) return;
+
+	if (p_status == WGPUMapAsyncStatus_Success) {
+		const void *mapped = wgpuBufferGetConstMappedRange(entry->staging, 0, entry->size);
+		if (mapped && entry->shadow) {
+			memcpy(entry->shadow, mapped, entry->size);
+			entry->has_data = true;
+		}
+		wgpuBufferUnmap(entry->staging);
+	}
+	entry->map_complete = true;
+}
+
+bool RenderingDeviceDriverWebGPU::buffer_get_data_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, Vector<uint8_t> &r_data) {
+	WGBuffer *buf = (WGBuffer *)(p_buffer.id);
+	ERR_FAIL_NULL_V(buf, false);
+
+	uint64_t key = (uint64_t)(uintptr_t)buf;
+	ReadbackEntry *entry = nullptr;
+
+	if (_readback_cache.has(key)) {
+		entry = &_readback_cache[key];
+	}
+
+	// If we have completed readback data from a previous frame, return it.
+	if (entry && entry->has_data && entry->map_complete) {
+		r_data.resize(p_size);
+		memcpy(r_data.ptrw(), entry->shadow + p_offset, p_size);
+
+		// Initiate a new readback for this frame's data.
+		entry->map_complete = false;
+		// Copy GPU buffer → persistent staging buffer.
+		WGPUCommandEncoderDescriptor enc_desc = {};
+		WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
+		wgpuCommandEncoderCopyBufferToBuffer(encoder, buf->handle, 0, entry->staging, 0, entry->size);
+		WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
+		wgpuQueueSubmit(queue, 1, &cmd);
+		wgpuCommandBufferRelease(cmd);
+		wgpuCommandEncoderRelease(encoder);
+
+		// Initiate async map for next readback.
+		WGPUBufferMapCallbackInfo cb = {};
+		cb.mode = WGPUCallbackMode_AllowSpontaneous;
+		cb.callback = _readback_map_cb;
+		cb.userdata1 = entry;
+		wgpuBufferMapAsync(entry->staging, WGPUMapMode_Read, 0, entry->size, cb);
+
+		return true;
+	}
+
+	// First call for this buffer, or readback not yet complete.
+	// Create persistent staging buffer and initiate first readback.
+	if (!entry) {
+		ReadbackEntry new_entry;
+		new_entry.size = buf->size;
+		new_entry.shadow = (uint8_t *)memalloc(buf->size);
+		memset(new_entry.shadow, 0, buf->size);
+
+		// Create persistent staging buffer with CopyDst + MapRead.
+		WGPUBufferDescriptor desc = {};
+		desc.size = (buf->size + 3) & ~3ULL;
+		desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+		new_entry.staging = wgpuDeviceCreateBuffer(device, &desc);
+		new_entry.map_complete = false;
+		new_entry.has_data = false;
+
+		_readback_cache[key] = new_entry;
+		entry = &_readback_cache[key];
+	}
+
+	if (!entry->map_complete) {
+		// Copy GPU buffer → persistent staging buffer.
+		WGPUCommandEncoderDescriptor enc_desc = {};
+		WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
+		wgpuCommandEncoderCopyBufferToBuffer(encoder, buf->handle, 0, entry->staging, 0, entry->size);
+		WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
+		wgpuQueueSubmit(queue, 1, &cmd);
+		wgpuCommandBufferRelease(cmd);
+		wgpuCommandEncoderRelease(encoder);
+
+		// Initiate async map.
+		WGPUBufferMapCallbackInfo cb = {};
+		cb.mode = WGPUCallbackMode_AllowSpontaneous;
+		cb.callback = _readback_map_cb;
+		cb.userdata1 = entry;
+		wgpuBufferMapAsync(entry->staging, WGPUMapMode_Read, 0, entry->size, cb);
+	}
+
+	// Return zeros (first call) or previous frame's data.
+	r_data.resize(p_size);
+	if (entry->has_data) {
+		memcpy(r_data.ptrw(), entry->shadow + p_offset, p_size);
+	} else {
+		memset(r_data.ptrw(), 0, p_size);
+	}
+	return true; // Handled — don't use the default staging path.
+}
+
 WGPUBufferUsage RenderingDeviceDriverWebGPU::_buffer_usage_to_wgpu(BitField<BufferUsageBits> p_usage) const {
 	WGPUBufferUsage flags = 0;
 	if (p_usage.has_flag(BUFFER_USAGE_TRANSFER_FROM_BIT)) {

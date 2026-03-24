@@ -670,6 +670,13 @@ Vector<uint8_t> RenderingDevice::buffer_get_data(RID p_buffer, uint32_t p_offset
 				"Size is larger than the buffer.");
 	}
 
+	// Allow the driver to handle readback directly (e.g., WebGPU async readback
+	// with persistent staging buffers).
+	Vector<uint8_t> direct_data;
+	if (driver->buffer_get_data_direct(buffer->driver_id, p_offset, p_size, direct_data)) {
+		return direct_data;
+	}
+
 	_check_transfer_worker_buffer(buffer);
 
 	RDD::BufferID tmp_buffer = driver->buffer_create(buffer->size, RDD::BUFFER_USAGE_TRANSFER_TO_BIT, RDD::MEMORY_ALLOCATION_TYPE_CPU, frames_drawn);
