@@ -312,6 +312,13 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitFie
 	buf->usage |= WGPUBufferUsage_CopyDst; // Always allow writes.
 	buf->size = aligned_size;
 
+	// CPU-allocation staging buffers need MapRead so buffer_get_data() can read
+	// GPU results back via async map.  This is critical for compute shader readback.
+	if (p_allocation_type == MEMORY_ALLOCATION_TYPE_CPU) {
+		buf->usage |= WGPUBufferUsage_MapRead;
+		buf->is_readback = true;
+	}
+
 	WGPUBufferDescriptor desc = {};
 	desc.size = aligned_size;
 	desc.usage = buf->usage;
@@ -346,11 +353,75 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_allocation_size(BufferID p_buff
 	return buf->size;
 }
 
+// Callback for async buffer map — copies GPU data to shadow buffer.
+static void _buffer_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	WGBuffer *buf = (WGBuffer *)p_userdata1;
+	if (!buf) return;
+
+	if (p_status == WGPUMapAsyncStatus_Success) {
+		const void *mapped = wgpuBufferGetConstMappedRange(buf->handle, 0, buf->size);
+		if (mapped) {
+			if (!buf->shadow_map) {
+				buf->shadow_map = (uint8_t *)memalloc(buf->size);
+			}
+			memcpy(buf->shadow_map, mapped, buf->size);
+		}
+		wgpuBufferUnmap(buf->handle);
+	} else {
+		WARN_PRINT("WebGPU buffer readback failed");
+	}
+	buf->map_complete = true;
+}
+
 uint8_t *RenderingDeviceDriverWebGPU::buffer_map(BufferID p_buffer) {
-	// WebGPU mapping is async and cannot be done synchronously in the browser.
-	// Use a shadow CPU buffer for mapped data.
 	WGBuffer *buf = (WGBuffer *)(p_buffer.id);
 	ERR_FAIL_NULL_V(buf, nullptr);
+
+	// For readback buffers (staging buffers used by buffer_get_data), perform
+	// async map to get actual GPU data.  This is critical for compute shader
+	// readback, screenshot capture, and any CPU-side read of GPU results.
+	//
+	// The pattern: wgpuBufferMapAsync with AllowSpontaneous callback mode,
+	// then wgpuQueueSubmit (empty) to flush, followed by polling via
+	// wgpuBufferGetMapState until the map completes.
+	if (buf->is_readback && buf->handle) {
+		buf->map_complete = false;
+
+		WGPUBufferMapCallbackInfo cb_info = {};
+		cb_info.mode = WGPUCallbackMode_AllowSpontaneous;
+		cb_info.callback = _buffer_readback_callback;
+		cb_info.userdata1 = buf;
+		cb_info.userdata2 = nullptr;
+
+		wgpuBufferMapAsync(buf->handle, WGPUMapMode_Read, 0, buf->size, cb_info);
+
+		// Submit an empty queue flush to ensure the GPU work (copy commands)
+		// that populated this buffer has completed before we try to map it.
+		wgpuQueueSubmit(queue, 0, nullptr);
+
+		// Poll until the map callback fires.  AllowSpontaneous callbacks are
+		// delivered during any Dawn/emdawnwebgpu API call, so we repeatedly
+		// call wgpuQueueSubmit(0) to pump the callback queue.
+		int max_polls = 50000;
+		while (!buf->map_complete && max_polls > 0) {
+			// Empty submit pumps the Dawn callback queue in emdawnwebgpu.
+			wgpuQueueSubmit(queue, 0, nullptr);
+			max_polls--;
+		}
+
+		if (!buf->map_complete) {
+			WARN_PRINT("WebGPU buffer_map: async readback did not complete after polling");
+			// Fallback: return zeroed shadow buffer.
+			if (!buf->shadow_map) {
+				buf->shadow_map = (uint8_t *)memalloc(buf->size);
+				memset(buf->shadow_map, 0, buf->size);
+			}
+		}
+
+		return buf->shadow_map;
+	}
+
+	// For non-readback buffers, use the shadow CPU buffer (for upload staging).
 	if (!buf->shadow_map) {
 		buf->shadow_map = (uint8_t *)memalloc(buf->size);
 		memset(buf->shadow_map, 0, buf->size);

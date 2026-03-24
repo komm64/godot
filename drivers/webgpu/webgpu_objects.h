@@ -48,6 +48,8 @@ struct WGBuffer {
 	WGPUBufferUsage usage = 0;
 	uint8_t *shadow_map = nullptr; // For CPU-side mapping emulation.
 	bool map_dirty = false;
+	bool is_readback = false;      // True for staging buffers that need GPU→CPU readback.
+	bool map_complete = false;     // Set by async map callback.
 };
 
 // =============================================================================
