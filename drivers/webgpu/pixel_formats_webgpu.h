@@ -203,9 +203,9 @@ static constexpr WGPUTextureFormat RD_TO_WGPU_FORMAT[] = {
 
 	// --- R16 ---
 	// 69: DATA_FORMAT_R16_UNORM (requires "unorm16-texture-formats" feature)
-	WGPUTextureFormat_R16Unorm,
+	WGPUTextureFormat_Undefined, // R16Unorm — not in base WebGPU spec
 	// 70: DATA_FORMAT_R16_SNORM (requires "snorm16-texture-formats" feature)
-	WGPUTextureFormat_R16Snorm,
+	WGPUTextureFormat_Undefined, // R16Snorm — not in base WebGPU spec
 	// 71: DATA_FORMAT_R16_USCALED
 	WGPUTextureFormat_Undefined,
 	// 72: DATA_FORMAT_R16_SSCALED
@@ -219,9 +219,9 @@ static constexpr WGPUTextureFormat RD_TO_WGPU_FORMAT[] = {
 
 	// --- RG16 ---
 	// 76: DATA_FORMAT_R16G16_UNORM (requires "unorm16-texture-formats" feature)
-	WGPUTextureFormat_RG16Unorm,
+	WGPUTextureFormat_Undefined, // RG16Unorm — not in base WebGPU spec
 	// 77: DATA_FORMAT_R16G16_SNORM (requires "snorm16-texture-formats" feature)
-	WGPUTextureFormat_RG16Snorm,
+	WGPUTextureFormat_Undefined, // RG16Snorm — not in base WebGPU spec
 	// 78: DATA_FORMAT_R16G16_USCALED
 	WGPUTextureFormat_Undefined,
 	// 79: DATA_FORMAT_R16G16_SSCALED
@@ -245,9 +245,9 @@ static constexpr WGPUTextureFormat RD_TO_WGPU_FORMAT[] = {
 
 	// --- RGBA16 ---
 	// 90: DATA_FORMAT_R16G16B16A16_UNORM (requires "unorm16-texture-formats" feature)
-	WGPUTextureFormat_RGBA16Unorm,
+	WGPUTextureFormat_Undefined, // RGBA16Unorm — not in base WebGPU spec
 	// 91: DATA_FORMAT_R16G16B16A16_SNORM (requires "snorm16-texture-formats" feature)
-	WGPUTextureFormat_RGBA16Snorm,
+	WGPUTextureFormat_Undefined, // RGBA16Snorm — not in base WebGPU spec
 	// 92: DATA_FORMAT_R16G16B16A16_USCALED
 	WGPUTextureFormat_Undefined,
 	// 93: DATA_FORMAT_R16G16B16A16_SSCALED
@@ -648,8 +648,7 @@ static inline uint32_t wgpu_format_pixel_size(WGPUTextureFormat p_format) {
 		case WGPUTextureFormat_R16Uint:
 		case WGPUTextureFormat_R16Sint:
 		case WGPUTextureFormat_R16Float:
-		case WGPUTextureFormat_R16Unorm:
-		case WGPUTextureFormat_R16Snorm:
+		// R16Unorm/R16Snorm not in base WebGPU spec (emdawnwebgpu 4.0.10)
 		case WGPUTextureFormat_RG8Unorm:
 		case WGPUTextureFormat_RG8Snorm:
 		case WGPUTextureFormat_RG8Uint:
@@ -664,8 +663,7 @@ static inline uint32_t wgpu_format_pixel_size(WGPUTextureFormat p_format) {
 		case WGPUTextureFormat_RG16Uint:
 		case WGPUTextureFormat_RG16Sint:
 		case WGPUTextureFormat_RG16Float:
-		case WGPUTextureFormat_RG16Unorm:
-		case WGPUTextureFormat_RG16Snorm:
+		// RG16Unorm/RG16Snorm not in base WebGPU spec (emdawnwebgpu 4.0.10)
 		case WGPUTextureFormat_RGBA8Unorm:
 		case WGPUTextureFormat_RGBA8UnormSrgb:
 		case WGPUTextureFormat_RGBA8Snorm:
@@ -688,8 +686,7 @@ static inline uint32_t wgpu_format_pixel_size(WGPUTextureFormat p_format) {
 		case WGPUTextureFormat_RGBA16Uint:
 		case WGPUTextureFormat_RGBA16Sint:
 		case WGPUTextureFormat_RGBA16Float:
-		case WGPUTextureFormat_RGBA16Unorm:
-		case WGPUTextureFormat_RGBA16Snorm:
+		// RGBA16Unorm/RGBA16Snorm not in base WebGPU spec (emdawnwebgpu 4.0.10)
 		case WGPUTextureFormat_Depth24PlusStencil8:
 		case WGPUTextureFormat_Depth32FloatStencil8:
 			return 8;

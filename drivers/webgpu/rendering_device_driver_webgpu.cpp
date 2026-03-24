@@ -280,13 +280,10 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 		print_verbose("WebGPU: Timestamp query feature is available.");
 	}
 
-	// Check for 16-bit SNORM/UNORM texture format support (texture-formats-tier1).
-	has_texture_formats_tier1 = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier1);
-	if (has_texture_formats_tier1) {
-		print_verbose("WebGPU: texture-formats-tier1 feature is available.");
-	} else {
-		WARN_PRINT("WebGPU: texture-formats-tier1 not available. R16/RG16/RGBA16 SNORM/UNORM textures will be remapped to float.");
-	}
+	// 16-bit SNORM/UNORM texture formats (texture-formats-tier1) are not available
+	// in the base emdawnwebgpu 4.0.10 API. Mark as unavailable — these formats are
+	// mapped to Undefined in pixel_formats_webgpu.h.
+	has_texture_formats_tier1 = false;
 
 	// Multiview not supported in WebGPU.
 	multiview_capabilities.is_supported = false;
@@ -537,8 +534,7 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 			case WGPUTextureFormat_R8Unorm:
 			case WGPUTextureFormat_R8Snorm:
 			case WGPUTextureFormat_R16Float:
-			case WGPUTextureFormat_R16Snorm:
-			case WGPUTextureFormat_R16Unorm:
+			// R16Snorm/R16Unorm not in base emdawnwebgpu 4.0.10 headers
 				tex->format = WGPUTextureFormat_R32Float;
 				break;
 			case WGPUTextureFormat_R8Uint:
@@ -552,8 +548,7 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 			case WGPUTextureFormat_RG8Unorm:
 			case WGPUTextureFormat_RG8Snorm:
 			case WGPUTextureFormat_RG16Float:
-			case WGPUTextureFormat_RG16Snorm:
-			case WGPUTextureFormat_RG16Unorm:
+			// RG16Snorm/RG16Unorm not in base emdawnwebgpu 4.0.10 headers
 				tex->format = WGPUTextureFormat_RG32Float;
 				break;
 			case WGPUTextureFormat_RG8Uint:
@@ -564,10 +559,7 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 			case WGPUTextureFormat_RG16Sint:
 				tex->format = WGPUTextureFormat_RG32Sint;
 				break;
-			case WGPUTextureFormat_RGBA16Snorm:
-			case WGPUTextureFormat_RGBA16Unorm:
-				tex->format = WGPUTextureFormat_RGBA16Float;
-				break;
+			// RGBA16Snorm/RGBA16Unorm not in base emdawnwebgpu 4.0.10 headers
 			default:
 				break;
 		}
@@ -984,18 +976,18 @@ WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p
 		case DATA_FORMAT_R8G8B8A8_SRGB: return WGPUTextureFormat_RGBA8UnormSrgb;
 		case DATA_FORMAT_B8G8R8A8_UNORM: return WGPUTextureFormat_BGRA8Unorm;
 		case DATA_FORMAT_B8G8R8A8_SRGB: return WGPUTextureFormat_BGRA8UnormSrgb;
-		case DATA_FORMAT_R16_UNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_R16Unorm : WGPUTextureFormat_R16Float;
-		case DATA_FORMAT_R16_SNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_R16Snorm : WGPUTextureFormat_R16Float;
+		case DATA_FORMAT_R16_UNORM: return WGPUTextureFormat_R16Float /* R16Unorm N/A in emdawnwebgpu 4.0.10 */;
+		case DATA_FORMAT_R16_SNORM: return WGPUTextureFormat_R16Float /* R16Snorm N/A in emdawnwebgpu 4.0.10 */;
 		case DATA_FORMAT_R16_UINT: return WGPUTextureFormat_R16Uint;
 		case DATA_FORMAT_R16_SINT: return WGPUTextureFormat_R16Sint;
 		case DATA_FORMAT_R16_SFLOAT: return WGPUTextureFormat_R16Float;
-		case DATA_FORMAT_R16G16_UNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_RG16Unorm : WGPUTextureFormat_RG16Float;
-		case DATA_FORMAT_R16G16_SNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_RG16Snorm : WGPUTextureFormat_RG16Float;
+		case DATA_FORMAT_R16G16_UNORM: return WGPUTextureFormat_RG16Float /* RG16Unorm N/A in emdawnwebgpu 4.0.10 */;
+		case DATA_FORMAT_R16G16_SNORM: return WGPUTextureFormat_RG16Float /* RG16Snorm N/A in emdawnwebgpu 4.0.10 */;
 		case DATA_FORMAT_R16G16_UINT: return WGPUTextureFormat_RG16Uint;
 		case DATA_FORMAT_R16G16_SINT: return WGPUTextureFormat_RG16Sint;
 		case DATA_FORMAT_R16G16_SFLOAT: return WGPUTextureFormat_RG16Float;
-		case DATA_FORMAT_R16G16B16A16_UNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_RGBA16Unorm : WGPUTextureFormat_RGBA16Float;
-		case DATA_FORMAT_R16G16B16A16_SNORM: return has_texture_formats_tier1 ? WGPUTextureFormat_RGBA16Snorm : WGPUTextureFormat_RGBA16Float;
+		case DATA_FORMAT_R16G16B16A16_UNORM: return WGPUTextureFormat_RGBA16Float /* RGBA16Unorm N/A in emdawnwebgpu 4.0.10 */;
+		case DATA_FORMAT_R16G16B16A16_SNORM: return WGPUTextureFormat_RGBA16Float /* RGBA16Snorm N/A in emdawnwebgpu 4.0.10 */;
 		case DATA_FORMAT_R16G16B16A16_UINT: return WGPUTextureFormat_RGBA16Uint;
 		case DATA_FORMAT_R16G16B16A16_SINT: return WGPUTextureFormat_RGBA16Sint;
 		case DATA_FORMAT_R16G16B16A16_SFLOAT: return WGPUTextureFormat_RGBA16Float;
@@ -2229,8 +2221,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 									else if (strncmp(fmt, "r16float,", 9) == 0) tf = WGPUTextureFormat_R16Float;
 									else if (strncmp(fmt, "r16uint,", 8) == 0) tf = WGPUTextureFormat_R16Uint;
 									else if (strncmp(fmt, "r16sint,", 8) == 0) tf = WGPUTextureFormat_R16Sint;
-									else if (strncmp(fmt, "r16snorm,", 9) == 0) tf = WGPUTextureFormat_R16Snorm;
-									else if (strncmp(fmt, "r16unorm,", 9) == 0) tf = WGPUTextureFormat_R16Unorm;
+									else if (strncmp(fmt, "r16snorm,", 9) == 0) tf = WGPUTextureFormat_R16Float; // Fallback
+									else if (strncmp(fmt, "r16unorm,", 9) == 0) tf = WGPUTextureFormat_R16Float; // Fallback
 									else if (strncmp(fmt, "r8unorm,", 8) == 0) tf = WGPUTextureFormat_R8Unorm;
 									else if (strncmp(fmt, "r8snorm,", 8) == 0) tf = WGPUTextureFormat_R8Snorm;
 									else if (strncmp(fmt, "r8uint,", 7) == 0) tf = WGPUTextureFormat_R8Uint;
@@ -2242,10 +2234,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 									else if (strncmp(fmt, "rg16float,", 10) == 0) tf = WGPUTextureFormat_RG16Float;
 									else if (strncmp(fmt, "rg16uint,", 9) == 0) tf = WGPUTextureFormat_RG16Uint;
 									else if (strncmp(fmt, "rg16sint,", 9) == 0) tf = WGPUTextureFormat_RG16Sint;
-									else if (strncmp(fmt, "rg16snorm,", 10) == 0) tf = WGPUTextureFormat_RG16Snorm;
-									else if (strncmp(fmt, "rg16unorm,", 10) == 0) tf = WGPUTextureFormat_RG16Unorm;
-									else if (strncmp(fmt, "rgba16snorm,", 12) == 0) tf = WGPUTextureFormat_RGBA16Snorm;
-									else if (strncmp(fmt, "rgba16unorm,", 12) == 0) tf = WGPUTextureFormat_RGBA16Unorm;
+									else if (strncmp(fmt, "rg16snorm,", 10) == 0) tf = WGPUTextureFormat_RG16Float; // Fallback
+									else if (strncmp(fmt, "rg16unorm,", 10) == 0) tf = WGPUTextureFormat_RG16Float; // Fallback
+									else if (strncmp(fmt, "rgba16snorm,", 12) == 0) tf = WGPUTextureFormat_RGBA16Float; // Fallback
+									else if (strncmp(fmt, "rgba16unorm,", 12) == 0) tf = WGPUTextureFormat_RGBA16Float; // Fallback
 									else if (strncmp(fmt, "bgra8unorm,", 11) == 0) tf = WGPUTextureFormat_BGRA8Unorm;
 									wgsl_storage_tex_format[key] = tf;
 									// Parse access mode (after comma, skip space)
