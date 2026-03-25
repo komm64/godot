@@ -161,6 +161,8 @@ public:
 	// GENERIC
 	// -----------------------------------------------------------------------
 
+	/// Initialize the WebGPU driver: import the device from JS, create push
+	/// constant ring buffer, bind group layouts, fallback textures, and samplers.
 	virtual Error initialize(uint32_t p_device_index, uint32_t p_frame_count) override final;
 
 	// -----------------------------------------------------------------------
@@ -168,19 +170,24 @@ public:
 	// -----------------------------------------------------------------------
 
 	/// Create a GPU buffer. WebGPU sizes are 4-byte aligned internally.
-	/// CPU-allocation staging buffers get CopyDst|MapRead usage for readback.
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override final;
-	/// Stub — WebGPU has no texel buffer views.
+	/// Stub — WebGPU has no texel buffer views. Always returns true.
 	virtual bool buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) override final;
+	/// Release a GPU buffer and its shadow CPU memory.
 	virtual void buffer_free(BufferID p_buffer) override final;
+	/// Return the aligned allocation size of a buffer.
 	virtual uint64_t buffer_get_allocation_size(BufferID p_buffer) override final;
-	/// Map a buffer for CPU access. For readback buffers (is_readback=true), uses
-	/// a shadow CPU buffer populated by async wgpuBufferMapAsync callbacks.
+	/// Map a buffer for CPU access. Uses a shadow CPU buffer since WebGPU
+	/// buffer mapping is async. For readback buffers, the shadow is populated
+	/// by async wgpuBufferMapAsync callbacks between frames.
 	virtual uint8_t *buffer_map(BufferID p_buffer) override final;
+	/// Unmap a buffer. If the shadow was modified, writes data to the GPU buffer.
 	virtual void buffer_unmap(BufferID p_buffer) override final;
-	/// Persistent map for streaming uploads — uses shadow CPU buffer.
+	/// Persistent map for streaming uploads — returns shadow CPU buffer.
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) override final;
+	/// Return dynamic offsets for buffers. Stub — returns 0.
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
+	/// Flush a buffer's shadow CPU data to the GPU via wgpuQueueWriteBuffer.
 	virtual void buffer_flush(BufferID p_buffer) override final;
 	/// Stub — WebGPU has no buffer device addresses. Returns 0.
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override final;
@@ -189,55 +196,72 @@ public:
 	/// Bypasses the default staging buffer path which can't handle WebGPU's async-only map.
 	virtual bool buffer_get_data_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, Vector<uint8_t> &r_data) override final;
 
-	// Persistent readback infrastructure for async buffer map.
+	/// Persistent readback entry for async buffer/texture map operations.
 	struct ReadbackEntry {
-		WGPUBuffer staging = nullptr;   // Persistent staging buffer (CopyDst | MapRead)
-		uint8_t *shadow = nullptr;      // CPU-side shadow buffer
-		uint64_t size = 0;
-		bool map_complete = false;
-		bool has_data = false;          // True after first successful readback
+		WGPUBuffer staging = nullptr;   ///< Persistent staging buffer (CopyDst | MapRead).
+		uint8_t *shadow = nullptr;      ///< CPU-side shadow buffer.
+		uint64_t size = 0;              ///< Buffer size in bytes.
+		bool map_complete = false;      ///< Set by async map callback.
+		bool has_data = false;          ///< True after first successful readback.
 	};
-	HashMap<uint64_t, ReadbackEntry> _readback_cache; // Keyed by source buffer pointer
+	HashMap<uint64_t, ReadbackEntry> _readback_cache; ///< Keyed by source buffer/texture pointer.
+	/// Async map callback — copies GPU data to shadow buffer.
 	static void _readback_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
 	// -----------------------------------------------------------------------
 	// TEXTURES
 	// -----------------------------------------------------------------------
 
-	/// Create a GPU texture. WebGPU texture formats are mapped via pixel_formats_webgpu.h.
+	/// Create a GPU texture. Formats mapped via pixel_formats_webgpu.h.
+	/// 3-component formats (RGB8, etc.) are promoted to RGBA equivalents.
 	virtual TextureID texture_create(const TextureFormat &p_format, const TextureView &p_view) override final;
 	/// Stub — not applicable for WebGPU web exports (no native texture interop).
 	virtual TextureID texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) override final;
+	/// Create a shared texture view from an existing texture.
 	virtual TextureID texture_create_shared(TextureID p_original_texture, const TextureView &p_view) override final;
+	/// Create a shared texture view for a specific slice (layer/mipmap range).
 	virtual TextureID texture_create_shared_from_slice(TextureID p_original_texture, const TextureView &p_view, TextureSliceType p_slice_type, uint32_t p_layer, uint32_t p_layers, uint32_t p_mipmap, uint32_t p_mipmaps) override final;
+	/// Release a texture and its default view.
 	virtual void texture_free(TextureID p_texture) override final;
+	/// Return the GPU allocation size of a texture.
 	virtual uint64_t texture_get_allocation_size(TextureID p_texture) override final;
+	/// Get the copyable layout (row pitch, size) for a texture subresource.
+	/// WebGPU requires 256-byte row alignment for buffer↔texture copies.
 	virtual void texture_get_copyable_layout(TextureID p_texture, const TextureSubresource &p_subresource, TextureCopyableLayout *r_layout) override final;
 	/// Read texture data back to CPU. Uses same persistent readback cache as buffer_get_data_direct.
 	/// Returns zeros on first call (1-frame latency), valid data on subsequent calls.
 	virtual Vector<uint8_t> texture_get_data(TextureID p_texture, uint32_t p_layer) override final;
+	/// Query which texture usage bits are supported for a given format.
 	virtual BitField<TextureUsageBits> texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) override final;
+	/// Check if a texture can create a shared view with a different format.
 	virtual bool texture_can_make_shared_with_format(TextureID p_texture, DataFormat p_format, bool &r_raw_reinterpretation) override final;
 
 	// -----------------------------------------------------------------------
 	// SAMPLERS
 	// -----------------------------------------------------------------------
 
+	/// Create a sampler with the specified filter, address, LOD, and compare modes.
 	virtual SamplerID sampler_create(const SamplerState &p_state) override final;
+	/// Release a sampler.
 	virtual void sampler_free(SamplerID p_sampler) override final;
+	/// Check if a format supports the specified filter mode.
 	virtual bool sampler_is_format_supported_for_filter(DataFormat p_format, SamplerFilter p_filter) override final;
 
 	// -----------------------------------------------------------------------
 	// VERTEX FORMAT
 	// -----------------------------------------------------------------------
 
+	/// Create a vertex format descriptor from vertex attributes and bindings.
 	virtual VertexFormatID vertex_format_create(Span<VertexAttribute> p_vertex_attribs, const VertexAttributeBindingsMap &p_vertex_bindings) override final;
+	/// Release a vertex format descriptor.
 	virtual void vertex_format_free(VertexFormatID p_vertex_format) override final;
 
 	// -----------------------------------------------------------------------
 	// BARRIERS
 	// -----------------------------------------------------------------------
 
+	/// No-op — WebGPU handles synchronization automatically via the command encoder.
+	/// Cross-pass barriers are handled by automatic encoder splitting.
 	virtual void command_pipeline_barrier(
 			CommandBufferID p_cmd_buffer,
 			BitField<PipelineStageBits> p_src_stages,
@@ -250,126 +274,201 @@ public:
 	// FENCES
 	// -----------------------------------------------------------------------
 
+	/// Create a fence for GPU→CPU synchronization.
 	virtual FenceID fence_create() override final;
+	/// Wait for a fence to be signaled. Processes pending WebGPU callbacks.
 	virtual Error fence_wait(FenceID p_fence) override final;
+	/// Release a fence.
 	virtual void fence_free(FenceID p_fence) override final;
 
 	// -----------------------------------------------------------------------
 	// SEMAPHORES
 	// -----------------------------------------------------------------------
 
+	/// Create a semaphore. Stub — WebGPU has no explicit semaphores.
 	virtual SemaphoreID semaphore_create() override final;
+	/// Release a semaphore.
 	virtual void semaphore_free(SemaphoreID p_semaphore) override final;
 
 	// -----------------------------------------------------------------------
 	// COMMAND BUFFERS
 	// -----------------------------------------------------------------------
 
+	/// Return the single command queue family (WebGPU has one universal queue).
 	virtual CommandQueueFamilyID command_queue_family_get(BitField<CommandQueueFamilyBits> p_cmd_queue_family_bits, RenderingContextDriver::SurfaceID p_surface = 0) override final;
+	/// Create a command queue wrapper.
 	virtual CommandQueueID command_queue_create(CommandQueueFamilyID p_cmd_queue_family, bool p_identify_as_main_queue = false) override final;
+	/// Submit command buffers to the GPU queue and present swap chains.
 	virtual Error command_queue_execute_and_present(CommandQueueID p_cmd_queue, VectorView<SemaphoreID> p_wait_semaphores, VectorView<CommandBufferID> p_cmd_buffers, VectorView<SemaphoreID> p_cmd_semaphores, FenceID p_cmd_fence, VectorView<SwapChainID> p_swap_chains) override final;
+	/// Release a command queue.
 	virtual void command_queue_free(CommandQueueID p_cmd_queue) override final;
 
+	/// Create a command pool. Stub — WebGPU doesn't have command pools.
 	virtual CommandPoolID command_pool_create(CommandQueueFamilyID p_cmd_queue_family, CommandBufferType p_cmd_buffer_type) override final;
+	/// Reset a command pool. Returns true on success.
 	virtual bool command_pool_reset(CommandPoolID p_cmd_pool) override final;
+	/// Release a command pool.
 	virtual void command_pool_free(CommandPoolID p_cmd_pool) override final;
 
+	/// Create a command buffer with a fresh WGPUCommandEncoder.
 	virtual CommandBufferID command_buffer_create(CommandPoolID p_cmd_pool) override final;
+	/// Begin recording commands into a command buffer.
 	virtual bool command_buffer_begin(CommandBufferID p_cmd_buffer) override final;
+	/// Begin a secondary command buffer. Stub — WebGPU has no secondary command buffers.
 	virtual bool command_buffer_begin_secondary(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, uint32_t p_subpass, FramebufferID p_framebuffer) override final;
+	/// End recording and finish the command encoder.
 	virtual void command_buffer_end(CommandBufferID p_cmd_buffer) override final;
+	/// Execute secondary command buffers. No-op — WebGPU has no secondary command buffers.
 	virtual void command_buffer_execute_secondary(CommandBufferID p_cmd_buffer, VectorView<CommandBufferID> p_secondary_cmd_buffers) override final;
 
 	// -----------------------------------------------------------------------
 	// SWAP CHAIN
 	// -----------------------------------------------------------------------
 
+	/// Create a swap chain for a browser canvas surface.
 	virtual SwapChainID swap_chain_create(RenderingContextDriver::SurfaceID p_surface) override final;
+	/// Resize the swap chain. Configures the WGPUSurface with the new dimensions.
 	virtual Error swap_chain_resize(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, uint32_t p_desired_framebuffer_count) override final;
+	/// Acquire the next framebuffer from the swap chain for rendering.
 	virtual FramebufferID swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) override final;
+	/// Get the render pass associated with a swap chain.
 	virtual RenderPassID swap_chain_get_render_pass(SwapChainID p_swap_chain) override final;
+	/// Get the pixel format of a swap chain (always BGRA8Unorm for WebGPU).
 	virtual DataFormat swap_chain_get_format(SwapChainID p_swap_chain) override final;
+	/// Release a swap chain and its associated render pass.
 	virtual void swap_chain_free(SwapChainID p_swap_chain) override final;
 
 	// -----------------------------------------------------------------------
 	// FRAMEBUFFER
 	// -----------------------------------------------------------------------
 
+	/// Create a framebuffer from a set of texture attachments.
 	virtual FramebufferID framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height) override final;
+	/// Release a framebuffer.
 	virtual void framebuffer_free(FramebufferID p_framebuffer) override final;
 
 	// -----------------------------------------------------------------------
 	// SHADER
 	// -----------------------------------------------------------------------
 
+	/// Create a shader from a container (SPIR-V). Translates SPIR-V → WGSL via Naga
+	/// at runtime, splits combined image-samplers, and remaps push constants to storage buffer.
 	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override final;
+	/// Get the layout hash for a shader (used for pipeline cache keying).
 	virtual uint32_t shader_get_layout_hash(ShaderID p_shader) override final;
+	/// Release a shader and all its resources (modules, layouts, bind groups).
 	virtual void shader_free(ShaderID p_shader) override final;
+	/// Release shader modules but keep the shader object alive (for pipeline reuse).
 	virtual void shader_destroy_modules(ShaderID p_shader) override final;
 
 	// -----------------------------------------------------------------------
 	// UNIFORM SET
 	// -----------------------------------------------------------------------
 
+	/// Create a uniform set (bind group) from a list of bound uniforms.
+	/// Handles combined image-sampler splitting and BGL compatibility adaptation.
 	virtual UniformSetID uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) override final;
+	/// Release a uniform set and its cached rebind variants.
 	virtual void uniform_set_free(UniformSetID p_uniform_set) override final;
+	/// Get dynamic offsets for uniform sets. Returns 0 (not used in WebGPU).
 	virtual uint32_t uniform_sets_get_dynamic_offsets(VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) const override final;
+	/// Prepare a uniform set for use with a specific shader. Adapts bind group
+	/// layout if the target shader uses a different BGL than the source.
 	virtual void command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
 
 	// -----------------------------------------------------------------------
 	// TRANSFER
 	// -----------------------------------------------------------------------
 
+	/// Clear a buffer region to zero. Size is rounded up to 4-byte alignment.
 	virtual void command_clear_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, uint64_t p_offset, uint64_t p_size) override final;
+	/// Copy data between GPU buffers. Handles shadow buffer fallback for CPU staging.
 	virtual void command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) override final;
+	/// Copy data between GPU textures.
 	virtual void command_copy_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<TextureCopyRegion> p_regions) override final;
+	/// Stub — MSAA resolve is handled via render pass resolve targets.
 	virtual void command_resolve_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, uint32_t p_src_layer, uint32_t p_src_mipmap, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, uint32_t p_dst_layer, uint32_t p_dst_mipmap) override final;
+	/// Clear a color texture to a solid color via a single-attachment render pass.
 	virtual void command_clear_color_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, const Color &p_color, const TextureSubresourceRange &p_subresources) override final;
+	/// Clear a depth/stencil texture via a depth-only render pass.
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override final;
+	/// Copy data from a buffer to a texture.
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override final;
+	/// Copy data from a texture to a buffer.
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override final;
 
 	// -----------------------------------------------------------------------
 	// PIPELINE
 	// -----------------------------------------------------------------------
 
+	/// Release a render or compute pipeline.
 	virtual void pipeline_free(PipelineID p_pipeline) override final;
+	/// Write push constant data. Emulated via a ring buffer (WebGPU has no push constants).
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override final;
+	/// Stub — WebGPU has no pipeline cache. Returns true.
 	virtual bool pipeline_cache_create(const Vector<uint8_t> &p_data) override final;
+	/// Stub — no pipeline cache to free.
 	virtual void pipeline_cache_free() override final;
+	/// Stub — returns 0 (no pipeline cache).
 	virtual size_t pipeline_cache_query_size() override final;
+	/// Stub — returns empty vector (no pipeline cache).
 	virtual Vector<uint8_t> pipeline_cache_serialize() override final;
 
 	// -----------------------------------------------------------------------
 	// RENDERING
 	// -----------------------------------------------------------------------
 
+	/// Create a render pass descriptor from attachments and subpasses.
 	virtual RenderPassID render_pass_create(VectorView<Attachment> p_attachments, VectorView<Subpass> p_subpasses, VectorView<SubpassDependency> p_subpass_dependencies, uint32_t p_view_count, AttachmentReference p_fragment_density_map_attachment) override final;
+	/// Release a render pass descriptor.
 	virtual void render_pass_free(RenderPassID p_render_pass) override final;
 
+	/// Begin a render pass. Handles automatic command encoder splitting when
+	/// a texture transitions from write (previous pass) to read (this pass).
 	virtual void command_begin_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, CommandBufferType p_cmd_buffer_type, const Rect2i &p_rect, VectorView<RenderPassClearValue> p_clear_values) override final;
+	/// End the current render pass.
 	virtual void command_end_render_pass(CommandBufferID p_cmd_buffer) override final;
+	/// Transition to the next subpass within a render pass.
 	virtual void command_next_render_subpass(CommandBufferID p_cmd_buffer, CommandBufferType p_cmd_buffer_type) override final;
+	/// Set viewport(s) for the current render pass.
 	virtual void command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) override final;
+	/// Set scissor rect(s) for the current render pass.
 	virtual void command_render_set_scissor(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_scissors) override final;
+	/// Stub — WebGPU has no mid-pass clear operation.
 	virtual void command_render_clear_attachments(CommandBufferID p_cmd_buffer, VectorView<AttachmentClear> p_attachment_clears, VectorView<Rect2i> p_rects) override final;
 
+	/// Bind a render pipeline for subsequent draw calls.
 	virtual void command_bind_render_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) override final;
+	/// Bind uniform sets (bind groups) for a render pipeline. Handles BGL
+	/// compatibility adaptation and push constant group merging.
 	virtual void command_bind_render_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) override final;
 
+	/// Issue a non-indexed draw call.
 	virtual void command_render_draw(CommandBufferID p_cmd_buffer, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_base_vertex, uint32_t p_first_instance) override final;
+	/// Issue an indexed draw call.
 	virtual void command_render_draw_indexed(CommandBufferID p_cmd_buffer, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index, int32_t p_vertex_offset, uint32_t p_first_instance) override final;
+	/// Issue an indirect indexed draw call.
 	virtual void command_render_draw_indexed_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override final;
+	/// Issue an indirect indexed draw call with draw count from a buffer.
+	/// Falls back to max_draw_count (async count readback not yet implemented).
 	virtual void command_render_draw_indexed_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
+	/// Issue an indirect non-indexed draw call.
 	virtual void command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override final;
+	/// Issue an indirect non-indexed draw call with draw count from a buffer.
 	virtual void command_render_draw_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
 
+	/// Bind vertex buffers for the current render pass.
 	virtual void command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) override final;
+	/// Bind an index buffer for the current render pass.
 	virtual void command_render_bind_index_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, IndexBufferFormat p_format, uint64_t p_offset) override final;
 
+	/// Set blend constants for the current render pass.
 	virtual void command_render_set_blend_constants(CommandBufferID p_cmd_buffer, const Color &p_constants) override final;
+	/// Set line width. Stub — WebGPU only supports 1.0 line width.
 	virtual void command_render_set_line_width(CommandBufferID p_cmd_buffer, float p_width) override final;
 
+	/// Create a render pipeline. Handles SPIR-V → WGSL translation for specialization
+	/// constants and alpha-strip for BGRA8Unorm swap chain compatibility.
 	virtual PipelineID render_pipeline_create(
 			ShaderID p_shader,
 			VertexFormatID p_vertex_format,
@@ -388,56 +487,89 @@ public:
 	// COMPUTE
 	// -----------------------------------------------------------------------
 
+	/// Bind a compute pipeline. Ends any active render pass and begins a compute pass.
 	virtual void command_bind_compute_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) override final;
+	/// Bind uniform sets (bind groups) for a compute pipeline.
 	virtual void command_bind_compute_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) override final;
+	/// Dispatch compute workgroups.
 	virtual void command_compute_dispatch(CommandBufferID p_cmd_buffer, uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups) override final;
+	/// Dispatch compute workgroups with parameters from a GPU buffer.
 	virtual void command_compute_dispatch_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset) override final;
+	/// Create a compute pipeline with optional specialization constants.
 	virtual PipelineID compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) override final;
 
 	// -----------------------------------------------------------------------
 	// QUERIES
 	// -----------------------------------------------------------------------
 
+	/// Create a timestamp query pool. Falls back to a dummy pool if the
+	/// timestamp-query feature is not available in the browser.
 	virtual QueryPoolID timestamp_query_pool_create(uint32_t p_query_count) override final;
+	/// Release a timestamp query pool and its GPU resources.
 	virtual void timestamp_query_pool_free(QueryPoolID p_pool_id) override final;
+	/// Get timestamp query results. Data is populated asynchronously via
+	/// wgpuBufferMapAsync callbacks between frames.
 	virtual void timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) override final;
+	/// Convert a raw timestamp query result to nanoseconds.
 	virtual uint64_t timestamp_query_result_to_time(uint64_t p_result) override final;
+	/// Reset a timestamp query pool (no-op — WebGPU resets on use).
 	virtual void command_timestamp_query_pool_reset(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_query_count) override final;
+	/// Write a timestamp to a query pool at the given index.
 	virtual void command_timestamp_write(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_index) override final;
 
 	// -----------------------------------------------------------------------
 	// LABELS & DEBUG
 	// -----------------------------------------------------------------------
 
+	/// Begin a debug label group. No-op — WebGPU has no debug label API.
 	virtual void command_begin_label(CommandBufferID p_cmd_buffer, const char *p_label_name, const Color &p_color) override final;
+	/// End a debug label group. No-op.
 	virtual void command_end_label(CommandBufferID p_cmd_buffer) override final;
+	/// Insert a breadcrumb for GPU crash debugging. No-op.
 	virtual void command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) override final;
 
 	// -----------------------------------------------------------------------
 	// SUBMISSION
 	// -----------------------------------------------------------------------
 
+	/// Begin a new frame segment. Resets performance counters and push constant ring offset.
 	virtual void begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) override final;
+	/// End a frame segment. Flushes accumulated push constant data to the GPU.
 	virtual void end_segment() override final;
 
 	// -----------------------------------------------------------------------
 	// MISC
 	// -----------------------------------------------------------------------
 
+	/// Set a debug name on a GPU resource. Stub — resource labeling not yet implemented.
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override final;
+	/// Get a native handle for a resource. Returns 0 (no native handles in WebGPU/WASM).
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override final;
+	/// Get total GPU memory used. Returns 0 (not tracked in WebGPU).
 	virtual uint64_t get_total_memory_used() override final;
+	/// Get lazily-allocated GPU memory. Returns 0 (not applicable to WebGPU).
 	virtual uint64_t get_lazily_memory_used() override final;
+	/// Query a device limit (max texture size, max uniform buffer size, etc.).
 	virtual uint64_t limit_get(Limit p_limit) override final;
+	/// Query an API trait (e.g., texture data row pitch step).
 	virtual uint64_t api_trait_get(ApiTrait p_trait) override final;
+	/// Check if a feature is supported (multiview, VRS, etc.).
 	virtual bool has_feature(Features p_feature) override final;
+	/// Get multiview capabilities. Not supported in WebGPU.
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override final;
+	/// Get fragment shading rate capabilities. Not supported in WebGPU.
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override final;
+	/// Get fragment density map capabilities. Not supported in WebGPU.
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;
+	/// Return "WebGPU" as the API name.
 	virtual String get_api_name() const override final;
+	/// Return "1.0" as the API version.
 	virtual String get_api_version() const override final;
+	/// Return a unique identifier for pipeline cache (empty — no cache in WebGPU).
 	virtual String get_pipeline_cache_uuid() const override final;
+	/// Get device capabilities (limits, features, format support).
 	virtual const Capabilities &get_capabilities() const override final;
+	/// Get the shader container format (SPIR-V with WebGPU-specific metadata).
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override final;
 };
 
