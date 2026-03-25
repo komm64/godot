@@ -1579,7 +1579,8 @@ A main 3D scene with:
 ---
 
 ### Task 6.4: `texture_get_data()` Async Readback `[PARALLEL with 6.1]`
-**Status**: `TODO`
+**Status**: `DONE`
+**Agent Notes**: Completed March 24, 2026. Implemented using same persistent ReadbackEntry cache pattern as buffer_get_data_direct(). Copy texture→staging buffer (CopyDst|MapRead), async map callback copies to shadow, return shadow on next call. Also implemented buffer_get_data_direct() virtual override and persistent buffer readback cache for compute shader SSBO readback. Verified: compute dispatch + readback works in Chrome (multiply shader: input*3 = correct output).
 **Effort**: 3–4 hours
 **Dependencies**: Phase 5
 

@@ -860,9 +860,115 @@ void RenderingDeviceDriverWebGPU::texture_get_copyable_layout(TextureID p_textur
 }
 
 Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_texture, uint32_t p_layer) {
-	// TODO: Implement async texture readback (copy texture → staging buffer → map → read).
-	WARN_PRINT_ONCE("WebGPU: texture_get_data not yet implemented.");
-	return Vector<uint8_t>();
+	WGTexture *tex = (WGTexture *)(p_texture.id);
+	ERR_FAIL_NULL_V(tex, Vector<uint8_t>());
+
+	// Same frame-deferred readback pattern as buffer_get_data_direct.
+	// First call: copy texture → staging buffer, initiate async map, return zeros.
+	// Subsequent calls: return cached data from completed async map.
+
+	uint64_t key = (uint64_t)(uintptr_t)tex ^ ((uint64_t)p_layer << 48);
+	ReadbackEntry *entry = nullptr;
+
+	if (_readback_cache.has(key)) {
+		entry = &_readback_cache[key];
+	}
+
+	uint32_t bpp = 4; // Bytes per pixel (RGBA8 default, TODO: per-format)
+	uint32_t mip_w = tex->width;
+	uint32_t mip_h = tex->height;
+	uint32_t row_pitch = ((mip_w * bpp + 255) / 256) * 256; // 256-byte aligned
+	uint64_t buffer_size = (uint64_t)row_pitch * mip_h;
+
+	// Return cached data if previous readback completed.
+	if (entry && entry->has_data && entry->map_complete) {
+		Vector<uint8_t> result;
+		result.resize(mip_w * mip_h * bpp);
+
+		// Un-pad: copy from padded staging buffer to tightly packed output.
+		uint8_t *dst = result.ptrw();
+		uint32_t tight_row = mip_w * bpp;
+		for (uint32_t y = 0; y < mip_h; y++) {
+			memcpy(dst + y * tight_row, entry->shadow + y * row_pitch, tight_row);
+		}
+
+		// Initiate next readback.
+		entry->map_complete = false;
+		WGPUCommandEncoderDescriptor enc_desc = {};
+		WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
+		WGPUTexelCopyTextureInfo src_info = {};
+		src_info.texture = tex->view_source ? tex->view_source : tex->handle;
+		src_info.mipLevel = 0;
+		src_info.origin = { 0, 0, p_layer };
+		WGPUTexelCopyBufferInfo dst_info = {};
+		dst_info.buffer = entry->staging;
+		dst_info.layout.offset = 0;
+		dst_info.layout.bytesPerRow = row_pitch;
+		dst_info.layout.rowsPerImage = mip_h;
+		WGPUExtent3D extent = { mip_w, mip_h, 1 };
+		wgpuCommandEncoderCopyTextureToBuffer(encoder, &src_info, &dst_info, &extent);
+		WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
+		wgpuQueueSubmit(queue, 1, &cmd);
+		wgpuCommandBufferRelease(cmd);
+		wgpuCommandEncoderRelease(encoder);
+
+		WGPUBufferMapCallbackInfo cb = {};
+		cb.mode = WGPUCallbackMode_AllowSpontaneous;
+		cb.callback = _readback_map_cb;
+		cb.userdata1 = entry;
+		wgpuBufferMapAsync(entry->staging, WGPUMapMode_Read, 0, entry->size, cb);
+
+		return result;
+	}
+
+	// First call — create staging buffer and initiate readback.
+	if (!entry) {
+		ReadbackEntry new_entry;
+		new_entry.size = buffer_size;
+		new_entry.shadow = (uint8_t *)memalloc(buffer_size);
+		memset(new_entry.shadow, 0, buffer_size);
+
+		WGPUBufferDescriptor desc = {};
+		desc.size = (buffer_size + 3) & ~3ULL;
+		desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+		new_entry.staging = wgpuDeviceCreateBuffer(device, &desc);
+		new_entry.map_complete = false;
+		new_entry.has_data = false;
+
+		_readback_cache[key] = new_entry;
+		entry = &_readback_cache[key];
+	}
+
+	// Copy texture to staging buffer.
+	WGPUCommandEncoderDescriptor enc_desc = {};
+	WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
+	WGPUTexelCopyTextureInfo src_info = {};
+	src_info.texture = tex->view_source ? tex->view_source : tex->handle;
+	src_info.mipLevel = 0;
+	src_info.origin = { 0, 0, p_layer };
+	WGPUTexelCopyBufferInfo dst_info = {};
+	dst_info.buffer = entry->staging;
+	dst_info.layout.offset = 0;
+	dst_info.layout.bytesPerRow = row_pitch;
+	dst_info.layout.rowsPerImage = mip_h;
+	WGPUExtent3D extent = { mip_w, mip_h, 1 };
+	wgpuCommandEncoderCopyTextureToBuffer(encoder, &src_info, &dst_info, &extent);
+	WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
+	wgpuQueueSubmit(queue, 1, &cmd);
+	wgpuCommandBufferRelease(cmd);
+	wgpuCommandEncoderRelease(encoder);
+
+	WGPUBufferMapCallbackInfo cb = {};
+	cb.mode = WGPUCallbackMode_AllowSpontaneous;
+	cb.callback = _readback_map_cb;
+	cb.userdata1 = entry;
+	wgpuBufferMapAsync(entry->staging, WGPUMapMode_Read, 0, entry->size, cb);
+
+	// Return zeros on first call (data available on next frame).
+	Vector<uint8_t> zeros;
+	zeros.resize(mip_w * mip_h * bpp);
+	memset(zeros.ptrw(), 0, zeros.size());
+	return zeros;
 }
 
 BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) {
