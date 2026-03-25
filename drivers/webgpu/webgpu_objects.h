@@ -263,6 +263,32 @@ struct WGCommandBuffer {
 		WGPipelineWrapper *current_pipeline = nullptr;
 		uint32_t render_area_width = 0;
 		uint32_t render_area_height = 0;
+		// Track textures used as render attachments in the current pass.
+		// Used to detect and avoid sync scope violations (texture bound as
+		// both RenderAttachment and TextureBinding in the same pass).
+		// All textures used as render attachments across the ENTIRE encoder.
+		// Used to detect sync scope violations when a new pass reads a
+		// texture that was written as an attachment in any earlier pass.
+		static constexpr uint32_t MAX_ATTACHMENT_TEXTURES = 64;
+		WGPUTexture all_attachment_textures[MAX_ATTACHMENT_TEXTURES] = {};
+		uint32_t all_attachment_count = 0;
+		void reset_all_attachment_textures() { all_attachment_count = 0; }
+		void add_attachment_texture(WGPUTexture t) {
+			if (!t) return;
+			// Don't add duplicates.
+			for (uint32_t i = 0; i < all_attachment_count; i++) {
+				if (all_attachment_textures[i] == t) return;
+			}
+			if (all_attachment_count < MAX_ATTACHMENT_TEXTURES) {
+				all_attachment_textures[all_attachment_count++] = t;
+			}
+		}
+		bool was_attachment_texture(WGPUTexture t) const {
+			for (uint32_t i = 0; i < all_attachment_count; i++) {
+				if (all_attachment_textures[i] == t) return true;
+			}
+			return false;
+		}
 	} render_state;
 
 	// Bind group state tracking for redundancy elimination.

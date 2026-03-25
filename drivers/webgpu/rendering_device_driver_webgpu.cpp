@@ -3944,6 +3944,56 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	// End any active encoder.
 	cmd->end_active_encoder();
 
+	// WebGPU sync scope fix: track ALL textures used as render attachments
+	// across the entire command encoder.  When a new render pass begins,
+	// check if any of the previous attachment textures might be sampled
+	// in this pass.  If so, split the command encoder to create an implicit
+	// barrier between the write and read.
+	//
+	// Heuristic: if any previously-written attachment texture has BOTH
+	// TextureBinding and RenderAttachment usage bits, it's likely to be
+	// sampled in a later pass.  Split the encoder when the NEW pass's
+	// framebuffer does NOT include the previously-written texture (meaning
+	// it's transitioning from write → read).
+	bool needs_encoder_split = false;
+	for (uint32_t i = 0; i < cmd->render_state.all_attachment_count; i++) {
+		WGPUTexture prev_att = cmd->render_state.all_attachment_textures[i];
+		if (!prev_att) continue;
+
+		// Check if this texture is in the NEW framebuffer (still being written).
+		bool still_an_attachment = false;
+		for (uint32_t j = 0; j < fb->attachments.size(); j++) {
+			WGTexture *new_tex = fb->attachments[j];
+			if (new_tex) {
+				WGPUTexture new_gpu_tex = new_tex->view_source ? new_tex->view_source : new_tex->handle;
+				if (new_gpu_tex == prev_att) {
+					still_an_attachment = true;
+					break;
+				}
+			}
+		}
+		if (!still_an_attachment) {
+			// This texture was written in an earlier pass and is NOT being
+			// written in this pass — it may be sampled → potential conflict.
+			needs_encoder_split = true;
+			break;
+		}
+	}
+
+	if (needs_encoder_split && cmd->encoder) {
+		// Finish the current encoder, submit it, and create a new one.
+		// This creates an implicit barrier between the render passes.
+		WGPUCommandBuffer finished = wgpuCommandEncoderFinish(cmd->encoder, nullptr);
+		if (finished) {
+			wgpuQueueSubmit(queue, 1, &finished);
+			wgpuCommandBufferRelease(finished);
+		}
+		wgpuCommandEncoderRelease(cmd->encoder);
+		cmd->encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+		// Reset attachment tracking for the new encoder.
+		cmd->render_state.reset_all_attachment_textures();
+	}
+
 	// Invalidate bind group state tracking (new encoder = clean state).
 	cmd->invalidate_bind_groups();
 
@@ -3953,6 +4003,15 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	cmd->render_state.current_subpass = 0;
 	cmd->render_state.render_area_width = p_rect.size.x > 0 ? (uint32_t)p_rect.size.x : fb->width;
 	cmd->render_state.render_area_height = p_rect.size.y > 0 ? (uint32_t)p_rect.size.y : fb->height;
+
+	// Track this pass's attachment textures for future sync scope checks.
+	for (uint32_t i = 0; i < fb->attachments.size(); i++) {
+		WGTexture *att_tex = fb->attachments[i];
+		if (att_tex) {
+			WGPUTexture gpu_tex = att_tex->view_source ? att_tex->view_source : att_tex->handle;
+			cmd->render_state.add_attachment_texture(gpu_tex);
+		}
+	}
 
 	ERR_FAIL_COND(rp->subpasses.size() == 0);
 	const WGRenderPass::SubpassInfo &subpass = rp->subpasses[0];
