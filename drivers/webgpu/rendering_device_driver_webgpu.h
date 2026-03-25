@@ -167,16 +167,26 @@ public:
 	// BUFFERS
 	// -----------------------------------------------------------------------
 
+	/// Create a GPU buffer. WebGPU sizes are 4-byte aligned internally.
+	/// CPU-allocation staging buffers get CopyDst|MapRead usage for readback.
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override final;
+	/// Stub — WebGPU has no texel buffer views.
 	virtual bool buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) override final;
 	virtual void buffer_free(BufferID p_buffer) override final;
 	virtual uint64_t buffer_get_allocation_size(BufferID p_buffer) override final;
+	/// Map a buffer for CPU access. For readback buffers (is_readback=true), uses
+	/// a shadow CPU buffer populated by async wgpuBufferMapAsync callbacks.
 	virtual uint8_t *buffer_map(BufferID p_buffer) override final;
 	virtual void buffer_unmap(BufferID p_buffer) override final;
+	/// Persistent map for streaming uploads — uses shadow CPU buffer.
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) override final;
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
 	virtual void buffer_flush(BufferID p_buffer) override final;
+	/// Stub — WebGPU has no buffer device addresses. Returns 0.
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override final;
+	/// WebGPU-specific: direct buffer readback using persistent staging buffer cache.
+	/// First call returns zeros (1-frame latency), subsequent calls return previous frame's data.
+	/// Bypasses the default staging buffer path which can't handle WebGPU's async-only map.
 	virtual bool buffer_get_data_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, Vector<uint8_t> &r_data) override final;
 
 	// Persistent readback infrastructure for async buffer map.
@@ -194,13 +204,17 @@ public:
 	// TEXTURES
 	// -----------------------------------------------------------------------
 
+	/// Create a GPU texture. WebGPU texture formats are mapped via pixel_formats_webgpu.h.
 	virtual TextureID texture_create(const TextureFormat &p_format, const TextureView &p_view) override final;
+	/// Stub — not applicable for WebGPU web exports (no native texture interop).
 	virtual TextureID texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) override final;
 	virtual TextureID texture_create_shared(TextureID p_original_texture, const TextureView &p_view) override final;
 	virtual TextureID texture_create_shared_from_slice(TextureID p_original_texture, const TextureView &p_view, TextureSliceType p_slice_type, uint32_t p_layer, uint32_t p_layers, uint32_t p_mipmap, uint32_t p_mipmaps) override final;
 	virtual void texture_free(TextureID p_texture) override final;
 	virtual uint64_t texture_get_allocation_size(TextureID p_texture) override final;
 	virtual void texture_get_copyable_layout(TextureID p_texture, const TextureSubresource &p_subresource, TextureCopyableLayout *r_layout) override final;
+	/// Read texture data back to CPU. Uses same persistent readback cache as buffer_get_data_direct.
+	/// Returns zeros on first call (1-frame latency), valid data on subsequent calls.
 	virtual Vector<uint8_t> texture_get_data(TextureID p_texture, uint32_t p_layer) override final;
 	virtual BitField<TextureUsageBits> texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) override final;
 	virtual bool texture_can_make_shared_with_format(TextureID p_texture, DataFormat p_format, bool &r_raw_reinterpretation) override final;

@@ -72,6 +72,21 @@ Tested with a real game (Shiny Gen — 2D/3D hybrid, entities, UI, shadows):
 
 7. **16-bit SNORM/UNORM textures** — Not available in base emdawnwebgpu 4.0.10; mapped to float equivalents.
 
+8. **`command_resolve_texture()` stub** — MSAA resolve is implemented via render pass resolve targets, but the standalone resolve command is stubbed. This method is rarely called in the Mobile renderer pipeline.
+
+9. **`command_render_clear_attachments()` stub** — WebGPU has no mid-pass clear operation. A workaround (end pass → clear pass → restart) is documented in the code for future implementation.
+
+## Testing approach
+
+WebGPU requires a browser with GPU access, making fully automated CI testing challenging. Current testing is:
+
+- **Build CI**: `scons platform=web webgpu=yes` compiles cleanly (verified in GitHub Actions)
+- **Local native testing**: 22/22 official Godot demos run without crashes on macOS Metal (validates RD code paths shared with WebGPU)
+- **Browser testing**: 10 demos + 1 real game (Shiny Gen) tested in Chrome via Playwright automation with screenshot verification
+- **Compute shader testing**: 6 compute shader tests verified in browser (dispatch + readback)
+
+Future work: headless WebGPU testing via Dawn's native WebGPU implementation (bypass browser, run RD tests directly on GPU).
+
 ## Test plan
 
 - [x] Build system: `scons platform=web webgpu=yes` compiles cleanly
