@@ -39,6 +39,10 @@
 #include <emscripten/emscripten.h>
 #include <cstdlib>
 
+// Define WEBGPU_VERBOSE to enable diagnostic console.log prints in the browser.
+// These are disabled by default for production builds.
+// #define WEBGPU_VERBOSE
+
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
@@ -96,6 +100,7 @@ RenderingDeviceDriverWebGPU::RenderingDeviceDriverWebGPU(RenderingContextDriverW
 }
 
 RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
+	// Release push constant resources.
 	if (push_constant_bind_group) {
 		wgpuBindGroupRelease(push_constant_bind_group);
 		push_constant_bind_group = nullptr;
@@ -108,6 +113,53 @@ RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
 		wgpuBufferRelease(push_constant_ring_buffer);
 		push_constant_ring_buffer = nullptr;
 	}
+
+	// Release fallback textures and views.
+	if (fallback_float_texture_view) {
+		wgpuTextureViewRelease(fallback_float_texture_view);
+		fallback_float_texture_view = nullptr;
+	}
+	if (fallback_float_texture) {
+		wgpuTextureRelease(fallback_float_texture);
+		fallback_float_texture = nullptr;
+	}
+	if (fallback_cube_texture_view) {
+		wgpuTextureViewRelease(fallback_cube_texture_view);
+		fallback_cube_texture_view = nullptr;
+	}
+	if (fallback_cube_texture) {
+		wgpuTextureRelease(fallback_cube_texture);
+		fallback_cube_texture = nullptr;
+	}
+
+	// Release dummy samplers.
+	if (dummy_filtering_sampler) {
+		wgpuSamplerRelease(dummy_filtering_sampler);
+		dummy_filtering_sampler = nullptr;
+	}
+	if (dummy_comparison_sampler) {
+		wgpuSamplerRelease(dummy_comparison_sampler);
+		dummy_comparison_sampler = nullptr;
+	}
+
+	// Release aliasing stub buffer.
+	if (aliasing_stub_buffer) {
+		wgpuBufferRelease(aliasing_stub_buffer);
+		aliasing_stub_buffer = nullptr;
+	}
+
+	// Clean up readback cache — release persistent staging buffers and shadow memory.
+	for (KeyValue<uint64_t, ReadbackEntry> &kv : _readback_cache) {
+		ReadbackEntry &entry = kv.value;
+		if (entry.staging) {
+			wgpuBufferRelease(entry.staging);
+		}
+		if (entry.shadow) {
+			memfree(entry.shadow);
+		}
+	}
+	_readback_cache.clear();
+
 	if (shader_container_format) {
 		memdelete(shader_container_format);
 		shader_container_format = nullptr;
@@ -1516,12 +1568,14 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 
 		wgpuQueueSubmit(queue, wgpu_cmd_buffers.size(), wgpu_cmd_buffers.ptr());
 		// Diagnostic: log submit count for the first few frames.
+#ifdef WEBGPU_VERBOSE
 		static int _submit_log = 0;
 		if (_submit_log < 10) {
 			EM_ASM({ console.log('[DIAG-SUBMIT] frame=' + $0 + ' cmds=' + $1); },
 					_submit_log, (int)wgpu_cmd_buffers.size());
 			_submit_log++;
 		}
+#endif // WEBGPU_VERBOSE
 	}
 
 	// Signal fence if provided.
