@@ -43,6 +43,14 @@
 // These are disabled by default for production builds.
 // #define WEBGPU_VERBOSE
 
+#ifdef WEBGPU_VERBOSE
+#define WEBGPU_DIAG(...) EM_ASM(__VA_ARGS__)
+#define WEBGPU_DIAG_INT(...) EM_ASM_INT(__VA_ARGS__)
+#else
+#define WEBGPU_DIAG(...) ((void)0)
+#define WEBGPU_DIAG_INT(...) 0
+#endif
+
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
@@ -1773,7 +1781,21 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 	config.height = height;
 	wgpuSurfaceConfigure(sc->surface, &config);
 
-	// Diagnostic: verify JS-side canvas context state after configure.
+	// Register uncaptured GPU error handler (always active — reports validation errors).
+	EM_ASM({
+		var d = Module['preinitializedWebGPUDevice'];
+		if (d && !d._uncapturedPatched) {
+			d.addEventListener('uncapturederror', function(e) {
+				console.error('[Godot] WebGPU uncaptured error: ' + e.error.constructor.name);
+				console.error(e.error.message);
+			});
+			d._uncapturedPatched = true;
+		}
+	});
+
+#ifdef WEBGPU_VERBOSE
+	// Diagnostic: verify JS-side canvas context state and monkey-patch GPU API
+	// calls with error scope checking for detailed validation error messages.
 	EM_ASM({
 		var c = document.querySelector('#canvas');
 		if (!c) { console.error('[DIAG-CFG] canvas element not found'); return; }
@@ -1781,7 +1803,6 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 		console.log('[DIAG-CFG] canvas=' + c.tagName + '#' + c.id +
 			' drawingBuffer=' + c.width + 'x' + c.height +
 			' ctx=' + (ctx ? ctx.constructor.name : 'null'));
-		// Monkey-patch queue.submit to wrap with error scope checking.
 		var d = Module['preinitializedWebGPUDevice'];
 		if (d && d.queue && !d.queue._submitPatched) {
 			var origSubmit = d.queue.submit.bind(d.queue);
@@ -1792,57 +1813,39 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 				var result = origSubmit(cmdBufs);
 				d.popErrorScope().then(function(error) {
 					if (error) {
-						console.error('[SUBMIT-ERROR] #' + submitCount + ' bufs=' + cmdBufs.length + ' err=' + error.message);
-					} else if (submitCount <= 5) {
-						console.log('[SUBMIT-OK] #' + submitCount + ' bufs=' + cmdBufs.length + ' no errors');
+						console.error('[SUBMIT-ERROR] #' + submitCount + ' err=' + error.message);
 					}
 				});
 				return result;
 			};
 			d.queue._submitPatched = true;
-			console.log('[DIAG-CFG] queue.submit monkey-patched with error scope');
 		}
-		// Monkey-patch createRenderPipeline to capture creation-time errors with full messages.
 		if (d && !d._pipelinePatched) {
 			var origCreate = d.createRenderPipeline.bind(d);
 			d.createRenderPipeline = function(desc) {
 				d.pushErrorScope('validation');
 				var pipeline = origCreate(desc);
 				d.popErrorScope().then(function(err) {
-					if (err) {
-						console.error('[PIPELINE-CREATE-ERROR] ' + err.message.substring(0, 1200));
-					}
+					if (err) { console.error('[PIPELINE-CREATE-ERROR] ' + err.message.substring(0, 1200)); }
 				});
 				return pipeline;
 			};
 			d._pipelinePatched = true;
-			console.log('[DIAG-CFG] createRenderPipeline monkey-patched');
 		}
-		// Monkey-patch createShaderModule to capture WGSL compilation errors.
 		if (d && !d._shaderModPatched) {
 			var origCreateMod = d.createShaderModule.bind(d);
 			d.createShaderModule = function(desc) {
 				d.pushErrorScope('validation');
 				var mod = origCreateMod(desc);
 				d.popErrorScope().then(function(err) {
-					if (err) {
-						console.error('[SHADER-COMPILE-ERROR] ' + err.message.substring(0, 1200));
-					}
+					if (err) { console.error('[SHADER-COMPILE-ERROR] ' + err.message.substring(0, 1200)); }
 				});
 				return mod;
 			};
 			d._shaderModPatched = true;
-			console.log('[DIAG-CFG] createShaderModule monkey-patched');
-		}
-		// Catch all uncaptured WebGPU errors (draw-time validation, etc.)
-		if (d && !d._uncapturedPatched) {
-			d.addEventListener('uncapturederror', function(e) {
-				console.error('[UNCAPTURED-GPU-ERROR] ' + e.error.message);
-			});
-			d._uncapturedPatched = true;
-			console.log('[DIAG-CFG] uncaptured error handler registered');
 		}
 	});
+#endif // WEBGPU_VERBOSE
 
 	sc->width = width;
 	sc->height = height;
@@ -1885,7 +1888,7 @@ RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(C
 	// Diagnostic: log surface texture status for the first few frames.
 	static int _st_log = 0;
 	if (_st_log < 10) {
-		EM_ASM({ console.log('[SURFACE] status=' + $0 + ' texture=' + ($1 ? 'valid' : 'NULL')); },
+		WEBGPU_DIAG({ console.log('[SURFACE] status=' + $0 + ' texture=' + ($1 ? 'valid' : 'NULL')); },
 				(int)surface_texture.status, (int)(surface_texture.texture != nullptr));
 		_st_log++;
 	}
@@ -2122,7 +2125,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				bool has_push_constants = strstr(wgsl_str, "push_constants") != nullptr;
 				bool has_push_constant = strstr(wgsl_str, "push_constant") != nullptr;
 				int wgsl_len = strlen(wgsl_str);
-				EM_ASM({ console.log('[WGSL#' + $0 + '] stage=' + $1 + ' len=' + $2 + ' grp3=' + $3 + ' b120=' + $4 + ' push_constants=' + $5 + ' push_constant=' + $6); },
+				WEBGPU_DIAG({ console.log('[WGSL#' + $0 + '] stage=' + $1 + ' len=' + $2 + ' grp3=' + $3 + ' b120=' + $4 + ' push_constants=' + $5 + ' push_constant=' + $6); },
 						_wgsl_diag, (int)s.shader_stage, wgsl_len, has_pc_group3 ? 1 : 0, has_pc_binding120 ? 1 : 0, has_push_constants ? 1 : 0, has_push_constant ? 1 : 0);
 				_wgsl_diag++;
 			}
@@ -2817,7 +2820,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		for (uint32_t a = 0; a < entries.size(); a++) {
 			for (uint32_t b = a + 1; b < entries.size(); b++) {
 				if (entries[a].binding == entries[b].binding) {
-					EM_ASM({ console.error('[BGL-DUP] set=' + $0 + ' binding=' + $1 + ' idx_a=' + $2 + ' idx_b=' + $3); },
+					WEBGPU_DIAG({ console.error('[BGL-DUP] set=' + $0 + ' binding=' + $1 + ' idx_a=' + $2 + ' idx_b=' + $3); },
 							(int)set, (int)entries[a].binding, (int)a, (int)b);
 				}
 			}
@@ -3223,7 +3226,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 					static bool alias_stub_logged = false;
 					if (!alias_stub_logged) {
 						alias_stub_logged = true;
-						EM_ASM({ console.warn('[ALIAS-STUB] Writable storage buffer aliasing at set=' + $0 + ' binding=' + $1 + ', redirected to stub buffer'); },
+						WEBGPU_DIAG({ console.warn('[ALIAS-STUB] Writable storage buffer aliasing at set=' + $0 + ' binding=' + $1 + ', redirected to stub buffer'); },
 								(int)p_set_index, (int)uniform.binding);
 					}
 					entry.buffer = aliasing_stub_buffer;
@@ -3332,7 +3335,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 	for (uint32_t a = 0; a < entries.size(); a++) {
 		for (uint32_t b = a + 1; b < entries.size(); b++) {
 			if (entries[a].binding == entries[b].binding) {
-				EM_ASM({ console.error('[BG-DUP] set=' + $0 + ' binding=' + $1 + ' idx_a=' + $2 + ' idx_b=' + $3); },
+				WEBGPU_DIAG({ console.error('[BG-DUP] set=' + $0 + ' binding=' + $1 + ' idx_a=' + $2 + ' idx_b=' + $3); },
 						(int)p_set_index, (int)entries[a].binding, (int)a, (int)b);
 			}
 		}
@@ -4195,6 +4198,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 
 	// --- Begin render pass ---
 	// --- Diagnostic: verify swap chain view maps to correct JS object ---
+#ifdef WEBGPU_VERBOSE
 	if (rp->is_swap_chain_pass && color_attachments.size() > 0) {
 		static int _sc_view_log = 0;
 		if (_sc_view_log < 5) {
@@ -4229,6 +4233,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 			_sc_view_log++;
 		}
 	}
+#endif // WEBGPU_VERBOSE
 
 	WGPURenderPassDescriptor pass_desc = {};
 	pass_desc.colorAttachmentCount = color_attachments.size();
@@ -4246,7 +4251,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 	// Temporary: log render pass ends to track pass boundaries.
 	static int _rp_end_log = 0;
 	if (_rp_end_log < 30) {
-		EM_ASM({ console.log('[RP-END#' + $0 + '] ' + $1 + 'x' + $2); },
+		WEBGPU_DIAG({ console.log('[RP-END#' + $0 + '] ' + $1 + 'x' + $2); },
 				_rp_end_log,
 				cmd->render_state.render_area_width,
 				cmd->render_state.render_area_height);
@@ -4273,7 +4278,7 @@ void RenderingDeviceDriverWebGPU::command_next_render_subpass(CommandBufferID p_
 	// Temporary: log subpass transitions.
 	static int _sp_log = 0;
 	if (_sp_log < 10) {
-		EM_ASM({ console.log('[SUBPASS] transition to subpass ' + $0 + ' size=' + $1 + 'x' + $2); },
+		WEBGPU_DIAG({ console.log('[SUBPASS] transition to subpass ' + $0 + ' size=' + $1 + 'x' + $2); },
 				cmd->render_state.current_subpass + 1,
 				cmd->render_state.render_area_width,
 				cmd->render_state.render_area_height);
@@ -5107,7 +5112,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 				static int _alpha_strip_log = 0;
 				if (_alpha_strip_log < 10) {
 					const char *sname = (p_shader.id) ? ((WGShader *)(p_shader.id))->name.utf8().get_data() : "?";
-					EM_ASM({ console.log('[ALPHA-STRIP] Pipeline #' + $0 + ' fmt=BGRA8Unorm mask=' + $1 + ' blend=' + $2 + ' shader=' + UTF8ToString($3)); },
+					WEBGPU_DIAG({ console.log('[ALPHA-STRIP] Pipeline #' + $0 + ' fmt=BGRA8Unorm mask=' + $1 + ' blend=' + $2 + ' shader=' + UTF8ToString($3)); },
 							_alpha_strip_log, (int)mask, ba.enable_blend ? 1 : 0, sname);
 					_alpha_strip_log++;
 				}
@@ -5479,8 +5484,9 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 	frame_index = p_frame_index;
 	frames_drawn = p_frames_drawn;
 
-	// Log performance counters once per second.
+	// Performance counter tracking.
 	perf.frames_since_log++;
+#ifdef WEBGPU_VERBOSE
 	double now = EM_ASM_DOUBLE({ return performance.now(); });
 	if (perf.last_log_time == 0) {
 		perf.last_log_time = now;
@@ -5495,6 +5501,7 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 		perf.frames_since_log = 0;
 		perf.last_log_time = now;
 	}
+#endif // WEBGPU_VERBOSE
 
 	// Reset push constant ring buffer offset and shadow buffer tracking at the start of each frame.
 	push_constant_ring_offset = 0;
