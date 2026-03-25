@@ -1352,7 +1352,14 @@ All 4 scenes verified:
 - Scene D (50k particles): 36fps (GPU compute-bound, not draw-call limited), zero GPU errors
 
 ### Task 5.4: Final Polish & PR Preparation `[SERIAL, after 5.1-5.3]`
-**Status**: `TODO`
+**Status**: `IN_PROGRESS`
+**Agent Notes (March 24, 2026)**:
+- ✅ Fixed 7 memory leaks in destructor (fallback textures/views, samplers, aliasing buffer)
+- ✅ Added readback cache cleanup in destructor
+- ✅ Added WEBGPU_VERBOSE compile-time guard for diagnostic prints
+- ✅ Copyright headers verified on all files
+- ⚠️ Remaining: wrap remaining ~30 console.log diagnostic prints behind WEBGPU_VERBOSE
+- ⚠️ Remaining: review TODO comments (some can be deferred to follow-up PRs)
 **Effort**: 4-6 hours
 **Dependencies**: Tasks 5.1, 5.2, 5.3
 
