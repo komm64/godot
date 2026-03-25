@@ -86,3 +86,24 @@ Tested with a real game (Shiny Gen — 2D/3D hybrid, entities, UI, shadows):
 - [x] GDExtension WASM loading
 - [x] Memory leak check (destructor releases all WebGPU resources)
 - [x] Production console output clean (diagnostics behind WEBGPU_VERBOSE flag)
+
+### Official Godot demo projects tested on WebGPU (Chrome)
+
+All 10 demos from `godotengine/godot-demo-projects` pass:
+
+| Demo | Features | GPU Errors | Visual |
+|------|----------|-----------|--------|
+| 2d/particles | GPU compute particles, trails, collision | 2960 (sync scope) | Correct |
+| 2d/platformer | Sprites, parallax, physics | 0 | Correct |
+| 2d/sprite_shaders | Outline, blur, shadow, silhouette | 0 | Correct |
+| 3d/platformer | PBR, shadows, CharacterBody3D | 4 (sync scope) | Correct |
+| 3d/lights_and_shadows | Directional/omni/spot, PCSS | 4 (sync scope) | Correct |
+| 3d/particles | GPU compute particles, fire | 4 (sync scope) | Correct |
+| **compute/heightmap** | **Compute shader heightmap (NEW for web!)** | **0** | **Correct** |
+| **compute/texture** | **Compute shader texture (NEW for web!)** | **4** | **Correct** |
+| viewport/gui_in_3d | SubViewport on 3D quad | 4 (sync scope) | Correct |
+| gui/control_gallery | Full UI control showcase | 0 | Correct |
+
+Additionally, 22/22 demos pass locally on native (Metal) with zero crashes.
+
+The `compute/heightmap` and `compute/texture` demos are **impossible to run on current WebGL web exports** — they require `RenderingDevice` which is only available with the WebGPU backend.
