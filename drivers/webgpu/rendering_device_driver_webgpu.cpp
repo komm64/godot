@@ -737,40 +737,11 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	}
 
 	// WebGPU has no texture component swizzle (unlike Vulkan's VkComponentSwizzle).
-	// When a texture view requests a non-identity swizzle (e.g., broadcasting R to
-	// all channels for grayscale textures), we must promote narrow formats (R8, RG8)
-	// to RGBA equivalents so that all channels have valid data.
-	// The actual data expansion happens in the buffer→texture copy (the uploading
-	// code in Godot already provides RGBA8 data for these promoted textures).
-	bool needs_swizzle_promotion = (p_view.swizzle_r != TEXTURE_SWIZZLE_IDENTITY && p_view.swizzle_r != TEXTURE_SWIZZLE_R) ||
-			(p_view.swizzle_g != TEXTURE_SWIZZLE_IDENTITY && p_view.swizzle_g != TEXTURE_SWIZZLE_G) ||
-			(p_view.swizzle_b != TEXTURE_SWIZZLE_IDENTITY && p_view.swizzle_b != TEXTURE_SWIZZLE_B) ||
-			(p_view.swizzle_a != TEXTURE_SWIZZLE_IDENTITY && p_view.swizzle_a != TEXTURE_SWIZZLE_A);
-
-	if (needs_swizzle_promotion) {
-		switch (tex->format) {
-			case WGPUTextureFormat_R8Unorm:
-				tex->format = WGPUTextureFormat_RGBA8Unorm;
-				break;
-			case WGPUTextureFormat_R8Snorm:
-				tex->format = WGPUTextureFormat_RGBA8Snorm;
-				break;
-			case WGPUTextureFormat_RG8Unorm:
-				tex->format = WGPUTextureFormat_RGBA8Unorm;
-				break;
-			case WGPUTextureFormat_RG8Snorm:
-				tex->format = WGPUTextureFormat_RGBA8Snorm;
-				break;
-			case WGPUTextureFormat_R16Float:
-				tex->format = WGPUTextureFormat_RGBA16Float;
-				break;
-			case WGPUTextureFormat_RG16Float:
-				tex->format = WGPUTextureFormat_RGBA16Float;
-				break;
-			default:
-				break;
-		}
-	}
+	// Textures with non-identity swizzles (e.g., R8 with R→all broadcast) must be
+	// handled at a higher level. The driver stores the swizzle for potential future
+	// use but does NOT promote the format (Godot's upload data wouldn't match).
+	// See: servers/rendering/renderer_rd/storage_rd/texture_storage.cpp which
+	// handles swizzle emulation for backends that don't support it natively.
 
 	WGPUTextureDescriptor desc = {};
 	desc.dimension = tex->dimension;

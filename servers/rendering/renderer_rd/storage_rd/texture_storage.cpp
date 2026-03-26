@@ -850,6 +850,15 @@ void TextureStorage::texture_2d_initialize(RID p_texture, const Ref<Image> &p_im
 	TextureToRDFormat ret_format;
 	Ref<Image> image = _validate_texture_format(p_image, ret_format);
 
+#ifdef WEBGPU_ENABLED
+	// WebGPU has no texture component swizzle. Convert L8/LA8 images to RGBA8
+	// so sampling returns correct channel values without swizzle.
+	if (image->get_format() == Image::FORMAT_L8 || image->get_format() == Image::FORMAT_LA8) {
+		image = image->duplicate();
+		image->convert(Image::FORMAT_RGBA8);
+	}
+#endif
+
 	Texture texture;
 
 	texture.type = TextureStorage::TYPE_2D;
@@ -1846,18 +1855,38 @@ Ref<Image> TextureStorage::_validate_texture_format(const Ref<Image> &p_image, T
 
 	switch (p_image->get_format()) {
 		case Image::FORMAT_L8: {
+#ifdef WEBGPU_ENABLED
+			// WebGPU has no texture component swizzle. Use RGBA8 format so
+			// sampling returns (R,G,B,A) instead of (R,0,0,1). The Image
+			// class converts L8→RGBA8 pixel data before upload.
+			r_format.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+			r_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
+			r_format.swizzle_g = RD::TEXTURE_SWIZZLE_G;
+			r_format.swizzle_b = RD::TEXTURE_SWIZZLE_B;
+			r_format.swizzle_a = RD::TEXTURE_SWIZZLE_A;
+#else
 			r_format.format = RD::DATA_FORMAT_R8_UNORM;
 			r_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_g = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_b = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_a = RD::TEXTURE_SWIZZLE_ONE;
+#endif
 		} break; //luminance
 		case Image::FORMAT_LA8: {
+#ifdef WEBGPU_ENABLED
+			// WebGPU has no texture component swizzle. Use RGBA8 format.
+			r_format.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+			r_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
+			r_format.swizzle_g = RD::TEXTURE_SWIZZLE_G;
+			r_format.swizzle_b = RD::TEXTURE_SWIZZLE_B;
+			r_format.swizzle_a = RD::TEXTURE_SWIZZLE_A;
+#else
 			r_format.format = RD::DATA_FORMAT_R8G8_UNORM;
 			r_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_g = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_b = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_a = RD::TEXTURE_SWIZZLE_G;
+#endif
 		} break; //luminance-alpha
 		case Image::FORMAT_R8: {
 			r_format.format = RD::DATA_FORMAT_R8_UNORM;
