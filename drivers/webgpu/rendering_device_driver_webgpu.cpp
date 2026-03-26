@@ -736,6 +736,42 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 		}
 	}
 
+	// WebGPU has no texture component swizzle (unlike Vulkan's VkComponentSwizzle).
+	// When a texture view requests a non-identity swizzle (e.g., broadcasting R to
+	// all channels for grayscale textures), we must promote narrow formats (R8, RG8)
+	// to RGBA equivalents so that all channels have valid data.
+	// The actual data expansion happens in the buffer→texture copy (the uploading
+	// code in Godot already provides RGBA8 data for these promoted textures).
+	bool needs_swizzle_promotion = (p_view.swizzle_r != TEXTURE_SWIZZLE_IDENTITY && p_view.swizzle_r != TEXTURE_SWIZZLE_R) ||
+			(p_view.swizzle_g != TEXTURE_SWIZZLE_IDENTITY && p_view.swizzle_g != TEXTURE_SWIZZLE_G) ||
+			(p_view.swizzle_b != TEXTURE_SWIZZLE_IDENTITY && p_view.swizzle_b != TEXTURE_SWIZZLE_B) ||
+			(p_view.swizzle_a != TEXTURE_SWIZZLE_IDENTITY && p_view.swizzle_a != TEXTURE_SWIZZLE_A);
+
+	if (needs_swizzle_promotion) {
+		switch (tex->format) {
+			case WGPUTextureFormat_R8Unorm:
+				tex->format = WGPUTextureFormat_RGBA8Unorm;
+				break;
+			case WGPUTextureFormat_R8Snorm:
+				tex->format = WGPUTextureFormat_RGBA8Snorm;
+				break;
+			case WGPUTextureFormat_RG8Unorm:
+				tex->format = WGPUTextureFormat_RGBA8Unorm;
+				break;
+			case WGPUTextureFormat_RG8Snorm:
+				tex->format = WGPUTextureFormat_RGBA8Snorm;
+				break;
+			case WGPUTextureFormat_R16Float:
+				tex->format = WGPUTextureFormat_RGBA16Float;
+				break;
+			case WGPUTextureFormat_RG16Float:
+				tex->format = WGPUTextureFormat_RGBA16Float;
+				break;
+			default:
+				break;
+		}
+	}
+
 	WGPUTextureDescriptor desc = {};
 	desc.dimension = tex->dimension;
 	desc.format = tex->format;
@@ -4889,6 +4925,8 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 			vb_attrs[idx].offset = a.offset;
 			vb_attrs[idx].shaderLocation = a.location;
 		}
+
+		// (debug removed)
 
 		// Build layouts (one per binding that has attributes).
 		for (uint32_t b = 0; b < vf->bindings.size(); b++) {
