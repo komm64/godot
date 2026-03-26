@@ -263,19 +263,15 @@ struct WGCommandBuffer {
 		WGPipelineWrapper *current_pipeline = nullptr;
 		uint32_t render_area_width = 0;
 		uint32_t render_area_height = 0;
-		// Track textures used as render attachments in the current pass.
-		// Used to detect and avoid sync scope violations (texture bound as
-		// both RenderAttachment and TextureBinding in the same pass).
 		// All textures used as render attachments across the ENTIRE encoder.
-		// Used to detect sync scope violations when a new pass reads a
-		// texture that was written as an attachment in any earlier pass.
+		// Used to detect cross-pass sync scope violations when a new pass
+		// reads a texture that was written as an attachment in any earlier pass.
 		static constexpr uint32_t MAX_ATTACHMENT_TEXTURES = 64;
 		WGPUTexture all_attachment_textures[MAX_ATTACHMENT_TEXTURES] = {};
 		uint32_t all_attachment_count = 0;
 		void reset_all_attachment_textures() { all_attachment_count = 0; }
 		void add_attachment_texture(WGPUTexture t) {
 			if (!t) return;
-			// Don't add duplicates.
 			for (uint32_t i = 0; i < all_attachment_count; i++) {
 				if (all_attachment_textures[i] == t) return;
 			}
@@ -286,6 +282,27 @@ struct WGCommandBuffer {
 		bool was_attachment_texture(WGPUTexture t) const {
 			for (uint32_t i = 0; i < all_attachment_count; i++) {
 				if (all_attachment_textures[i] == t) return true;
+			}
+			return false;
+		}
+		// Textures used as render attachments in the CURRENT pass only.
+		// Used to detect intra-pass sync scope violations when a uniform
+		// set binds a texture that is also an attachment of the active pass.
+		WGPUTexture current_pass_attachments[MAX_ATTACHMENT_TEXTURES] = {};
+		uint32_t current_pass_attachment_count = 0;
+		void reset_current_pass_attachments() { current_pass_attachment_count = 0; }
+		void add_current_pass_attachment(WGPUTexture t) {
+			if (!t) return;
+			for (uint32_t i = 0; i < current_pass_attachment_count; i++) {
+				if (current_pass_attachments[i] == t) return;
+			}
+			if (current_pass_attachment_count < MAX_ATTACHMENT_TEXTURES) {
+				current_pass_attachments[current_pass_attachment_count++] = t;
+			}
+		}
+		bool is_current_pass_attachment(WGPUTexture t) const {
+			for (uint32_t i = 0; i < current_pass_attachment_count; i++) {
+				if (current_pass_attachments[i] == t) return true;
 			}
 			return false;
 		}

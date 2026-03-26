@@ -1295,9 +1295,19 @@ WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p
 		case DATA_FORMAT_S8_UINT: return WGPUTextureFormat_Stencil8;
 		// No depth16+stencil8 in WebGPU; use depth24plus-stencil8 as nearest approximation.
 		case DATA_FORMAT_D16_UNORM_S8_UINT: return WGPUTextureFormat_Depth24PlusStencil8;
-		default:
-			WARN_PRINT(vformat("WebGPU: Unsupported DataFormat %d", (int)p_format));
+		default: {
+			static thread_local LocalVector<int> warned_formats;
+			int fmt = (int)p_format;
+			bool already_warned = false;
+			for (uint32_t i = 0; i < warned_formats.size(); i++) {
+				if (warned_formats[i] == fmt) { already_warned = true; break; }
+			}
+			if (!already_warned) {
+				warned_formats.push_back(fmt);
+				WARN_PRINT(vformat("WebGPU: Unsupported DataFormat %d (further occurrences suppressed)", fmt));
+			}
 			return WGPUTextureFormat_Undefined;
+		}
 	}
 }
 
@@ -4068,7 +4078,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	cmd->render_state.render_area_width = p_rect.size.x > 0 ? (uint32_t)p_rect.size.x : fb->width;
 	cmd->render_state.render_area_height = p_rect.size.y > 0 ? (uint32_t)p_rect.size.y : fb->height;
 
-	// Track this pass's attachment textures for future sync scope checks.
+	// Track ALL framebuffer attachments for cross-pass encoder split checks.
 	for (uint32_t i = 0; i < fb->attachments.size(); i++) {
 		WGTexture *att_tex = fb->attachments[i];
 		if (att_tex) {
@@ -4079,6 +4089,63 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 
 	ERR_FAIL_COND(rp->subpasses.size() == 0);
 	const WGRenderPass::SubpassInfo &subpass = rp->subpasses[0];
+
+	// Track ONLY subpass-referenced attachments for intra-pass conflict detection.
+	// Only textures in the actual render pass descriptor create sync scope constraints.
+	cmd->render_state.reset_current_pass_attachments();
+	for (uint32_t i = 0; i < subpass.color_references.size(); i++) {
+		uint32_t att_idx = subpass.color_references[i].attachment;
+		if (att_idx != RDD::AttachmentReference::UNUSED && att_idx < fb->attachments.size()) {
+			WGTexture *tex = fb->attachments[att_idx];
+			if (tex) {
+				cmd->render_state.add_current_pass_attachment(tex->view_source ? tex->view_source : tex->handle);
+			}
+		}
+	}
+	if (subpass.depth_stencil_reference.attachment != RDD::AttachmentReference::UNUSED &&
+			subpass.depth_stencil_reference.attachment < fb->attachments.size()) {
+		WGTexture *tex = fb->attachments[subpass.depth_stencil_reference.attachment];
+		if (tex) {
+			cmd->render_state.add_current_pass_attachment(tex->view_source ? tex->view_source : tex->handle);
+		}
+	}
+
+	// Proactive encoder isolation: if any current-pass attachment has BOTH
+	// TextureBinding and RenderAttachment usage, this pass may cause an
+	// intra-pass sync scope conflict. Split the encoder BEFORE the pass so
+	// previous rendering work is preserved even if this pass's command
+	// buffer gets invalidated by the conflict.
+	{
+		bool has_dual_usage = false;
+		for (uint32_t i = 0; i < cmd->render_state.current_pass_attachment_count; i++) {
+			// We don't have the WGTexture* for current_pass_attachments (only WGPUTexture),
+			// so check the framebuffer's attachments for usage bits.
+			for (uint32_t j = 0; j < fb->attachments.size(); j++) {
+				WGTexture *tex = fb->attachments[j];
+				if (tex) {
+					WGPUTexture gpu_tex = tex->view_source ? tex->view_source : tex->handle;
+					if (gpu_tex == cmd->render_state.current_pass_attachments[i] &&
+							(tex->usage & WGPUTextureUsage_TextureBinding) &&
+							(tex->usage & WGPUTextureUsage_RenderAttachment)) {
+						has_dual_usage = true;
+						break;
+					}
+				}
+			}
+			if (has_dual_usage) break;
+		}
+		if (has_dual_usage && cmd->encoder) {
+			// Split: submit everything so far, start a fresh encoder.
+			WGPUCommandBuffer finished = wgpuCommandEncoderFinish(cmd->encoder, nullptr);
+			if (finished) {
+				wgpuQueueSubmit(queue, 1, &finished);
+				wgpuCommandBufferRelease(finished);
+			}
+			wgpuCommandEncoderRelease(cmd->encoder);
+			cmd->encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+			cmd->invalidate_bind_groups();
+		}
+	}
 
 	// --- Helper lambdas for op mapping ---
 	auto map_load_op = [](AttachmentLoadOp op) -> WGPULoadOp {
