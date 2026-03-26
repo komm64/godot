@@ -850,23 +850,6 @@ void TextureStorage::texture_2d_initialize(RID p_texture, const Ref<Image> &p_im
 	TextureToRDFormat ret_format;
 	Ref<Image> image = _validate_texture_format(p_image, ret_format);
 
-#ifdef WEBGPU_ENABLED
-	// WebGPU has no texture component swizzle. Convert L8 images to RGBA8
-	// to emulate the R→all-channels broadcast swizzle.
-	// L8: R8 + (R,R,R,1) swizzle → needs R broadcast + alpha=1
-	// Note: LA8 (font atlases) is NOT converted here — it needs separate
-	// handling because Image::convert corrupts the glyph atlas layout.
-	if (image->get_format() == Image::FORMAT_L8) {
-		image = image->duplicate();
-		image->convert(Image::FORMAT_RGBA8);
-		ret_format.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
-		ret_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
-		ret_format.swizzle_g = RD::TEXTURE_SWIZZLE_G;
-		ret_format.swizzle_b = RD::TEXTURE_SWIZZLE_B;
-		ret_format.swizzle_a = RD::TEXTURE_SWIZZLE_A;
-	}
-#endif
-
 	Texture texture;
 
 	texture.type = TextureStorage::TYPE_2D;
@@ -1863,18 +1846,65 @@ Ref<Image> TextureStorage::_validate_texture_format(const Ref<Image> &p_image, T
 
 	switch (p_image->get_format()) {
 		case Image::FORMAT_L8: {
+#ifdef WEBGPU_ENABLED
+			// WebGPU has no texture component swizzle. L8 is stored as R8
+			// with (R,R,R,1) swizzle on Vulkan, but WebGPU would read (R,0,0,1).
+			// Convert to RGBA8 so the luminance broadcast is baked into the data.
+			image->convert(Image::FORMAT_RGBA8);
+			r_format.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+			r_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
+			r_format.swizzle_g = RD::TEXTURE_SWIZZLE_G;
+			r_format.swizzle_b = RD::TEXTURE_SWIZZLE_B;
+			r_format.swizzle_a = RD::TEXTURE_SWIZZLE_A;
+#else
 			r_format.format = RD::DATA_FORMAT_R8_UNORM;
 			r_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_g = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_b = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_a = RD::TEXTURE_SWIZZLE_ONE;
+#endif
 		} break; //luminance
 		case Image::FORMAT_LA8: {
+#ifdef WEBGPU_ENABLED
+			// WebGPU has no texture component swizzle. LA8 is stored as RG8
+			// with (R,R,R,G) swizzle on Vulkan, but WebGPU would read (R,G,0,1).
+			// Manually expand LA8 → RGBA8: each (L,A) pixel becomes (L,L,L,A).
+			// We do this manually instead of Image::convert because we need the
+			// luminance broadcast (L→RGB) that the swizzle normally provides.
+			{
+				int w = image->get_width();
+				int h = image->get_height();
+				Vector<uint8_t> la_data = image->get_data();
+				const uint8_t *src = la_data.ptr();
+				Vector<uint8_t> rgba_data;
+				int pixel_count = w * h;
+				// Handle mipmaps: total pixel data size / 2 bytes per LA8 pixel.
+				int total_la_bytes = la_data.size();
+				int total_pixels = total_la_bytes / 2;
+				rgba_data.resize(total_pixels * 4);
+				uint8_t *dst = rgba_data.ptrw();
+				for (int i = 0; i < total_pixels; i++) {
+					uint8_t l = src[i * 2];
+					uint8_t a = src[i * 2 + 1];
+					dst[i * 4 + 0] = l; // R
+					dst[i * 4 + 1] = l; // G
+					dst[i * 4 + 2] = l; // B
+					dst[i * 4 + 3] = a; // A
+				}
+				image = Image::create_from_data(w, h, image->has_mipmaps(), Image::FORMAT_RGBA8, rgba_data);
+			}
+			r_format.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+			r_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
+			r_format.swizzle_g = RD::TEXTURE_SWIZZLE_G;
+			r_format.swizzle_b = RD::TEXTURE_SWIZZLE_B;
+			r_format.swizzle_a = RD::TEXTURE_SWIZZLE_A;
+#else
 			r_format.format = RD::DATA_FORMAT_R8G8_UNORM;
 			r_format.swizzle_r = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_g = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_b = RD::TEXTURE_SWIZZLE_R;
 			r_format.swizzle_a = RD::TEXTURE_SWIZZLE_G;
+#endif
 		} break; //luminance-alpha
 		case Image::FORMAT_R8: {
 			r_format.format = RD::DATA_FORMAT_R8_UNORM;
