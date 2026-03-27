@@ -4055,6 +4055,16 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	}
 
 	if (needs_encoder_split && cmd->encoder) {
+		// Flush push constant ring buffer to GPU before submitting — the
+		// encoded commands reference ring buffer offsets via dynamic bind
+		// group offsets, so the data must be on the GPU before execution.
+		if (push_constant_shadow_dirty_start < push_constant_shadow_dirty_end) {
+			wgpuQueueWriteBuffer(queue, push_constant_ring_buffer, push_constant_shadow_dirty_start,
+					push_constant_shadow + push_constant_shadow_dirty_start,
+					push_constant_shadow_dirty_end - push_constant_shadow_dirty_start);
+			push_constant_shadow_dirty_start = UINT32_MAX;
+			push_constant_shadow_dirty_end = 0;
+		}
 		// Finish the current encoder, submit it, and create a new one.
 		// This creates an implicit barrier between the render passes.
 		WGPUCommandBuffer finished = wgpuCommandEncoderFinish(cmd->encoder, nullptr);
@@ -4135,6 +4145,14 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 			if (has_dual_usage) break;
 		}
 		if (has_dual_usage && cmd->encoder) {
+			// Flush push constant ring buffer before mid-frame submit.
+			if (push_constant_shadow_dirty_start < push_constant_shadow_dirty_end) {
+				wgpuQueueWriteBuffer(queue, push_constant_ring_buffer, push_constant_shadow_dirty_start,
+						push_constant_shadow + push_constant_shadow_dirty_start,
+						push_constant_shadow_dirty_end - push_constant_shadow_dirty_start);
+				push_constant_shadow_dirty_start = UINT32_MAX;
+				push_constant_shadow_dirty_end = 0;
+			}
 			// Split: submit everything so far, start a fresh encoder.
 			WGPUCommandBuffer finished = wgpuCommandEncoderFinish(cmd->encoder, nullptr);
 			if (finished) {
