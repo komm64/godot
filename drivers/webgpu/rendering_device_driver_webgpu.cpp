@@ -1243,68 +1243,37 @@ WGPUTextureViewDimension RenderingDeviceDriverWebGPU::_texture_type_to_view_dime
 }
 
 WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p_format) const {
-	// TODO: Move to pixel_formats_webgpu.cpp. See DESIGN.md Appendix B for full table.
+	// O(1) lookup into the static table from pixel_formats_webgpu.h.
+	if ((uint32_t)p_format < (uint32_t)DATA_FORMAT_MAX) {
+		WGPUTextureFormat fmt = RD_TO_WGPU_FORMAT[(uint32_t)p_format];
+		if (fmt != WGPUTextureFormat_Undefined) {
+			return fmt;
+		}
+		// The table maps some formats to Undefined that we can approximate.
+		// Fall through to handle these special cases.
+	}
+
+	// Fallback approximations for formats not in the base WebGPU spec.
 	switch (p_format) {
-		case DATA_FORMAT_R8_UNORM: return WGPUTextureFormat_R8Unorm;
-		case DATA_FORMAT_R8_SNORM: return WGPUTextureFormat_R8Snorm;
-		case DATA_FORMAT_R8_UINT: return WGPUTextureFormat_R8Uint;
-		case DATA_FORMAT_R8_SINT: return WGPUTextureFormat_R8Sint;
-		case DATA_FORMAT_R8G8_UNORM: return WGPUTextureFormat_RG8Unorm;
-		case DATA_FORMAT_R8G8_SNORM: return WGPUTextureFormat_RG8Snorm;
-		case DATA_FORMAT_R8G8_UINT: return WGPUTextureFormat_RG8Uint;
-		case DATA_FORMAT_R8G8_SINT: return WGPUTextureFormat_RG8Sint;
-		case DATA_FORMAT_R8G8B8A8_UNORM: return WGPUTextureFormat_RGBA8Unorm;
-		case DATA_FORMAT_R8G8B8A8_SNORM: return WGPUTextureFormat_RGBA8Snorm;
-		case DATA_FORMAT_R8G8B8A8_UINT: return WGPUTextureFormat_RGBA8Uint;
-		case DATA_FORMAT_R8G8B8A8_SINT: return WGPUTextureFormat_RGBA8Sint;
-		case DATA_FORMAT_R8G8B8A8_SRGB: return WGPUTextureFormat_RGBA8UnormSrgb;
-		case DATA_FORMAT_B8G8R8A8_UNORM: return WGPUTextureFormat_BGRA8Unorm;
-		case DATA_FORMAT_B8G8R8A8_SRGB: return WGPUTextureFormat_BGRA8UnormSrgb;
-		case DATA_FORMAT_R16_UNORM: return WGPUTextureFormat_R16Float /* R16Unorm N/A in emdawnwebgpu 4.0.10 */;
-		case DATA_FORMAT_R16_SNORM: return WGPUTextureFormat_R16Float /* R16Snorm N/A in emdawnwebgpu 4.0.10 */;
-		case DATA_FORMAT_R16_UINT: return WGPUTextureFormat_R16Uint;
-		case DATA_FORMAT_R16_SINT: return WGPUTextureFormat_R16Sint;
-		case DATA_FORMAT_R16_SFLOAT: return WGPUTextureFormat_R16Float;
-		case DATA_FORMAT_R16G16_UNORM: return WGPUTextureFormat_RG16Float /* RG16Unorm N/A in emdawnwebgpu 4.0.10 */;
-		case DATA_FORMAT_R16G16_SNORM: return WGPUTextureFormat_RG16Float /* RG16Snorm N/A in emdawnwebgpu 4.0.10 */;
-		case DATA_FORMAT_R16G16_UINT: return WGPUTextureFormat_RG16Uint;
-		case DATA_FORMAT_R16G16_SINT: return WGPUTextureFormat_RG16Sint;
-		case DATA_FORMAT_R16G16_SFLOAT: return WGPUTextureFormat_RG16Float;
-		case DATA_FORMAT_R16G16B16A16_UNORM: return WGPUTextureFormat_RGBA16Float /* RGBA16Unorm N/A in emdawnwebgpu 4.0.10 */;
-		case DATA_FORMAT_R16G16B16A16_SNORM: return WGPUTextureFormat_RGBA16Float /* RGBA16Snorm N/A in emdawnwebgpu 4.0.10 */;
-		case DATA_FORMAT_R16G16B16A16_UINT: return WGPUTextureFormat_RGBA16Uint;
-		case DATA_FORMAT_R16G16B16A16_SINT: return WGPUTextureFormat_RGBA16Sint;
-		case DATA_FORMAT_R16G16B16A16_SFLOAT: return WGPUTextureFormat_RGBA16Float;
-		case DATA_FORMAT_R32_UINT: return WGPUTextureFormat_R32Uint;
-		case DATA_FORMAT_R32_SINT: return WGPUTextureFormat_R32Sint;
-		case DATA_FORMAT_R32_SFLOAT: return WGPUTextureFormat_R32Float;
-		case DATA_FORMAT_R32G32_UINT: return WGPUTextureFormat_RG32Uint;
-		case DATA_FORMAT_R32G32_SINT: return WGPUTextureFormat_RG32Sint;
-		case DATA_FORMAT_R32G32_SFLOAT: return WGPUTextureFormat_RG32Float;
-		case DATA_FORMAT_R32G32B32A32_UINT: return WGPUTextureFormat_RGBA32Uint;
-		case DATA_FORMAT_R32G32B32A32_SINT: return WGPUTextureFormat_RGBA32Sint;
-		case DATA_FORMAT_R32G32B32A32_SFLOAT: return WGPUTextureFormat_RGBA32Float;
-		case DATA_FORMAT_A2B10G10R10_UNORM_PACK32: return WGPUTextureFormat_RGB10A2Unorm;
-		case DATA_FORMAT_B10G11R11_UFLOAT_PACK32: return WGPUTextureFormat_RG11B10Ufloat;
-		case DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32: return WGPUTextureFormat_RGB9E5Ufloat;
-		case DATA_FORMAT_D16_UNORM: return WGPUTextureFormat_Depth16Unorm;
-		case DATA_FORMAT_D32_SFLOAT: return WGPUTextureFormat_Depth32Float;
-		case DATA_FORMAT_X8_D24_UNORM_PACK32: return WGPUTextureFormat_Depth24Plus;
-		case DATA_FORMAT_D24_UNORM_S8_UINT: return WGPUTextureFormat_Depth24PlusStencil8;
-		case DATA_FORMAT_D32_SFLOAT_S8_UINT: return WGPUTextureFormat_Depth32FloatStencil8;
-		case DATA_FORMAT_S8_UINT: return WGPUTextureFormat_Stencil8;
+		// R16/RG16/RGBA16 Unorm/Snorm: not in emdawnwebgpu 4.0.10, use float fallback.
+		case DATA_FORMAT_R16_UNORM:
+		case DATA_FORMAT_R16_SNORM: return WGPUTextureFormat_R16Float;
+		case DATA_FORMAT_R16G16_UNORM:
+		case DATA_FORMAT_R16G16_SNORM: return WGPUTextureFormat_RG16Float;
+		case DATA_FORMAT_R16G16B16A16_UNORM:
+		case DATA_FORMAT_R16G16B16A16_SNORM: return WGPUTextureFormat_RGBA16Float;
 		// No depth16+stencil8 in WebGPU; use depth24plus-stencil8 as nearest approximation.
 		case DATA_FORMAT_D16_UNORM_S8_UINT: return WGPUTextureFormat_Depth24PlusStencil8;
 		default: {
 			static thread_local LocalVector<int> warned_formats;
-			int fmt = (int)p_format;
+			int ifmt = (int)p_format;
 			bool already_warned = false;
 			for (uint32_t i = 0; i < warned_formats.size(); i++) {
-				if (warned_formats[i] == fmt) { already_warned = true; break; }
+				if (warned_formats[i] == ifmt) { already_warned = true; break; }
 			}
 			if (!already_warned) {
-				warned_formats.push_back(fmt);
-				WARN_PRINT(vformat("WebGPU: Unsupported DataFormat %d (further occurrences suppressed)", fmt));
+				warned_formats.push_back(ifmt);
+				WARN_PRINT(vformat("WebGPU: Unsupported DataFormat %d (further occurrences suppressed)", ifmt));
 			}
 			return WGPUTextureFormat_Undefined;
 		}
