@@ -824,15 +824,7 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 		actions.base_texture_binding_index = 1;
 		actions.texture_layout_set = RenderForwardMobile::MATERIAL_UNIFORM_SET;
 		actions.base_uniform_string = "material.";
-#ifdef WEBGPU_ENABLED
-		// WebGPU maxInterStageShaderVariables is typically 16. Built-in varyings
-		// use locations 0-8; locations 9 (dp_clip), 12-13 (motion vectors), and
-		// 14 (point_coord) require features unavailable in WebGPU (dual paraboloid,
-		// multiview). Start user varyings at 10 to allow 6 user varying slots.
-		actions.base_varying_index = 10;
-#else
 		actions.base_varying_index = 15;
-#endif
 
 		actions.default_filter = ShaderLanguage::FILTER_LINEAR_MIPMAP;
 		actions.default_repeat = ShaderLanguage::REPEAT_ENABLE;
