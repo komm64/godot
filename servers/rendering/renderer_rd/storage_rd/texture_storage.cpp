@@ -4599,7 +4599,15 @@ uint32_t TextureStorage::render_target_get_color_usage_bits(bool p_msaa) {
 	if (p_msaa) {
 		return RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
 	} else {
-		// FIXME: Storage bit should only be requested when FSR is required.
-		return RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
+		uint32_t bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+#ifndef WEBGPU_ENABLED
+		// Storage bit is needed for FSR and some post-processing effects.
+		// On WebGPU, StorageBinding prevents sRGB texture views (Dawn rejects
+		// sRGB viewFormats on storage textures), which causes Forward Mobile to
+		// render in linear 8-bit UNORM instead of sRGB — producing washed-out
+		// colors. FSR is not available on WebGPU/Forward Mobile, so omit it.
+		bits |= RD::TEXTURE_USAGE_STORAGE_BIT;
+#endif
+		return bits;
 	}
 }

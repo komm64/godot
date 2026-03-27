@@ -754,7 +754,7 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	desc.usage = tex->usage;
 
 	// Allow reinterpretation between sRGB and linear variants via texture views.
-	// However, sRGB viewFormats are incompatible with StorageBinding in WebGPU,
+	// sRGB viewFormats are incompatible with StorageBinding in WebGPU/Dawn,
 	// so skip adding them for storage textures.
 	WGPUTextureFormat srgb_compat = _get_srgb_view_format(tex->format);
 	if (srgb_compat != WGPUTextureFormat_Undefined && !(tex->usage & WGPUTextureUsage_StorageBinding)) {
