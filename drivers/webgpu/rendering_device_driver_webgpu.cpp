@@ -3629,17 +3629,21 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 	ERR_FAIL_NULL(src);
 	ERR_FAIL_NULL(dst);
 
-	// If the source buffer has a shadow map (CPU-side staging buffer), write
-	// directly to the destination GPU buffer via the queue.  The GPU staging
-	// buffer was never populated because WebGPU buffer mapping is async
-	// and the shadow map is our CPU fallback.
+	// If the source buffer has a shadow map (CPU-side staging buffer), flush
+	// the shadow map to the staging buffer's GPU handle first via the queue,
+	// then use the command encoder to copy staging→dst.  We must NOT write
+	// directly to dst via wgpuQueueWriteBuffer because writeBuffer calls are
+	// NOT ordered relative to draw commands within the same submission — they
+	// all take effect before any draw, so every canvas in the frame would see
+	// the last-written value rather than the per-canvas value.  Using the
+	// encoder copy preserves the staging→dst copy order relative to draws.
 	if (src->shadow_map) {
 		for (uint32_t i = 0; i < p_regions.size(); i++) {
 			const BufferCopyRegion &region = p_regions[i];
 			uint64_t size = (region.size + 3) & ~3ULL;
-			wgpuQueueWriteBuffer(queue, dst->handle, region.dst_offset, src->shadow_map + region.src_offset, size);
+			wgpuQueueWriteBuffer(queue, src->handle, region.src_offset, src->shadow_map + region.src_offset, size);
 		}
-		return;
+		// Fall through to encoder copy below.
 	}
 
 	cmd->end_active_encoder();
