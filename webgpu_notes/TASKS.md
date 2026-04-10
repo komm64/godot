@@ -1740,3 +1740,161 @@ When debugging issues, check these common WebGPU problems:
 - [ ] NAGA does not support `OpIsInf` — avoid `isinf()` in shaders for WebGPU
 - [ ] Binding arrays: `WGPUBindGroupLayoutEntry.count` must match shader's array size
 - [ ] Cube texture views: ensure view dimension matches what shader expects (Cube vs 2D)
+
+---
+
+## Phase 7: Audit & Hardening (April 2026)
+
+> **Goal**: Systematically investigate and fix bugs, stubs, and correctness issues found in a comprehensive code audit of the WebGPU driver. Each item needs investigation first (is it a real bug or acceptable?), then a fix or explicit "won't fix" with reasoning.
+>
+> **All line numbers reference `drivers/webgpu/rendering_device_driver_webgpu.cpp` unless noted otherwise.**
+>
+> **Last Updated**: April 9, 2026
+
+### Task 7.1: Fence signaling is immediate (no GPU wait) `[SERIAL]`
+**Status**: `TODO`
+**Severity**: CRITICAL
+**Lines**: 1585-1586
+**Issue**: `fence->signaled = true` is set immediately without waiting for GPU work to complete. TODO comment says to use `wgpuQueueOnSubmittedWorkDone()` callback.
+**Risk**: Data races if anything reads back GPU results gated on fence completion. Premature buffer destruction.
+**Investigation**: Check all callers of `fence_wait()` / `fence_is_signaled()` in `rendering_device.cpp` to understand what depends on fences. On single-threaded WASM, the callback can't fire until the JS event loop runs, so true async fencing may not be feasible — document whether the current behavior is "good enough" or needs a workaround.
+
+### Task 7.2: MSAA resolve is unimplemented `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: CRITICAL
+**Lines**: 3672-3674
+**Issue**: `command_resolve_texture()` is a stub that prints WARN_PRINT_ONCE and returns. MSAA rendering silently fails to resolve.
+**Investigation**: Check if any current demo/scene actually enables MSAA (2x/4x/8x). If not used yet, this is latent. If the Forward Mobile renderer uses MSAA by default, this is actively broken. Implement via a minimal render pass with MSAA texture as color attachment and resolve target.
+
+### Task 7.3: Indirect draw count buffer ignored `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: CRITICAL
+**Lines**: 4570-4591
+**Issue**: `command_render_draw_indexed_indirect_count()` and `command_render_draw_indirect_count()` ignore the count buffer and always use `p_max_draw_count`. This draws too many primitives.
+**Investigation**: Check if Forward Mobile uses indirect draw with count (Forward+ does for GPU culling, but Mobile may not). If Mobile doesn't use it, this is latent. WebGPU has `indirect-first-instance` but no `multi-draw-indirect-count` — may need a compute pass to read the count and dispatch individual indirect draws.
+
+### Task 7.4: `buffer_unmap` never flushes — `map_dirty` never set `[SERIAL]`
+**Status**: `TODO`
+**Severity**: CRITICAL
+**Lines**: 491-495, `webgpu_objects.h`
+**Issue**: `buffer_unmap()` checks `buf->map_dirty` before flushing via `wgpuQueueWriteBuffer()`, but `map_dirty` is never set to `true` anywhere in the codebase. This means CPU-side buffer writes through map/unmap are silently lost.
+**Investigation**: Grep for `map_dirty` across all files. Check if `buffer_map()` sets it. Check if writes go through a different path (direct `wgpuQueueWriteBuffer` in `buffer_update`). The demos work, so either this path isn't used, or writes flow through `buffer_update()` instead. Clarify the intended write path and fix or remove the dead code.
+
+### Task 7.5: Dynamic buffer offsets always return 0 `[SERIAL]`
+**Status**: `TODO`
+**Severity**: HIGH
+**Lines**: 3585-3586
+**Issue**: `uniform_set_get_dynamic_offset()` has a TODO and returns 0. Dynamic uniform/storage buffers bind at offset 0 regardless of actual offset.
+**Investigation**: Check if Godot's Forward Mobile renderer uses dynamic uniform buffers. If it does, this would cause all per-object uniforms to read from the same buffer location. The push constant ring buffer uses its own dynamic offset mechanism (bind group 3, binding 120), so push constants are unaffected. Determine if this function is actually called and with what arguments.
+
+### Task 7.6: Reverse format mapping incomplete `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: HIGH
+**Lines**: 1290-1295
+**Issue**: `_wgpu_to_data_format()` only maps `BGRA8Unorm` and `RGBA8Unorm`. All other formats return `DATA_FORMAT_MAX`.
+**Investigation**: Check all callers. If only used for swap chain format detection, the current 2-format mapping is sufficient. If used for texture format queries elsewhere, needs full reverse mapping table (invert `pixel_formats_webgpu.h`).
+
+### Task 7.7: Texture bytes-per-pixel hardcoded to 4 `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: HIGH
+**Lines**: 895, 905, 929
+**Issue**: `texture_get_allocation_size()`, `texture_get_copyable_layout()`, and `texture_get_data()` all hardcode `bpp = 4` (assumes RGBA8). Wrong for compressed, single-channel, or 16-bit formats.
+**Investigation**: Check if `texture_get_data()` is called for non-RGBA8 textures. The `CompressedTexture2D::get_image()` fix we committed bypasses GPU readback entirely, which may mask this bug. Build a proper bpp lookup from `DataFormat` and replace all three sites.
+
+### Task 7.8: Buffer mapping returns stale/zero data `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: HIGH
+**Lines**: 438-478
+**Issue**: `buffer_map()` returns `shadow_map` pointer immediately while `wgpuBufferMapAsync()` runs asynchronously. Caller gets previous frame's data or zeros on first call.
+**Investigation**: This is a fundamental WebGPU limitation on single-threaded WASM — synchronous readback is impossible. Check if any Godot code depends on `buffer_map()` returning current-frame data. The `CompressedTexture2D` fix (loading from disk) is one workaround. Document the one-frame-behind semantics and check if other readback paths need similar disk-load fallbacks.
+
+### Task 7.9: Alpha write mask stripped for all BGRA8 pipelines `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: HIGH
+**Lines**: 5105-5106
+**Issue**: Alpha writes are stripped for ALL pipelines targeting `BGRA8Unorm` format, not just swap chain. Same shader used for swap chain AND offscreen BGRA8 render targets gets different alpha behavior.
+**Investigation**: Check if any offscreen render targets use BGRA8Unorm. If all offscreen targets use RGBA8, this is safe. If not, need to key the alpha stripping on "is swap chain target" rather than format alone. Check `render_target_create()` to see what format offscreen targets use.
+
+### Task 7.10: 16-bit Unorm/Snorm → Float silent remapping `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: 1248-1282
+**Issue**: `R16_UNORM`, `R16_SNORM`, `RG16_UNORM`, `RG16_SNORM`, `RGBA16_UNORM`, `RGBA16_SNORM` all mapped to their Float equivalents because emdawnwebgpu 4.0.10 doesn't support 16-bit norm formats. This changes data interpretation.
+**Investigation**: Check if any Godot textures or render targets use 16-bit norm formats. Check if newer emdawnwebgpu versions support `unorm16-texture-formats` / `snorm16-texture-formats` features. If so, upgrade emdawnwebgpu and use native formats.
+
+### Task 7.11: Swap chain format hardcoded to BGRA8Unorm `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: 1721
+**Issue**: Swap chain format hardcoded instead of queried from surface capabilities.
+**Investigation**: Check `wgpuSurfaceGetCapabilities()` availability in emdawnwebgpu. If available, query preferred format and use it. Chrome always provides BGRA8, but other browsers (Firefox, Safari) may differ.
+
+### Task 7.12: Sampler filter validation always returns true `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: 1410-1415
+**Issue**: `sampler_is_format_supported_for_filter()` always returns true. R32Float, RG32Float, RGBA32Float are not guaranteed filterable in WebGPU — requires `float32-filterable` feature.
+**Investigation**: Check if the `float32-filterable` feature is requested at device creation. If requested, returning true is correct. If not, linear filtering on float32 formats will cause GPU validation errors at draw time.
+
+### Task 7.13: Depth fallback substitution produces wrong values `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: 3064-3075
+**Issue**: Depth textures in Float-expecting slots are replaced with a 4×4 RGBA8 fallback. If the shader expects actual depth values (shadow comparisons), the fallback produces garbage.
+**Investigation**: Check which shaders bind depth textures as Float. In Forward Mobile, shadow maps are typically sampled with comparison samplers (handled correctly), but some post-processing effects may sample depth as Float. Test with a scene that has shadows to see if visual artifacts occur.
+
+### Task 7.14: Sync scope heuristic may miss transitions `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: 4001-4049
+**Issue**: Encoder split detection (for cross-pass texture read-after-write) only checks if texture is "still an attachment." Doesn't check usage flags — a texture transitioning from write to read on the same attachment could be missed.
+**Investigation**: Read the sync scope detection code carefully. Create a test case where texture X is written as color attachment in pass A, then read as texture binding in pass B. Verify the encoder split triggers correctly. Check WebGPU validation output in Chrome DevTools.
+
+### Task 7.15: WGUniformSet temp_views may leak `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: `webgpu_objects.h:194-195`, ~3094-3098
+**Issue**: Temporary texture views created during bind group creation are stored in `WGUniformSet::temp_views`. These should be released in `uniform_set_free()`, but no destructor handles them automatically.
+**Investigation**: Read `uniform_set_free()` to verify it iterates and releases `temp_views`. If not, add cleanup. Also check `rebind_cache` cleanup.
+
+### Task 7.16: Push constant ring overflow `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: 3878-3939, header:89
+**Issue**: Ring buffer is 256KB / 256B slots = 1024 draws before wrap. On wrap, shadow buffer is flushed and offset resets. If GPU hasn't consumed slot 0 by then, data is overwritten.
+**Investigation**: In practice, queue submit between frames should ensure GPU consumption. Verify by logging push_constant_ring_offset at frame boundaries. Consider adding a frame-boundary reset or grow-on-overflow strategy if complex scenes exceed 1024 draws.
+
+### Task 7.17: Specialized shader module cleanup `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: 4840-4855, 5165
+**Issue**: Specialized shader modules created at pipeline creation time may not be released in `pipeline_free()`.
+**Investigation**: Read `render_pipeline_free()` and `compute_pipeline_free()` — check if they release `WGPipelineWrapper::specialized_modules`. If not, these WGSL modules leak on pipeline destruction.
+
+### Task 7.18: WGSL string remapping fragility `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: MEDIUM
+**Lines**: 2134-2203
+**Issue**: Format name remapping in generated WGSL uses in-place `memcpy` assuming exact string length match (e.g., "r8unorm" → "r32float" must be same length). If Naga output format names change, replacements silently corrupt the WGSL.
+**Investigation**: Verify that the string lengths actually match for each replacement pair. Add assertions or switch to `String::replace()` with full WGSL rebuild for safety. Check if naga-converter version upgrades could change output format names.
+
+### Task 7.19: Swap chain LoadOp forced to Clear `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: LOW
+**Lines**: 4131-4136
+**Issue**: Swap chain render passes force `LoadOp_Clear` even if `Load` was requested, since WebGPU swap chain textures have undefined content each frame. Effects relying on previous frame content on swap chain won't work.
+**Investigation**: Check if any Godot rendering path relies on swap chain LoadOp_Load (preserving previous frame). If so, need a persistent texture + blit approach. This is a known WebGPU spec limitation, not a bug — but should be documented.
+
+### Task 7.20: `command_render_clear_attachments` not implemented `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: LOW
+**Lines**: 4458-4459
+**Issue**: Mid-pass attachment clearing is not implemented. WebGPU doesn't support `vkCmdClearAttachments` equivalent.
+**Investigation**: Check if Forward Mobile ever calls this. If not, leave as-is. If needed, can be emulated by ending the current render pass, starting a new one with Clear load ops, then starting another to continue rendering.
+
+### Task 7.21: Debug labels not implemented `[PARALLEL]`
+**Status**: `TODO`
+**Severity**: COSMETIC
+**Lines**: 5514-5522
+**Issue**: `buffer_set_label()`, `texture_set_label()` etc. are stubs. Not functionally important but useful for GPU debugging in Chrome DevTools.
+**Investigation**: `wgpuBufferSetLabel()`, `wgpuTextureSetLabel()` etc. are available in emdawnwebgpu. Low-effort to implement — just call the corresponding WebGPU API.
