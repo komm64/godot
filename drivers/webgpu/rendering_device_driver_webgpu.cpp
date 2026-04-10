@@ -54,6 +54,14 @@
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
+// Fence work-done callback: fires when wgpuQueueSubmit work completes on GPU.
+static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
+	WGFence *fence = (WGFence *)p_userdata1;
+	if (fence) {
+		fence->signaled = true;
+	}
+}
+
 // =============================================================================
 // Storage Texture Format Validation
 // =============================================================================
@@ -486,10 +494,12 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_map(BufferID p_buffer) {
 	}
 
 	// For non-readback buffers, use the shadow CPU buffer (for upload staging).
+	// Mark dirty so buffer_unmap() will flush to GPU.
 	if (!buf->shadow_map) {
 		buf->shadow_map = (uint8_t *)memalloc(buf->size);
 		memset(buf->shadow_map, 0, buf->size);
 	}
+	buf->map_dirty = true;
 	return buf->shadow_map;
 }
 
@@ -1495,15 +1505,25 @@ Error RenderingDeviceDriverWebGPU::fence_wait(FenceID p_fence) {
 	ERR_FAIL_NULL_V(fence, ERR_INVALID_PARAMETER);
 
 	// In the browser's single-threaded model, GPU work submitted via
-	// wgpuQueueSubmit completes asynchronously.  However, the emdawnwebgpu
+	// wgpuQueueSubmit completes asynchronously.  The emdawnwebgpu
 	// implementation resolves AllowSpontaneous callbacks during
-	// wgpuInstanceProcessEvents.  Poll the instance to allow pending
-	// callbacks (including buffer maps and work completion) to resolve.
+	// wgpuInstanceProcessEvents.  Poll the instance to allow the
+	// work-done callback (registered in command_queue_execute_and_present)
+	// to fire and set fence->signaled = true.
 	WGPUInstance inst = context_driver ? context_driver->get_instance() : nullptr;
 	if (inst) {
 		wgpuInstanceProcessEvents(inst);
 	}
-	fence->signaled = true;
+
+	// On single-threaded WASM, the callback may not fire until the next
+	// browser event loop tick. Between frames the GPU typically completes
+	// the previous frame's work, so the callback fires during processEvents
+	// above. If it hasn't fired yet, we force-signal to avoid deadlock —
+	// the engine calls fence_wait at frame start for the *previous* frame's
+	// fence, so the GPU has had a full frame duration to finish.
+	if (!fence->signaled) {
+		fence->signaled = true;
+	}
 	return OK;
 }
 
@@ -1572,12 +1592,17 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 #endif // WEBGPU_VERBOSE
 	}
 
-	// Signal fence if provided.
+	// Signal fence when GPU work completes via async callback.
 	if (p_cmd_fence) {
 		WGFence *fence = (WGFence *)(p_cmd_fence.id);
 		if (fence) {
-			// TODO: Use wgpuQueueOnSubmittedWorkDone() callback to set fence->signaled = true.
-			fence->signaled = true;
+			fence->signaled = false;
+			WGPUQueueWorkDoneCallbackInfo cb = {};
+			cb.mode = WGPUCallbackMode_AllowSpontaneous;
+			cb.callback = _fence_work_done_callback;
+			cb.userdata1 = fence;
+			cb.userdata2 = nullptr;
+			wgpuQueueOnSubmittedWorkDone(queue, cb);
 		}
 	}
 

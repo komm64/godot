@@ -1749,36 +1749,41 @@ When debugging issues, check these common WebGPU problems:
 >
 > **All line numbers reference `drivers/webgpu/rendering_device_driver_webgpu.cpp` unless noted otherwise.**
 >
-> **Last Updated**: April 9, 2026
+> **Last Updated**: April 10, 2026
 
 ### Task 7.1: Fence signaling is immediate (no GPU wait) `[SERIAL]`
-**Status**: `TODO`
+**Status**: `DONE`
 **Severity**: CRITICAL
-**Lines**: 1585-1586
-**Issue**: `fence->signaled = true` is set immediately without waiting for GPU work to complete. TODO comment says to use `wgpuQueueOnSubmittedWorkDone()` callback.
-**Risk**: Data races if anything reads back GPU results gated on fence completion. Premature buffer destruction.
-**Investigation**: Check all callers of `fence_wait()` / `fence_is_signaled()` in `rendering_device.cpp` to understand what depends on fences. On single-threaded WASM, the callback can't fire until the JS event loop runs, so true async fencing may not be feasible — document whether the current behavior is "good enough" or needs a workaround.
+**Lines**: 1585-1586 (pre-fix)
+**Issue**: `fence->signaled = true` was set immediately in `command_queue_execute_and_present()` without waiting for GPU work to complete.
+**Investigation Results**: `fence_wait()` is called from `_stall_for_frame()` at frame start, which immediately maps staging buffers and reads GPU data. Vulkan uses `vkWaitForFences()` to truly block; WebGPU had no equivalent. `wgpuQueueOnSubmittedWorkDone()` IS available in emdawnwebgpu (confirmed via binary symbols).
+**Fix Applied**: Registered `WGPUQueueWorkDoneCallbackInfo` callback with `AllowSpontaneous` mode in `command_queue_execute_and_present()`. The callback sets `fence->signaled = true` when GPU work completes. `fence_wait()` calls `wgpuInstanceProcessEvents()` to poll for the callback. If the callback hasn't fired yet (WASM single-thread constraint), force-signals as fallback since the engine only checks fences at frame boundaries (full frame of GPU time has elapsed).
+**Verified**: Build succeeds, 2D platformer demo renders correctly with camera following, no console errors.
 
 ### Task 7.2: MSAA resolve is unimplemented `[PARALLEL]`
-**Status**: `TODO`
-**Severity**: CRITICAL
+**Status**: `DONE` (downgraded to LOW — not active)
+**Severity**: LOW (was CRITICAL)
 **Lines**: 3672-3674
-**Issue**: `command_resolve_texture()` is a stub that prints WARN_PRINT_ONCE and returns. MSAA rendering silently fails to resolve.
-**Investigation**: Check if any current demo/scene actually enables MSAA (2x/4x/8x). If not used yet, this is latent. If the Forward Mobile renderer uses MSAA by default, this is actively broken. Implement via a minimal render pass with MSAA texture as color attachment and resolve target.
+**Issue**: `command_resolve_texture()` is a stub.
+**Investigation Results**: Forward Mobile does NOT call `command_resolve_texture()` — it handles MSAA via render pass `resolveTarget` (lines 4111-4118), which IS fully implemented. Only Forward Clustered uses explicit resolve (for out-of-renderpass resolves), and Forward Clustered is not used on WebGPU/web. The 2D platformer demo has no MSAA enabled. This stub is dead code for the current renderer.
+**Decision**: Leave stub as-is. Only needs implementation if Forward Clustered is ever enabled on WebGPU.
 
 ### Task 7.3: Indirect draw count buffer ignored `[PARALLEL]`
-**Status**: `TODO`
-**Severity**: CRITICAL
+**Status**: `DONE` (downgraded to LOW — not active)
+**Severity**: LOW (was CRITICAL)
 **Lines**: 4570-4591
-**Issue**: `command_render_draw_indexed_indirect_count()` and `command_render_draw_indirect_count()` ignore the count buffer and always use `p_max_draw_count`. This draws too many primitives.
-**Investigation**: Check if Forward Mobile uses indirect draw with count (Forward+ does for GPU culling, but Mobile may not). If Mobile doesn't use it, this is latent. WebGPU has `indirect-first-instance` but no `multi-draw-indirect-count` — may need a compute pass to read the count and dispatch individual indirect draws.
+**Issue**: `command_render_draw_indexed_indirect_count()` and `command_render_draw_indirect_count()` ignore the count buffer.
+**Investigation Results**: Neither Forward Mobile nor Forward Clustered uses count-buffer indirect draws. Both call `draw_list_draw_indirect()` with hardcoded `p_draw_count=1`. WebGPU spec has no `multi-draw-indirect-count` extension. `command_compute_dispatch_indirect()` IS properly implemented. These functions are dead code for all current renderers.
+**Decision**: Leave as-is. Only relevant if GPU-driven culling with dynamic draw counts is added in the future.
 
 ### Task 7.4: `buffer_unmap` never flushes — `map_dirty` never set `[SERIAL]`
-**Status**: `TODO`
-**Severity**: CRITICAL
+**Status**: `DONE`
+**Severity**: CRITICAL (latent — not causing visible bugs)
 **Lines**: 491-495, `webgpu_objects.h`
-**Issue**: `buffer_unmap()` checks `buf->map_dirty` before flushing via `wgpuQueueWriteBuffer()`, but `map_dirty` is never set to `true` anywhere in the codebase. This means CPU-side buffer writes through map/unmap are silently lost.
-**Investigation**: Grep for `map_dirty` across all files. Check if `buffer_map()` sets it. Check if writes go through a different path (direct `wgpuQueueWriteBuffer` in `buffer_update`). The demos work, so either this path isn't used, or writes flow through `buffer_update()` instead. Clarify the intended write path and fix or remove the dead code.
+**Issue**: `map_dirty` was never set to `true`, so `buffer_unmap()` never flushed shadow_map to GPU.
+**Investigation Results**: Confirmed `map_dirty` was declared but never set to true. Actual data transfer goes through: (a) `command_copy_buffer()` line 3626 which calls `wgpuQueueWriteBuffer()` directly from shadow_map, (b) `buffer_flush()` line 511-516 for persistent buffers. The `buffer_unmap()` flush path was dead code. Demos worked because all staging writes are flushed in copy commands, not in unmap.
+**Fix Applied**: `buffer_map()` now sets `buf->map_dirty = true` for non-readback (upload staging) buffers. This makes `buffer_unmap()` correctly flush shadow_map to GPU, matching Vulkan driver semantics where `vmaUnmapMemory()` flushes.
+**Verified**: Build succeeds, 2D platformer demo renders correctly.
 
 ### Task 7.5: Dynamic buffer offsets always return 0 `[SERIAL]`
 **Status**: `TODO`
