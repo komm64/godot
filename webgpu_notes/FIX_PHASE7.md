@@ -117,5 +117,5 @@ If 2D is still glitchy at step 4, we'll have isolated it to the dynamic-offset c
 
 - **Step 1 (Task 7.7):** DONE — 3d_platformer + 2d_platformer PASS (gpuErrors=0, allErrors=0). Committed: `6d4b9397a9` (godot-webgpu), `6a5d0661d` (shiny_gen_1).
 - **Step 2 (Task 7.12):** DONE — 3d_platformer + 2d_platformer PASS (gpuErrors=0, allErrors=0). No "float32-filterable NOT available" warning — feature granted by adapter. Committed: `63d0d10f4e` (godot-webgpu). No shiny_gen_1 change (only gitignored wasm updated).
-- **Step 3 (Task 7.8):** _pending_
-- **Step 4 (Task 7.5):** _pending_
+- **Step 3 (Task 7.8):** DONE — 3d_platformer + 2d_platformer PASS (gpuErrors=0, allErrors=0). Committed: `c1594deb3a` (godot-webgpu). No shiny_gen_1 change (only gitignored wasm updated).
+- **Step 4 (Task 7.5):** _pending — HIGH risk, prime 2D regression suspect_
