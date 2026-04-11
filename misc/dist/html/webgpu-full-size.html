@@ -152,6 +152,7 @@ async function initWebGPU() {
 		'indirect-first-instance',
 		'rg11b10ufloat-renderable',
 		'bgra8unorm-storage',
+		'float32-filterable',
 	];
 	const requiredFeatures = wantedFeatures.filter((f) => adapter.features.has(f));
 

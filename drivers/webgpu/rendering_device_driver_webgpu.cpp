@@ -493,6 +493,17 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 		print_verbose("WebGPU: Timestamp query feature is available.");
 	}
 
+	// float32-filterable: required for linear sampling of R32Float / RG32Float / RGBA32Float.
+	// Forward Mobile's HDR post-processing path samples 32F render targets with linear
+	// samplers, so without this feature those samplers must fall back to NEAREST.
+	// Feature name enum value 13 per WebGPU spec (not yet in the emdawnwebgpu 4.0.10 header enum).
+	float32_filterable_supported = wgpuDeviceHasFeature(device, (WGPUFeatureName)13);
+	if (float32_filterable_supported) {
+		print_verbose("WebGPU: float32-filterable feature is available.");
+	} else {
+		WARN_PRINT("WebGPU: float32-filterable feature NOT available — 32F linear sampling will fall back to nearest.");
+	}
+
 	// 16-bit SNORM/UNORM texture formats (texture-formats-tier1) are not available
 	// in the base emdawnwebgpu 4.0.10 API. Mark as unavailable — these formats are
 	// mapped to Undefined in pixel_formats_webgpu.h.
@@ -1633,10 +1644,44 @@ bool RenderingDeviceDriverWebGPU::sampler_is_format_supported_for_filter(DataFor
 	if (p_filter == SAMPLER_FILTER_NEAREST) {
 		return true; // All formats support nearest filtering.
 	}
-	// TODO: Check if float32-filterable feature is available for R32Float, etc.
-	// Integer formats don't support linear filtering.
-	// Depth formats may or may not depending on implementation.
-	return true;
+	// Linear filtering rules on WebGPU:
+	//   - 32-bit float formats (R32F / RG32F / RGBA32F) require the "float32-filterable"
+	//     optional feature. Without it the sampler must use NEAREST.
+	//   - Integer formats (UINT / SINT) are never filterable in any API.
+	//   - All other formats (8/16-bit normalized, 16F, SRGB, BCn/ETC2/ASTC, depth) are
+	//     filterable on any spec-compliant WebGPU implementation.
+	switch (p_format) {
+		// 32-bit float formats — gated on the float32-filterable optional feature.
+		case DATA_FORMAT_R32_SFLOAT:
+		case DATA_FORMAT_R32G32_SFLOAT:
+		case DATA_FORMAT_R32G32B32_SFLOAT:
+		case DATA_FORMAT_R32G32B32A32_SFLOAT:
+			return float32_filterable_supported;
+
+		// Integer formats — never filterable.
+		case DATA_FORMAT_R8_UINT:
+		case DATA_FORMAT_R8_SINT:
+		case DATA_FORMAT_R8G8_UINT:
+		case DATA_FORMAT_R8G8_SINT:
+		case DATA_FORMAT_R8G8B8A8_UINT:
+		case DATA_FORMAT_R8G8B8A8_SINT:
+		case DATA_FORMAT_R16_UINT:
+		case DATA_FORMAT_R16_SINT:
+		case DATA_FORMAT_R16G16_UINT:
+		case DATA_FORMAT_R16G16_SINT:
+		case DATA_FORMAT_R16G16B16A16_UINT:
+		case DATA_FORMAT_R16G16B16A16_SINT:
+		case DATA_FORMAT_R32_UINT:
+		case DATA_FORMAT_R32_SINT:
+		case DATA_FORMAT_R32G32_UINT:
+		case DATA_FORMAT_R32G32_SINT:
+		case DATA_FORMAT_R32G32B32A32_UINT:
+		case DATA_FORMAT_R32G32B32A32_SINT:
+			return false;
+
+		default:
+			return true;
+	}
 }
 
 // =============================================================================

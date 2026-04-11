@@ -80,6 +80,7 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	WGPULimits device_limits = WGPU_LIMITS_INIT;
 	bool timestamp_supported = false;
 	bool has_texture_formats_tier1 = false;
+	bool float32_filterable_supported = false;
 
 	RenderingShaderContainerFormatWebGPU *shader_container_format = nullptr;
 
