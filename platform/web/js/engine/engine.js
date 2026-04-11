@@ -471,7 +471,13 @@ const Engine = (function () {
 					console.error(`[Godot] WebGPU device lost (reason: ${reason}): ${msg}`);
 				});
 				device.addEventListener('uncapturederror', function (event) {
-					console.error('[Godot] WebGPU uncaptured error:', event.error);
+					// Include the full error message — `event.error` alone only
+					// serializes to the constructor name ("GPUValidationError"),
+					// hiding the detail. `.message` contains the Dawn error text.
+					const err = event.error;
+					const kind = (err && err.constructor && err.constructor.name) || 'UnknownError';
+					const msg = (err && err.message) ? err.message : String(err);
+					console.error(`[Godot] WebGPU uncaptured error: ${kind}: ${msg}`);
 				});
 				return device;
 			});

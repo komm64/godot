@@ -60,6 +60,7 @@ struct WGTexture {
 	WGPUTexture handle = nullptr; // null for shared/sliced views (they don't own the GPU texture)
 	WGPUTexture view_source = nullptr; // always the owning WGPUTexture; inherited by shared/sliced textures
 	WGPUTextureView default_view = nullptr;
+	uint32_t debug_create_id = UINT32_MAX; // Monotonic counter for correlating [WGTEX] log lines.
 	WGPUTextureFormat format = WGPUTextureFormat_Undefined;
 	WGPUTextureDimension dimension = WGPUTextureDimension_2D;
 	WGPUTextureViewDimension view_dimension = WGPUTextureViewDimension_2D;
@@ -67,6 +68,10 @@ struct WGTexture {
 	uint32_t mipmaps = 1;
 	uint32_t layers = 1;
 	uint32_t sample_count = 1;
+	// For slice views (texture_create_shared_from_slice), the base offset of
+	// this view into the parent texture. 0/0 for non-slice textures.
+	uint32_t base_mipmap = 0;
+	uint32_t base_layer = 0;
 	WGPUTextureUsage usage = 0;
 	bool is_from_swap_chain = false;
 };

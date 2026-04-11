@@ -117,6 +117,11 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// Cube variant (6 layers) for BGL entries expecting TextureViewDimension::Cube.
 	WGPUTexture fallback_cube_texture = nullptr;
 	WGPUTextureView fallback_cube_texture_view = nullptr;
+	// Multisampled (4x) variant for BGL entries expecting multisampled=true.
+	// Used when a depth-format MSAA texture can't be sampled as UnfilterableFloat
+	// (e.g. ResolveRasterShaderRD binds a depth MSAA texture into a float MSAA slot).
+	WGPUTexture fallback_ms_texture = nullptr;
+	WGPUTextureView fallback_ms_texture_view = nullptr;
 
 	// --- Aliasing Stub Buffer ---
 	// Substituted for the second writable storage buffer binding when two

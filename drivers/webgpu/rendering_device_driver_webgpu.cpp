@@ -147,6 +147,14 @@ RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
 		wgpuTextureRelease(fallback_cube_texture);
 		fallback_cube_texture = nullptr;
 	}
+	if (fallback_ms_texture_view) {
+		wgpuTextureViewRelease(fallback_ms_texture_view);
+		fallback_ms_texture_view = nullptr;
+	}
+	if (fallback_ms_texture) {
+		wgpuTextureRelease(fallback_ms_texture);
+		fallback_ms_texture = nullptr;
+	}
 
 	// Release dummy samplers.
 	if (dummy_filtering_sampler) {
@@ -286,6 +294,32 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		}
 	}
 
+	// Create fallback multisampled texture (4x4, 4x MSAA, RenderAttachment usage
+	// required for MSAA textures). Used by ResolveRasterShaderRD and similar MSAA
+	// depth resolve shaders when the source is a depth format (can't be sampled
+	// as UnfilterableFloat in WebGPU). The shader reads zeros but no GPU errors.
+	{
+		WGPUTextureDescriptor td = {};
+		// MSAA textures require RenderAttachment usage; we never render to this
+		// texture but the usage flag is still required by the WebGPU spec.
+		td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment;
+		td.dimension = WGPUTextureDimension_2D;
+		td.size = { 4, 4, 1 };
+		td.format = WGPUTextureFormat_R32Float; // Non-filterable float.
+		td.mipLevelCount = 1;
+		td.sampleCount = 4;
+		fallback_ms_texture = wgpuDeviceCreateTexture(device, &td);
+		if (fallback_ms_texture) {
+			WGPUTextureViewDescriptor vd = {};
+			vd.format = WGPUTextureFormat_R32Float;
+			vd.dimension = WGPUTextureViewDimension_2D;
+			vd.mipLevelCount = 1;
+			vd.arrayLayerCount = 1;
+			vd.aspect = WGPUTextureAspect_All;
+			fallback_ms_texture_view = wgpuTextureCreateView(fallback_ms_texture, &vd);
+		}
+	}
+
 	// Create dummy samplers for BGL rebinding.
 	// When a bind group must be re-created with a different BGL (Comparison↔Filtering),
 	// these dummy samplers are substituted for the mismatched entries.
@@ -326,6 +360,117 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 
 	// Create shader container format.
 	shader_container_format = memnew(RenderingShaderContainerFormatWebGPU);
+
+	// Install main-thread JS diagnostic patches early — as soon as the device is
+	// ready, before any pipelines are created. This ensures we intercept EVERY
+	// createRenderPipeline/createShaderModule/createBindGroupLayout call. We also
+	// kick off a parallel createRenderPipelineAsync() to catch validation errors
+	// that the error-scope path misses (Dawn may defer validation past popErrorScope).
+	MAIN_THREAD_EM_ASM({
+		var d = Module['preinitializedWebGPUDevice'];
+		if (!d) { console.error('[DIAG-PATCH] preinitializedWebGPUDevice missing'); return; }
+
+		// Always-on uncaptured error logger.
+		if (!d._uncapturedPatched) {
+			d.addEventListener('uncapturederror', function(e) {
+				console.error('[Godot] WebGPU uncaptured error: ' + e.error.constructor.name);
+				console.error(e.error.message);
+			});
+			d._uncapturedPatched = true;
+		}
+
+		if (!d._pipelinePatched) {
+			var origCreate = d.createRenderPipeline.bind(d);
+			var origCreateAsync = d.createRenderPipelineAsync.bind(d);
+			var pipeCount = 0;
+			d.createRenderPipeline = function(desc) {
+				var myId = pipeCount++;
+				var label = (desc && desc.label) || '(unlabeled)';
+				// Error-scope path (may miss deferred-validation errors).
+				d.pushErrorScope('validation');
+				var pipeline = origCreate(desc);
+				d.popErrorScope().then(function(err) {
+					if (err) {
+						console.error('[JS-PCREATE-FAIL#' + myId + '] label="' + label + '" | ' + err.message.substring(0, 2000));
+					}
+				});
+				// Parallel async path (authoritative — catches all validation errors).
+				origCreateAsync(desc).then(function(_p) {
+					// Success — no-op.
+				}, function(err) {
+					var msg = (err && err.message) ? err.message : String(err);
+					console.error('[JS-PCREATE-ASYNC-FAIL#' + myId + '] label="' + label + '" | ' + msg.substring(0, 2000));
+				});
+				// Log every ENTER so we can correlate JS IDs with Godot pipe#N.
+				console.log('[JS-PCREATE-ENTER#' + myId + '] label="' + label + '"');
+				return pipeline;
+			};
+			d._pipelinePatched = true;
+			console.log('[DIAG-PATCH] createRenderPipeline patched on main thread (initialize)');
+		}
+
+		if (!d._shaderModPatched) {
+			var origCreateMod = d.createShaderModule.bind(d);
+			var modCount = 0;
+			d.createShaderModule = function(desc) {
+				var myId = modCount++;
+				var label = (desc && desc.label) || '(unlabeled)';
+				d.pushErrorScope('validation');
+				var mod = origCreateMod(desc);
+				d.popErrorScope().then(function(err) {
+					if (err) {
+						console.error('[JS-SMCREATE-FAIL#' + myId + '] label="' + label + '" | ' + err.message.substring(0, 2000));
+					}
+				});
+				if (mod && mod.getCompilationInfo) {
+					mod.getCompilationInfo().then(function(info) {
+						if (!info || !info.messages || info.messages.length === 0) return;
+						for (var i = 0; i < info.messages.length; i++) {
+							var m = info.messages[i];
+							if (m.type === 'error') {
+								console.error('[JS-SMCOMPILE-ERR#' + myId + '] label="' + label + '" line=' + m.lineNum + ':' + m.linePos + ' | ' + m.message.substring(0, 1200));
+							}
+						}
+					});
+				}
+				return mod;
+			};
+			d._shaderModPatched = true;
+			console.log('[DIAG-PATCH] createShaderModule patched on main thread (initialize)');
+		}
+
+		if (!d._bglPatched) {
+			var origBGL = d.createBindGroupLayout.bind(d);
+			d.createBindGroupLayout = function(desc) {
+				var label = (desc && desc.label) || '(unlabeled)';
+				d.pushErrorScope('validation');
+				var layout = origBGL(desc);
+				d.popErrorScope().then(function(err) {
+					if (err) {
+						console.error('[JS-BGL-FAIL] label="' + label + '" | ' + err.message.substring(0, 2000));
+					}
+				});
+				return layout;
+			};
+			d._bglPatched = true;
+		}
+
+		if (!d._plytPatched) {
+			var origPLYT = d.createPipelineLayout.bind(d);
+			d.createPipelineLayout = function(desc) {
+				var label = (desc && desc.label) || '(unlabeled)';
+				d.pushErrorScope('validation');
+				var layout = origPLYT(desc);
+				d.popErrorScope().then(function(err) {
+					if (err) {
+						console.error('[JS-PLYT-FAIL] label="' + label + '" | ' + err.message.substring(0, 2000));
+					}
+				});
+				return layout;
+			};
+			d._plytPatched = true;
+		}
+	});
 
 	return OK;
 }
@@ -772,9 +917,23 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 		desc.viewFormats = &srgb_compat;
 	}
 
+	// Set a fallback label in the descriptor BEFORE creation so Dawn's error
+	// formatter picks it up — Chrome/Dawn uses descriptor.label at creation time
+	// for error messages, NOT the mutable GPUObjectBase.label property that
+	// wgpuTextureSetLabel updates. Includes a monotonic counter so separate
+	// allocations with identical dimensions are distinguishable in the logs.
+	static uint32_t _tex_create_counter = 0;
+	uint32_t _tex_id = _tex_create_counter++;
+	char _tex_fallback[128];
+	snprintf(_tex_fallback, sizeof(_tex_fallback), "unnamed#%u %ux%ux%u mip%u fmt%d usage0x%x",
+			_tex_id, tex->width, tex->height, tex->layers, tex->mipmaps, (int)tex->format, (unsigned)tex->usage);
+	desc.label = { _tex_fallback, WGPU_STRLEN };
+
 	tex->handle = wgpuDeviceCreateTexture(device, &desc);
 	ERR_FAIL_COND_V(tex->handle == nullptr, TextureID());
 	tex->view_source = tex->handle; // Always the owning WGPUTexture; inherited by shared/sliced textures.
+	tex->debug_create_id = _tex_id;
+	print_line(vformat("[WGTEX] create id=%d %dx%dx%d mip=%d fmt=%d usage=0x%x", (int)_tex_id, (int)tex->width, (int)tex->height, (int)tex->layers, (int)tex->mipmaps, (int)tex->format, (unsigned)tex->usage));
 
 	// Create default view.
 	WGPUTextureViewDescriptor view_desc = {};
@@ -897,6 +1056,32 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared_from_slice(Tex
 	tex->handle = nullptr;
 	tex->layers = p_layers;
 	tex->mipmaps = p_mipmaps;
+
+	// Update slice-specific metadata so downstream code (uniform set creation,
+	// dimension fixups, allocation queries, subresource tracking) sees the
+	// correct subresource instead of the parent's full extent.
+	//
+	// Bug this fixes: without this, tex->view_dimension still says 2DArray
+	// (inherited from parent), so uniform_set_create's SAMPLER_WITH_TEXTURE
+	// fixup thinks the slice doesn't match shader-expected 2D and re-creates
+	// a view from view_source with baseMipLevel=0/baseArrayLayer=0 — i.e.
+	// ignoring the slice and sampling the parent's mip 0 layer 0.
+	tex->view_dimension = view_desc.dimension;
+
+	// Track the slice's base offset into the parent, so future dimension
+	// fixups can create correct subresource views rather than resetting to 0.
+	tex->base_mipmap = p_mipmap;
+	tex->base_layer = p_layer;
+
+	// Update width/height to the mip level's extent so allocation-size and
+	// similar queries return values for the actual subresource.
+	for (uint32_t m = 0; m < p_mipmap; m++) {
+		tex->width = MAX(1u, tex->width >> 1);
+		tex->height = MAX(1u, tex->height >> 1);
+		if (tex->depth > 1) {
+			tex->depth = MAX(1u, tex->depth >> 1);
+		}
+	}
 
 	return TextureID(tex);
 }
@@ -1792,71 +1977,7 @@ Error RenderingDeviceDriverWebGPU::swap_chain_resize(CommandQueueID p_cmd_queue,
 	config.height = height;
 	wgpuSurfaceConfigure(sc->surface, &config);
 
-	// Register uncaptured GPU error handler (always active — reports validation errors).
-	EM_ASM({
-		var d = Module['preinitializedWebGPUDevice'];
-		if (d && !d._uncapturedPatched) {
-			d.addEventListener('uncapturederror', function(e) {
-				console.error('[Godot] WebGPU uncaptured error: ' + e.error.constructor.name);
-				console.error(e.error.message);
-			});
-			d._uncapturedPatched = true;
-		}
-	});
-
-#ifdef WEBGPU_VERBOSE
-	// Diagnostic: verify JS-side canvas context state and monkey-patch GPU API
-	// calls with error scope checking for detailed validation error messages.
-	EM_ASM({
-		var c = document.querySelector('#canvas');
-		if (!c) { console.error('[DIAG-CFG] canvas element not found'); return; }
-		var ctx = c.getContext('webgpu');
-		console.log('[DIAG-CFG] canvas=' + c.tagName + '#' + c.id +
-			' drawingBuffer=' + c.width + 'x' + c.height +
-			' ctx=' + (ctx ? ctx.constructor.name : 'null'));
-		var d = Module['preinitializedWebGPUDevice'];
-		if (d && d.queue && !d.queue._submitPatched) {
-			var origSubmit = d.queue.submit.bind(d.queue);
-			var submitCount = 0;
-			d.queue.submit = function(cmdBufs) {
-				submitCount++;
-				d.pushErrorScope('validation');
-				var result = origSubmit(cmdBufs);
-				d.popErrorScope().then(function(error) {
-					if (error) {
-						console.error('[SUBMIT-ERROR] #' + submitCount + ' err=' + error.message);
-					}
-				});
-				return result;
-			};
-			d.queue._submitPatched = true;
-		}
-		if (d && !d._pipelinePatched) {
-			var origCreate = d.createRenderPipeline.bind(d);
-			d.createRenderPipeline = function(desc) {
-				d.pushErrorScope('validation');
-				var pipeline = origCreate(desc);
-				d.popErrorScope().then(function(err) {
-					if (err) { console.error('[PIPELINE-CREATE-ERROR] ' + err.message.substring(0, 1200)); }
-				});
-				return pipeline;
-			};
-			d._pipelinePatched = true;
-		}
-		if (d && !d._shaderModPatched) {
-			var origCreateMod = d.createShaderModule.bind(d);
-			d.createShaderModule = function(desc) {
-				d.pushErrorScope('validation');
-				var mod = origCreateMod(desc);
-				d.popErrorScope().then(function(err) {
-					if (err) { console.error('[SHADER-COMPILE-ERROR] ' + err.message.substring(0, 1200)); }
-				});
-				return mod;
-			};
-			d._shaderModPatched = true;
-		}
-	});
-#endif // WEBGPU_VERBOSE
+	// Uncaptured error listener + monkey patches are installed in initialize().
 
 	sc->width = width;
 	sc->height = height;
@@ -2079,6 +2200,11 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 	// Maps (set_index << 16 | binding) → true if the WGSL has sampler_comparison at this binding.
 	HashMap<uint32_t, bool> wgsl_is_comparison_sampler;
+
+	// Maps (set_index << 16 | binding) → true if the WGSL has texture_multisampled_*
+	// or texture_depth_multisampled_* at this binding. Used so BGL entries set
+	// texture.multisampled=true to match sampler2DMS (GLSL) bindings.
+	HashMap<uint32_t, bool> wgsl_is_multisampled_texture;
 
 	// Depth alias bindings: NAGA splits mixed-usage depth textures into two globals
 	// (one Depth at binding B, one Float alias at binding B+1). Track (set,B+1) pairs
@@ -2323,7 +2449,13 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		WGPUShaderModuleDescriptor mod_desc = {};
 		mod_desc.nextInChain = (WGPUChainedStruct *)&wgsl_source;
 
+		// Label the module so Dawn error messages (and JS-side patch logs) identify it.
+		String _mod_label = "mod:" + shader->name + ":stg" + itos((int)s.shader_stage);
+		CharString _mod_label_cs = _mod_label.utf8();
+		mod_desc.label = { _mod_label_cs.get_data(), WGPU_STRLEN };
+
 		WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &mod_desc);
+
 
 		// Scan WGSL for texture dimension declarations so the BGL uses the right viewDimension.
 		// NAGA format: "@group(G) @binding(B) var NAME: texture_TYPE<...>;"
@@ -2357,7 +2489,16 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					}
 					if (tp) {
 						WGPUTextureViewDimension dim = WGPUTextureViewDimension_Undefined;
-						if (strncmp(tp, "texture_depth_2d_array", 22) == 0) {
+						// Multisampled variants first (must precede plain texture_2d / texture_depth_2d).
+						if (strncmp(tp, "texture_depth_multisampled_2d", 29) == 0) {
+							dim = WGPUTextureViewDimension_2D;
+							uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
+							wgsl_is_multisampled_texture[key] = true;
+						} else if (strncmp(tp, "texture_multisampled_2d", 23) == 0) {
+							dim = WGPUTextureViewDimension_2D;
+							uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
+							wgsl_is_multisampled_texture[key] = true;
+						} else if (strncmp(tp, "texture_depth_2d_array", 22) == 0) {
 							dim = WGPUTextureViewDimension_2DArray;
 						} else if (strncmp(tp, "texture_depth_cube_array", 24) == 0) {
 							dim = WGPUTextureViewDimension_CubeArray;
@@ -2627,10 +2768,15 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						entry.bindingArraySize = 1;
 					}
 					{ uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
-					  entry.texture.sampleType = (wgsl_is_depth_texture.has(k) && wgsl_is_depth_texture[k])
-						  ? WGPUTextureSampleType_Depth : WGPUTextureSampleType_Float;
-					  entry.texture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D; }
-					entry.texture.multisampled = false;
+					  bool is_ms = wgsl_is_multisampled_texture.has(k) && wgsl_is_multisampled_texture[k];
+					  bool is_depth = wgsl_is_depth_texture.has(k) && wgsl_is_depth_texture[k];
+					  // Multisampled float textures must use UnfilterableFloat, not Float
+					  // (filtering is illegal for MSAA textures in WebGPU).
+					  entry.texture.sampleType = is_depth
+						  ? WGPUTextureSampleType_Depth
+						  : (is_ms ? WGPUTextureSampleType_UnfilterableFloat : WGPUTextureSampleType_Float);
+					  entry.texture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D;
+					  entry.texture.multisampled = is_ms; }
 					bge.layout_entry = entry;
 					bge.array_length = 1;
 				} break;
@@ -2651,10 +2797,21 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					tex_entry.binding = u.binding * 2 + 1;
 					tex_entry.visibility = vis;
 					{ uint32_t k = ((uint32_t)set << 16) | (u.binding * 2 + 1);
-					  tex_entry.texture.sampleType = (wgsl_is_depth_texture.has(k) && wgsl_is_depth_texture[k])
-						  ? WGPUTextureSampleType_Depth : WGPUTextureSampleType_Float;
-					  tex_entry.texture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D; }
-					tex_entry.texture.multisampled = false;
+					  bool is_ms = wgsl_is_multisampled_texture.has(k) && wgsl_is_multisampled_texture[k];
+					  bool is_depth = wgsl_is_depth_texture.has(k) && wgsl_is_depth_texture[k];
+					  // Multisampled float textures must use UnfilterableFloat
+					  // (filtering is illegal for MSAA textures in WebGPU).
+					  tex_entry.texture.sampleType = is_depth
+						  ? WGPUTextureSampleType_Depth
+						  : (is_ms ? WGPUTextureSampleType_UnfilterableFloat : WGPUTextureSampleType_Float);
+					  tex_entry.texture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D;
+					  tex_entry.texture.multisampled = is_ms;
+					  // MSAA texture bindings with UnfilterableFloat require a NonFiltering sampler —
+					  // override the sampler for this combined binding.
+					  if (is_ms && !is_depth) {
+						  samp_entry.sampler.type = WGPUSamplerBindingType_NonFiltering;
+					  }
+					}
 
 					bge.layout_entry = tex_entry; // Store texture entry as the primary.
 				} break;
@@ -2841,6 +2998,11 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		layout_desc.entryCount = entries.size();
 		layout_desc.entries = entries.size() > 0 ? entries.ptr() : nullptr;
 
+		// Label the BGL so JS-side patch logs identify it.
+		String _bgl_label = "bgl:" + shader->name + ":set" + itos((int)set);
+		CharString _bgl_label_cs = _bgl_label.utf8();
+		layout_desc.label = { _bgl_label_cs.get_data(), WGPU_STRLEN };
+
 		shader->bind_group_layouts[set] = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
 		ERR_FAIL_COND_V_MSG(shader->bind_group_layouts[set] == nullptr, ShaderID(), "WebGPU: wgpuDeviceCreateBindGroupLayout failed.");
 	}
@@ -2947,6 +3109,11 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	WGPUPipelineLayoutDescriptor pl_desc = {};
 	pl_desc.bindGroupLayoutCount = total_groups;
 	pl_desc.bindGroupLayouts = all_layouts.size() > 0 ? all_layouts.ptr() : nullptr;
+
+	// Label the pipeline layout for JS-side patch logs.
+	String _pl_label = "plyt:" + shader->name;
+	CharString _pl_label_cs = _pl_label.utf8();
+	pl_desc.label = { _pl_label_cs.get_data(), WGPU_STRLEN };
 
 	shader->pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &pl_desc);
 	ERR_FAIL_COND_V_MSG(shader->pipeline_layout == nullptr, ShaderID(), "WebGPU: wgpuDeviceCreatePipelineLayout failed.");
@@ -3097,12 +3264,14 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 								// Can't create a cube view from a texture with < 6 layers.
 								entry.textureView = fallback_cube_texture_view;
 							} else if (tex->view_source != nullptr) {
+								// Use slice base offsets so slice views don't
+								// silently remap to mip 0 / layer 0 of the parent.
 								WGPUTextureViewDescriptor vd = {};
 								vd.format = tex->format;
 								vd.dimension = expected_dim;
-								vd.baseMipLevel = 0;
+								vd.baseMipLevel = tex->base_mipmap;
 								vd.mipLevelCount = tex->mipmaps;
-								vd.baseArrayLayer = 0;
+								vd.baseArrayLayer = tex->base_layer;
 								vd.arrayLayerCount = (expected_dim == WGPUTextureViewDimension_2D) ? 1 : tex->layers;
 								vd.aspect = WGPUTextureAspect_All;
 								WGPUTextureView fixed_view = wgpuTextureCreateView(tex->view_source, &vd);
@@ -3131,12 +3300,14 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 				// Look up expected texture dimension and sample type from the shader layout.
 				WGPUTextureViewDimension swt_expected_dim = WGPUTextureViewDimension_Undefined;
 				WGPUTextureSampleType swt_expected_sample = WGPUTextureSampleType_Undefined;
+				bool swt_expected_ms = false;
 				if (p_set_index < (uint32_t)shader->bind_group_infos.size()) {
 					uint32_t tex_binding = uniform.binding * 2 + 1;
 					for (const auto &bge : shader->bind_group_infos[p_set_index].entries) {
 						if (bge.layout_entry.binding == tex_binding) {
 							swt_expected_dim = bge.layout_entry.texture.viewDimension;
 							swt_expected_sample = bge.layout_entry.texture.sampleType;
+							swt_expected_ms = (bool)bge.layout_entry.texture.multisampled;
 							break;
 						}
 					}
@@ -3153,10 +3324,20 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 					if (tex && tex->default_view) {
 						WGPUBindGroupEntry te = {};
 						te.binding = uniform.binding * 2 + j * 2 + 1;
-						// Fix depth/float mismatch: combined sampler+texture bindings
-						// are always Float. If a depth fallback texture is provided,
-						// substitute a float fallback.
-						if (_is_depth_format(tex->format) && fallback_float_texture_view != nullptr) {
+						// Check sample-count mismatch first: if the BGL expects a multisampled
+						// texture but the bound texture isn't multisampled (or vice versa),
+						// we can't use either the real texture or a non-MS fallback. Substitute
+						// the MSAA fallback for this case. This handles ResolveRasterShaderRD
+						// which binds an MSAA depth texture into a float MSAA slot (WebGPU
+						// forbids sampling depth as float, so the MSAA fallback is used).
+						bool tex_is_ms = (tex->sample_count > 1);
+						if (swt_expected_ms && (!tex_is_ms || _is_depth_format(tex->format)) &&
+								fallback_ms_texture_view != nullptr) {
+							te.textureView = fallback_ms_texture_view;
+						} else if (_is_depth_format(tex->format) && fallback_float_texture_view != nullptr) {
+							// Fix depth/float mismatch: combined sampler+texture bindings
+							// are always Float. If a depth fallback texture is provided,
+							// substitute a float fallback.
 							if (swt_expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
 								te.textureView = fallback_cube_texture_view;
 							} else {
@@ -3169,12 +3350,14 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 									fallback_cube_texture_view != nullptr) {
 								te.textureView = fallback_cube_texture_view;
 							} else if (tex->view_source != nullptr) {
+								// Use slice base offsets so slice views don't
+								// silently remap to mip 0 / layer 0 of the parent.
 								WGPUTextureViewDescriptor vd = {};
 								vd.format = tex->format;
 								vd.dimension = swt_expected_dim;
-								vd.baseMipLevel = 0;
+								vd.baseMipLevel = tex->base_mipmap;
 								vd.mipLevelCount = tex->mipmaps;
-								vd.baseArrayLayer = 0;
+								vd.baseArrayLayer = tex->base_layer;
 								vd.arrayLayerCount = (swt_expected_dim == WGPUTextureViewDimension_2D) ? 1 : tex->layers;
 								vd.aspect = WGPUTextureAspect_All;
 								WGPUTextureView fixed_view = wgpuTextureCreateView(tex->view_source, &vd);
@@ -4579,6 +4762,47 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 		cmd->bound_shader = pipeline_shader;
 	}
 
+	// Diagnostic: detect the sync-scope conflict that's causing the
+	// "includes writable usage and another usage in the same synchronization
+	// scope" validation error. This fires whenever a bound texture's parent
+	// matches a framebuffer attachment's parent. Limited to a few prints so
+	// we don't spam the console after a match.
+	static int _sync_conflict_log_count = 0;
+	WGFramebuffer *_cur_fb = cmd->render_state.framebuffer;
+	if (_cur_fb && _sync_conflict_log_count < 20) {
+		for (uint32_t i = 0; i < p_set_count; i++) {
+			WGUniformSet *us = (WGUniformSet *)(p_uniform_sets[i].id);
+			if (!us) continue;
+			for (const KeyValue<uint32_t, WGTexture *> &kv : us->bound_textures) {
+				WGTexture *btex = kv.value;
+				if (!btex || !btex->view_source) continue;
+				for (uint32_t a = 0; a < _cur_fb->attachments.size(); a++) {
+					WGTexture *atex = _cur_fb->attachments[a];
+					if (!atex) continue;
+					WGPUTexture a_src = atex->view_source ? atex->view_source : atex->handle;
+					if (a_src == btex->view_source) {
+						print_line(vformat("[SYNC-CONFLICT#%d] set=%d bnd=%d bound id=%d mip=%d-%d layer=%d-%d dim=%d vs att[%d] id=%d mip=%d-%d layer=%d-%d dim=%d fb=%dx%d",
+								_sync_conflict_log_count,
+								(int)(p_first_set_index + i), (int)kv.key,
+								(int)btex->debug_create_id,
+								(int)btex->base_mipmap, (int)(btex->base_mipmap + btex->mipmaps),
+								(int)btex->base_layer, (int)(btex->base_layer + btex->layers),
+								(int)btex->view_dimension,
+								(int)a, (int)atex->debug_create_id,
+								(int)atex->base_mipmap, (int)(atex->base_mipmap + atex->mipmaps),
+								(int)atex->base_layer, (int)(atex->base_layer + atex->layers),
+								(int)atex->view_dimension,
+								(int)_cur_fb->width, (int)_cur_fb->height));
+						_sync_conflict_log_count++;
+						if (_sync_conflict_log_count >= 20) break;
+					}
+				}
+				if (_sync_conflict_log_count >= 20) break;
+			}
+			if (_sync_conflict_log_count >= 20) break;
+		}
+	}
+
 	for (uint32_t i = 0; i < p_set_count; i++) {
 		WGUniformSet *us = (WGUniformSet *)(p_uniform_sets[i].id);
 		if (us && us->handle) {
@@ -4897,6 +5121,13 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 
 	WGPUShaderModuleDescriptor desc = {};
 	desc.nextInChain = &wgsl_source.chain;
+
+	// Label the specialized module so the JS-side createShaderModule patch identifies it.
+	static int _spec_mod_id = 0;
+	int _specid = _spec_mod_id++;
+	String _spec_label = "specmod#" + itos(_specid) + ":stg" + itos((int)p_stage);
+	CharString _spec_label_cs = _spec_label.utf8();
+	desc.label = { _spec_label_cs.get_data(), WGPU_STRLEN };
 
 	WGPUShaderModule mod = wgpuDeviceCreateShaderModule(device, &desc);
 	free(wgsl_str);
@@ -5238,21 +5469,15 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		desc.fragment = &frag;
 	}
 
-	// Push a validation error scope so we can capture the exact creation error message.
+	// Label the pipeline with the shader name + a monotonic id so Dawn's
+	// validation error messages (and the JS-side create patch) identify it.
 	static int _pcreate_id = 0;
 	int _pid = _pcreate_id++;
-	const char *_shader_name = shader->name.utf8().get_data();
-	EM_ASM({ Module['preinitializedWebGPUDevice'].pushErrorScope('validation'); });
+	String _pipeline_label_str = "pipe#" + itos(_pid) + ":" + shader->name;
+	CharString _pipeline_label_cs = _pipeline_label_str.utf8();
+	desc.label = { _pipeline_label_cs.get_data(), WGPU_STRLEN };
+
 	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
-	EM_ASM({
-		var pid = $0;
-		var sname = UTF8ToString($1);
-		Module['preinitializedWebGPUDevice'].popErrorScope().then(function(err) {
-			if (err) {
-				console.error('[PCREATE-FAIL] id=' + pid + ' shader=' + sname + ' | ' + err.message.substring(0, 1600));
-			}
-		});
-	}, _pid, _shader_name);
 	ERR_FAIL_COND_V_MSG(!pipeline, PipelineID(), "WebGPU: Failed to create render pipeline.");
 
 	WGPipelineWrapper *pw = new WGPipelineWrapper();
@@ -5610,7 +5835,62 @@ void RenderingDeviceDriverWebGPU::end_segment() {
 // =============================================================================
 
 void RenderingDeviceDriverWebGPU::set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) {
-	// TODO: Call wgpuBufferSetLabel() / wgpuTextureSetLabel() etc. based on type.
+	// Propagate names to Dawn so validation errors reference the Godot resource
+	// (otherwise Dawn reports "[Texture (unlabeled ...)]"). CharString must live
+	// until wgpuXxxSetLabel returns — Dawn copies the string internally.
+	if (p_driver_id.id == 0) {
+		return;
+	}
+	const CharString name_utf8 = p_name.utf8();
+	const WGPUStringView label = { name_utf8.get_data(), WGPU_STRLEN };
+	switch (p_type) {
+		case OBJECT_TYPE_TEXTURE: {
+			WGTexture *tex = (WGTexture *)(p_driver_id.id);
+			if (tex && tex->handle) {
+				wgpuTextureSetLabel(tex->handle, label);
+				print_line(vformat("[WGTEX] name='%s' id=%d %dx%dx%d mip=%d fmt=%d usage=0x%x", p_name, (int)tex->debug_create_id, (int)tex->width, (int)tex->height, (int)tex->layers, (int)tex->mipmaps, (int)tex->format, (unsigned)tex->usage));
+			}
+		} break;
+		case OBJECT_TYPE_SAMPLER: {
+			// SamplerID stores the raw WGPUSampler handle directly.
+			WGPUSampler sampler = (WGPUSampler)(p_driver_id.id);
+			wgpuSamplerSetLabel(sampler, label);
+		} break;
+		case OBJECT_TYPE_BUFFER: {
+			WGBuffer *buf = (WGBuffer *)(p_driver_id.id);
+			if (buf && buf->handle) {
+				wgpuBufferSetLabel(buf->handle, label);
+			}
+		} break;
+		case OBJECT_TYPE_SHADER: {
+			WGShader *shader = (WGShader *)(p_driver_id.id);
+			if (shader) {
+				shader->name = p_name;
+				for (uint32_t i = 0; i < 6; i++) {
+					if (shader->stage_modules[i]) {
+						wgpuShaderModuleSetLabel(shader->stage_modules[i], label);
+					}
+				}
+			}
+		} break;
+		case OBJECT_TYPE_UNIFORM_SET: {
+			WGUniformSet *us = (WGUniformSet *)(p_driver_id.id);
+			if (us && us->handle) {
+				wgpuBindGroupSetLabel(us->handle, label);
+			}
+		} break;
+		case OBJECT_TYPE_PIPELINE: {
+			WGPipelineWrapper *pw = (WGPipelineWrapper *)(p_driver_id.id);
+			if (!pw) {
+				break;
+			}
+			if (pw->type == WGPipelineWrapper::RENDER && pw->render_handle) {
+				wgpuRenderPipelineSetLabel(pw->render_handle, label);
+			} else if (pw->type == WGPipelineWrapper::COMPUTE && pw->compute_handle) {
+				wgpuComputePipelineSetLabel(pw->compute_handle, label);
+			}
+		} break;
+	}
 }
 
 uint64_t RenderingDeviceDriverWebGPU::get_resource_native_handle(DriverResource p_type, ID p_driver_id) {
