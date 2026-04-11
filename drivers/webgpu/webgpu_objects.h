@@ -50,6 +50,15 @@ struct WGBuffer {
 	bool map_dirty = false;
 	bool is_readback = false;      // True for staging buffers that need GPU→CPU readback.
 	bool map_complete = false;     // Set by async map callback.
+
+	// Dynamic persistent rotation (Task 7.5).
+	// `frame_idx` is UINT32_MAX for non-dynamic buffers. For BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT
+	// buffers, buffer_create sets frame_idx=0 and per_frame_size to the aligned single-frame
+	// slice. The physical buffer holds frame_count slices; each frame the CPU writes to one
+	// slice and the GPU reads from it via a dynamic offset of frame_idx * per_frame_size.
+	uint32_t frame_idx = UINT32_MAX;
+	uint64_t per_frame_size = 0;
+	bool is_dynamic() const { return frame_idx != UINT32_MAX; }
 };
 
 // =============================================================================
@@ -211,6 +220,13 @@ struct WGUniformSet {
 	// Maps binding index → WGTexture* for texture entries, used during rebind
 	// to create compatible views when the target BGL has a different dimension.
 	HashMap<uint32_t, WGTexture *> bound_textures;
+
+	// Dynamic buffers in binding order (Task 7.5). Populated by uniform_set_create
+	// whenever a UNIFORM_TYPE_*_BUFFER_DYNAMIC binding resolves to a WGBuffer with
+	// is_dynamic()==true. command_bind_*_uniform_sets walks this list in order to
+	// unpack per-set dynamic offsets from the mask returned by
+	// uniform_sets_get_dynamic_offsets and pass them to wgpuRenderPassEncoderSetBindGroup.
+	LocalVector<WGBuffer *> dynamic_buffers;
 };
 
 // =============================================================================
@@ -262,6 +278,13 @@ struct WGCommandBuffer {
 	// Combined bind group for the PC group (includes both material resources and PC ring buffer).
 	// Updated by command_bind_render_uniform_sets when the PC group is bound.
 	WGPUBindGroup current_pc_bind_group = nullptr;
+	// Task 7.5: When the PC group also contains material dynamic-offset UBOs,
+	// _flush_push_constants must preserve those offsets while patching in the new
+	// PC ring offset. Stored in binding order; the PC ring's own slot is appended
+	// at pc_group_material_dyn_count by _flush_push_constants each draw.
+	static constexpr uint32_t MAX_PC_GROUP_MATERIAL_DYN = 7; // MAX_DYNAMIC_BUFFERS - 1 (PC ring takes 1 slot).
+	uint32_t pc_group_material_dyn_offsets[MAX_PC_GROUP_MATERIAL_DYN] = {};
+	uint32_t pc_group_material_dyn_count = 0;
 
 	// Render state tracking.
 	struct RenderState {
@@ -327,6 +350,8 @@ struct WGCommandBuffer {
 			bound_bind_groups[i] = nullptr;
 		}
 		bound_shader = nullptr;
+		current_pc_bind_group = nullptr;
+		pc_group_material_dyn_count = 0;
 	}
 
 	// Track query pools that had timestamps written, for resolve at command buffer end.

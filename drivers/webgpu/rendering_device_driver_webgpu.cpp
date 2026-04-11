@@ -529,6 +529,25 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitFie
 	// WebGPU buffer sizes must be a multiple of 4.
 	uint64_t aligned_size = (p_size + 3) & ~3ULL;
 
+	// Task 7.5: BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT means Godot wants to rotate
+	// through `frame_count` slices of this buffer. Each slice must be aligned to
+	// the device's minUniformBufferOffsetAlignment (typically 256) because the
+	// slice offset is passed as a dynamic offset to wgpuRenderPassEncoderSetBindGroup,
+	// and dynamic offsets must be multiples of that alignment. Without this
+	// alignment pass, the original Phase 7 commit (8d48436801) would fail validation
+	// whenever p_size was not already a 256-multiple.
+	const bool is_dynamic_persistent = p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT);
+	if (is_dynamic_persistent && frame_count > 1) {
+		uint32_t alignment = device_limits.minUniformBufferOffsetAlignment;
+		if (alignment == 0 || alignment == WGPU_LIMIT_U32_UNDEFINED) {
+			alignment = 256; // WebGPU spec default minimum.
+		}
+		aligned_size = (aligned_size + alignment - 1) & ~(uint64_t)(alignment - 1);
+		buf->per_frame_size = aligned_size;
+		aligned_size *= frame_count;
+		buf->frame_idx = 0; // Mark as dynamic — first slice is index 0.
+	}
+
 	buf->usage = _buffer_usage_to_wgpu(p_usage);
 	buf->usage |= WGPUBufferUsage_CopyDst; // Always allow writes.
 	buf->size = aligned_size;
@@ -689,11 +708,32 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_persistent_map_advance(BufferID p_b
 		buf->shadow_map = (uint8_t *)memalloc(buf->size);
 		memset(buf->shadow_map, 0, buf->size);
 	}
+	// Task 7.5: For dynamic persistent buffers, rotate to the next slice and
+	// return a pointer into that slice. Godot writes one frame's worth of data
+	// here, and the GPU reads from `frame_idx * per_frame_size` via dynamic offset.
+	if (buf->is_dynamic() && buf->per_frame_size > 0 && frame_count > 1) {
+		buf->frame_idx = (buf->frame_idx + 1) % frame_count;
+		return buf->shadow_map + (uint64_t)buf->frame_idx * buf->per_frame_size;
+	}
 	return buf->shadow_map;
 }
 
 uint64_t RenderingDeviceDriverWebGPU::buffer_get_dynamic_offsets(Span<BufferID> p_buffers) {
-	return 0;
+	// Task 7.5: Standalone path — packs frame_idx for each dynamic buffer into
+	// 2-bit shifted slots (matching the Vulkan pattern). Consumed by the render
+	// graph for buffers passed to command_render_bind_vertex_buffers (which
+	// currently doesn't honor dynamic offsets on WebGPU; harmless to return here).
+	uint64_t mask = 0;
+	uint64_t shift = 0;
+	for (const BufferID &bid : p_buffers) {
+		const WGBuffer *buf = (const WGBuffer *)bid.id;
+		if (!buf || !buf->is_dynamic()) {
+			continue;
+		}
+		mask |= (uint64_t)buf->frame_idx << shift;
+		shift += 2; // Matches Vulkan: frame_count never exceeds 4.
+	}
+	return mask;
 }
 
 void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
@@ -2965,14 +3005,15 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					bge.layout_entry = entry;
 				} break;
 
-				// Dynamic variants treated as static — dynamic offsets not yet implemented.
+				// Task 7.5: Dynamic variants — hasDynamicOffset=true allows the
+				// bind group to be set with per-frame offsets via wgpuRenderPassEncoderSetBindGroup.
 				case RDD::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
 					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
 					entry.visibility = vis;
 					entry.buffer.type = WGPUBufferBindingType_Uniform;
-					entry.buffer.hasDynamicOffset = false;
+					entry.buffer.hasDynamicOffset = true;
 					entry.buffer.minBindingSize = 0;
 					bge.layout_entry = entry;
 				} break;
@@ -2982,8 +3023,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					entry = {};
 					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
 					entry.visibility = vis;
+					bool is_storage_tex = false;
 					{ uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
 					  if (wgsl_storage_tex_format.has(k)) {
+						  is_storage_tex = true;
 						  WGPUTextureFormat fmt = wgsl_storage_tex_format[k];
 						  WGPUStorageTextureAccess access = wgsl_storage_tex_access.has(k)
 							  ? wgsl_storage_tex_access[k]
@@ -2998,7 +3041,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						  entry.buffer.type = is_readonly ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
 						  if (!is_readonly) { entry.visibility = entry.visibility & ~(WGPUShaderStage)WGPUShaderStage_Vertex; }
 					  } }
-					entry.buffer.hasDynamicOffset = false;
+					// Only buffer bindings support dynamic offsets; storage textures must not set it.
+					entry.buffer.hasDynamicOffset = !is_storage_tex;
 					entry.buffer.minBindingSize = 0;
 					bge.layout_entry = entry;
 				} break;
@@ -3535,7 +3579,15 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 				entry.binding = uniform.binding * 2;
 				entry.buffer = buf->handle;
 				entry.offset = 0;
-				entry.size = buf->size;
+				// Task 7.5: For dynamic persistent buffers, bind ONE slice (per_frame_size),
+				// not the full physical allocation. The rest of the buffer holds the other
+				// frames' slices, reached via the dynamic offset at bind time.
+				if (buf->is_dynamic() && buf->per_frame_size > 0) {
+					entry.size = buf->per_frame_size;
+					us->dynamic_buffers.push_back(buf);
+				} else {
+					entry.size = buf->size;
+				}
 				entries.push_back(entry);
 			} break;
 
@@ -3873,8 +3925,23 @@ void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
 }
 
 uint32_t RenderingDeviceDriverWebGPU::uniform_sets_get_dynamic_offsets(VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) const {
-	// TODO: Calculate and return dynamic offsets for dynamic uniform/storage buffers.
-	return 0;
+	// Task 7.5: Pack frame_idx for every dynamic buffer across the given sets into
+	// 4-bit slots of a single uint32_t mask. Matches the Vulkan driver's encoding —
+	// command_bind_*_uniform_sets reads the same mask and unpacks (frame_idx & 0xF).
+	uint32_t mask = 0;
+	uint32_t shift = 0;
+	for (uint32_t i = 0; i < p_set_count; i++) {
+		const WGUniformSet *us = (const WGUniformSet *)p_uniform_sets[i].id;
+		if (!us) {
+			continue;
+		}
+		for (const WGBuffer *buf : us->dynamic_buffers) {
+			if (!buf) continue;
+			mask |= (buf->frame_idx & 0xFu) << shift;
+			shift += 4u;
+		}
+	}
+	return mask;
 }
 
 void RenderingDeviceDriverWebGPU::command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) {
@@ -4216,17 +4283,41 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 	//   was previously bound, use that combined bind group.
 	// - Otherwise, fall back to the universal PC-only bind group.
 	WGPUBindGroup pc_bind_group_to_use;
-	if (p_shader->merged_pc_group_layout && p_cmd_buf->current_pc_bind_group != nullptr) {
+	bool use_merged = (p_shader->merged_pc_group_layout && p_cmd_buf->current_pc_bind_group != nullptr);
+	if (use_merged) {
 		pc_bind_group_to_use = p_cmd_buf->current_pc_bind_group;
 	} else {
 		pc_bind_group_to_use = push_constant_bind_group;
 	}
 
-	// Bind the push constant ring buffer bind group with a dynamic offset.
+	// Task 7.5: If the merged PC group also contains material dynamic-offset UBOs,
+	// we need to preserve those offsets while patching in the new PC ring offset.
+	// command_bind_*_uniform_sets saved the material offsets in
+	// pc_group_material_dyn_offsets[] in binding order; the PC ring's own dynamic
+	// offset is appended last (the PC ring binding is always the highest binding
+	// in the merged group — see rendering_shader_container_webgpu.cpp).
+	uint32_t dyn_offsets[WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN + 1];
+	uint32_t num_dyn_offsets;
+	if (use_merged && p_cmd_buf->pc_group_material_dyn_count > 0) {
+		uint32_t mat_count = p_cmd_buf->pc_group_material_dyn_count;
+		if (mat_count > WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN) {
+			mat_count = WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN;
+		}
+		for (uint32_t j = 0; j < mat_count; j++) {
+			dyn_offsets[j] = p_cmd_buf->pc_group_material_dyn_offsets[j];
+		}
+		dyn_offsets[mat_count] = dynamic_offset;
+		num_dyn_offsets = mat_count + 1;
+	} else {
+		dyn_offsets[0] = dynamic_offset;
+		num_dyn_offsets = 1;
+	}
+
+	// Bind the push constant ring buffer bind group with the assembled dynamic offsets.
 	if (p_cmd_buf->render_encoder) {
-		wgpuRenderPassEncoderSetBindGroup(p_cmd_buf->render_encoder, p_shader->push_constant_bind_group, pc_bind_group_to_use, 1, &dynamic_offset);
+		wgpuRenderPassEncoderSetBindGroup(p_cmd_buf->render_encoder, p_shader->push_constant_bind_group, pc_bind_group_to_use, num_dyn_offsets, dyn_offsets);
 	} else if (p_cmd_buf->compute_encoder) {
-		wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, p_shader->push_constant_bind_group, pc_bind_group_to_use, 1, &dynamic_offset);
+		wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, p_shader->push_constant_bind_group, pc_bind_group_to_use, num_dyn_offsets, dyn_offsets);
 	}
 
 	push_constant_ring_offset += aligned_size;
@@ -4897,6 +4988,12 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 		}
 	}
 
+	// Task 7.5: Unpack 4-bit frame indices from p_dynamic_offsets as we walk the sets.
+	// Every set with `us->dynamic_buffers.size()` entries consumes that many 4-bit
+	// slots in the mask (in binding order, matching uniform_sets_get_dynamic_offsets).
+	static constexpr uint32_t MAX_DYNAMIC_BUFFERS = 8;
+	uint32_t dyn_shift = 0;
+
 	for (uint32_t i = 0; i < p_set_count; i++) {
 		WGUniformSet *us = (WGUniformSet *)(p_uniform_sets[i].id);
 		if (us && us->handle) {
@@ -4905,26 +5002,67 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 			// Get a bind group compatible with the current pipeline's BGL.
 			WGPUBindGroup bg_to_bind = _get_compatible_bind_group(us, pipeline_shader, set_idx);
 
-			// If this is the PC group of the current shader (with a merged layout),
-			// track the bind group for use in _flush_push_constants and bind it
-			// immediately with offset 0 (will be rebound with the real offset on flush).
-			if (pipeline_shader && pipeline_shader->push_constant_size > 0 &&
-					set_idx == pipeline_shader->push_constant_bind_group) {
-				if (pipeline_shader->merged_pc_group_layout) {
-					cmd->current_pc_bind_group = bg_to_bind;
-					uint32_t zero_offset = 0;
-					wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, 1, &zero_offset);
-				} else {
-					cmd->current_pc_bind_group = nullptr;
-					wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, 0, nullptr);
+			// Unpack dynamic offsets for this set's material dynamic buffers, in binding order.
+			uint32_t set_dyn_offsets[MAX_DYNAMIC_BUFFERS] = {};
+			uint32_t num_dyn = us->dynamic_buffers.size();
+			if (num_dyn > MAX_DYNAMIC_BUFFERS) {
+				num_dyn = MAX_DYNAMIC_BUFFERS;
+			}
+			for (uint32_t j = 0; j < num_dyn; j++) {
+				uint32_t frame_idx = (p_dynamic_offsets >> dyn_shift) & 0xFu;
+				dyn_shift += 4u;
+				const WGBuffer *dbuf = us->dynamic_buffers[j];
+				set_dyn_offsets[j] = (uint32_t)(frame_idx * (dbuf ? dbuf->per_frame_size : 0));
+			}
+
+			const bool is_pc_merged = (pipeline_shader && pipeline_shader->push_constant_size > 0 &&
+					set_idx == pipeline_shader->push_constant_bind_group &&
+					pipeline_shader->merged_pc_group_layout != nullptr);
+
+			if (is_pc_merged) {
+				// PC ring buffer is at PUSH_CONSTANT_RING_BINDING (120) — the highest
+				// binding in the merged group, so its dynamic offset is appended last.
+				// Save the material offsets so _flush_push_constants can preserve them
+				// while patching in the real PC ring offset before each draw.
+				cmd->pc_group_material_dyn_count = num_dyn;
+				for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN; j++) {
+					cmd->pc_group_material_dyn_offsets[j] = set_dyn_offsets[j];
 				}
+				// Append PC ring offset (initial 0); _flush_push_constants will rebind.
+				if (num_dyn < MAX_DYNAMIC_BUFFERS) {
+					set_dyn_offsets[num_dyn] = 0;
+					num_dyn++;
+				}
+				cmd->current_pc_bind_group = bg_to_bind;
+				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, num_dyn, set_dyn_offsets);
 				perf.set_bind_group_calls++;
-				// PC group always needs rebind (dynamic offset changes per draw).
+				// PC group always rebinds per draw (via _flush_push_constants); don't cache.
+				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					cmd->bound_bind_groups[set_idx] = nullptr;
+				}
+			} else if (pipeline_shader && pipeline_shader->push_constant_size > 0 &&
+					set_idx == pipeline_shader->push_constant_bind_group) {
+				// PC group, but shader has no merged layout → just clear the PC pointer.
+				cmd->current_pc_bind_group = nullptr;
+				cmd->pc_group_material_dyn_count = 0;
+				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, num_dyn, num_dyn ? set_dyn_offsets : nullptr);
+				perf.set_bind_group_calls++;
+				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					cmd->bound_bind_groups[set_idx] = num_dyn > 0 ? nullptr : bg_to_bind;
+				}
+			} else if (num_dyn > 0) {
+				// Non-PC set with material dynamic buffers: must always rebind because
+				// the frame_idx rotates — bypass the redundant-bind cache.
+				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, num_dyn, set_dyn_offsets);
+				perf.set_bind_group_calls++;
+				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					cmd->bound_bind_groups[set_idx] = nullptr;
+				}
 			} else {
-				// Skip redundant SetBindGroup calls for non-PC groups.
+				// Static non-PC set — skip redundant SetBindGroup calls.
 				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS && cmd->bound_bind_groups[set_idx] == bg_to_bind) {
 					perf.set_bind_group_skipped++;
-					continue; // Already bound — skip.
+					continue;
 				}
 				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, 0, nullptr);
 				perf.set_bind_group_calls++;
@@ -5012,7 +5150,16 @@ void RenderingDeviceDriverWebGPU::command_render_bind_vertex_buffers(CommandBuff
 	for (uint32_t i = 0; i < p_binding_count; i++) {
 		WGBuffer *buf = (WGBuffer *)(p_buffers[i].id);
 		if (buf) {
-			wgpuRenderPassEncoderSetVertexBuffer(cmd->render_encoder, i, buf->handle, p_offsets[i], WGPU_WHOLE_SIZE);
+			uint64_t offset = p_offsets[i];
+			if (buf->is_dynamic()) {
+				// Task 7.5: unpack 2-bit frame_idx from mask and offset into the dynamic slice.
+				// Mirrors Vulkan's command_render_bind_vertex_buffers. Uses per_frame_size
+				// (not buf->size) because WebGPU's buf->size is the total physical allocation.
+				uint64_t frame_idx = p_dynamic_offsets & 0x3;
+				p_dynamic_offsets >>= 2;
+				offset += frame_idx * buf->per_frame_size;
+			}
+			wgpuRenderPassEncoderSetVertexBuffer(cmd->render_encoder, i, buf->handle, offset, WGPU_WHOLE_SIZE);
 		}
 	}
 }
@@ -5614,27 +5761,51 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_uniform_sets(CommandBuffe
 
 	WGShader *pipeline_shader = cmd->render_state.current_pipeline ? cmd->render_state.current_pipeline->shader : nullptr;
 
+	// Task 7.5: mirror the render path's dynamic offset unpacking.
+	static constexpr uint32_t MAX_DYNAMIC_BUFFERS = 8;
+	uint32_t dyn_shift = 0;
+
 	for (uint32_t i = 0; i < p_set_count; i++) {
 		WGUniformSet *us = (WGUniformSet *)(p_uniform_sets[i].id);
 		if (us && us->handle) {
 			uint32_t set_idx = p_first_set_index + i;
 			WGPUBindGroup bg_to_bind = _get_compatible_bind_group(us, pipeline_shader, set_idx);
 
-			// Mirror the render path: if this is the PC group with a merged layout,
-			// the BGL has 1 dynamic buffer — must pass 1 dynamic offset (0 initially;
-			// _flush_push_constants will rebind with the real offset before dispatch).
-			if (pipeline_shader && pipeline_shader->push_constant_size > 0 &&
-					set_idx == pipeline_shader->push_constant_bind_group) {
-				if (pipeline_shader->merged_pc_group_layout) {
-					cmd->current_pc_bind_group = bg_to_bind;
-					uint32_t zero_offset = 0;
-					wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, 1, &zero_offset);
-				} else {
-					cmd->current_pc_bind_group = nullptr;
-					wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, 0, nullptr);
+			uint32_t set_dyn_offsets[MAX_DYNAMIC_BUFFERS] = {};
+			uint32_t num_dyn = us->dynamic_buffers.size();
+			if (num_dyn > MAX_DYNAMIC_BUFFERS) {
+				num_dyn = MAX_DYNAMIC_BUFFERS;
+			}
+			for (uint32_t j = 0; j < num_dyn; j++) {
+				uint32_t frame_idx = (p_dynamic_offsets >> dyn_shift) & 0xFu;
+				dyn_shift += 4u;
+				const WGBuffer *dbuf = us->dynamic_buffers[j];
+				set_dyn_offsets[j] = (uint32_t)(frame_idx * (dbuf ? dbuf->per_frame_size : 0));
+			}
+
+			const bool is_pc_merged = (pipeline_shader && pipeline_shader->push_constant_size > 0 &&
+					set_idx == pipeline_shader->push_constant_bind_group &&
+					pipeline_shader->merged_pc_group_layout != nullptr);
+
+			if (is_pc_merged) {
+				// Save material offsets; _flush_push_constants preserves them each dispatch.
+				cmd->pc_group_material_dyn_count = num_dyn;
+				for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN; j++) {
+					cmd->pc_group_material_dyn_offsets[j] = set_dyn_offsets[j];
 				}
+				if (num_dyn < MAX_DYNAMIC_BUFFERS) {
+					set_dyn_offsets[num_dyn] = 0; // PC ring offset — _flush_push_constants will rebind.
+					num_dyn++;
+				}
+				cmd->current_pc_bind_group = bg_to_bind;
+				wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, num_dyn, set_dyn_offsets);
+			} else if (pipeline_shader && pipeline_shader->push_constant_size > 0 &&
+					set_idx == pipeline_shader->push_constant_bind_group) {
+				cmd->current_pc_bind_group = nullptr;
+				cmd->pc_group_material_dyn_count = 0;
+				wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, num_dyn, num_dyn ? set_dyn_offsets : nullptr);
 			} else {
-				wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, 0, nullptr);
+				wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, num_dyn, num_dyn ? set_dyn_offsets : nullptr);
 			}
 		}
 	}
