@@ -536,6 +536,20 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitFie
 	// Don't add MapRead to generic CPU buffers — it conflicts with CopySrc.
 	// Compute readback uses buffer_get_data_direct() which creates its own
 	// staging buffer with the correct CopyDst|MapRead usage.
+	//
+	// Task 7.8: Narrow exception — a "CPU + TRANSFER_TO + no TRANSFER_FROM"
+	// buffer is a pure GPU→CPU staging buffer (dest-only, never the source of
+	// another copy). For these, WebGPU spec permits MapRead (since CopySrc is
+	// not present, there's no CopySrc↔MapRead conflict), and the existing
+	// buffer_map() async-readback codepath needs MapRead to be valid.
+	const bool wants_transfer_to = p_usage.has_flag(BUFFER_USAGE_TRANSFER_TO_BIT);
+	const bool wants_transfer_from = p_usage.has_flag(BUFFER_USAGE_TRANSFER_FROM_BIT);
+	if (p_allocation_type == MEMORY_ALLOCATION_TYPE_CPU && wants_transfer_to && !wants_transfer_from) {
+		buf->is_readback = true;
+		buf->usage |= WGPUBufferUsage_MapRead;
+		// CopySrc must NOT be set for MapRead to be legal; _buffer_usage_to_wgpu
+		// derives CopySrc from TRANSFER_FROM_BIT, which we've just confirmed is off.
+	}
 
 	WGPUBufferDescriptor desc = {};
 	desc.size = aligned_size;
