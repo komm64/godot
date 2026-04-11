@@ -922,39 +922,7 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	// WebGPU does not support R8/RG8/R16/RG16 as storage texel formats.
 	// Upgrade to 32-bit equivalents when storage binding is needed.
 	if (tex->usage & WGPUTextureUsage_StorageBinding) {
-		switch (tex->format) {
-			case WGPUTextureFormat_R8Unorm:
-			case WGPUTextureFormat_R8Snorm:
-			case WGPUTextureFormat_R16Float:
-			// R16Snorm/R16Unorm not in base emdawnwebgpu 4.0.10 headers
-				tex->format = WGPUTextureFormat_R32Float;
-				break;
-			case WGPUTextureFormat_R8Uint:
-			case WGPUTextureFormat_R16Uint:
-				tex->format = WGPUTextureFormat_R32Uint;
-				break;
-			case WGPUTextureFormat_R8Sint:
-			case WGPUTextureFormat_R16Sint:
-				tex->format = WGPUTextureFormat_R32Sint;
-				break;
-			case WGPUTextureFormat_RG8Unorm:
-			case WGPUTextureFormat_RG8Snorm:
-			case WGPUTextureFormat_RG16Float:
-			// RG16Snorm/RG16Unorm not in base emdawnwebgpu 4.0.10 headers
-				tex->format = WGPUTextureFormat_RG32Float;
-				break;
-			case WGPUTextureFormat_RG8Uint:
-			case WGPUTextureFormat_RG16Uint:
-				tex->format = WGPUTextureFormat_RG32Uint;
-				break;
-			case WGPUTextureFormat_RG8Sint:
-			case WGPUTextureFormat_RG16Sint:
-				tex->format = WGPUTextureFormat_RG32Sint;
-				break;
-			// RGBA16Snorm/RGBA16Unorm not in base emdawnwebgpu 4.0.10 headers
-			default:
-				break;
-		}
+		tex->format = _promote_storage_format(tex->format);
 	}
 
 	// WebGPU has no texture component swizzle (unlike Vulkan's VkComponentSwizzle).
@@ -1559,6 +1527,24 @@ WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p
 		case DATA_FORMAT_R16G16B16A16_SNORM: return WGPUTextureFormat_RGBA16Float;
 		// No depth16+stencil8 in WebGPU; use depth24plus-stencil8 as nearest approximation.
 		case DATA_FORMAT_D16_UNORM_S8_UINT: return WGPUTextureFormat_Depth24PlusStencil8;
+		// 3-component (RGB) formats don't exist as WebGPU *texture* formats, only as
+		// vertex attribute formats (handled by _data_format_to_wgpu_vertex). Return
+		// Undefined silently here — texture_get_usages_supported_by_format probes every
+		// DataFormat for texture-usage compat, and we don't want to spam warnings for
+		// legitimate vertex-only formats.
+		case DATA_FORMAT_R32G32B32_UINT:
+		case DATA_FORMAT_R32G32B32_SINT:
+		case DATA_FORMAT_R32G32B32_SFLOAT:
+		case DATA_FORMAT_R16G16B16_UNORM:
+		case DATA_FORMAT_R16G16B16_SNORM:
+		case DATA_FORMAT_R16G16B16_UINT:
+		case DATA_FORMAT_R16G16B16_SINT:
+		case DATA_FORMAT_R16G16B16_SFLOAT:
+		case DATA_FORMAT_R8G8B8_UNORM:
+		case DATA_FORMAT_R8G8B8_SNORM:
+		case DATA_FORMAT_R8G8B8_UINT:
+		case DATA_FORMAT_R8G8B8_SINT:
+			return WGPUTextureFormat_Undefined;
 		default: {
 			static thread_local LocalVector<int> warned_formats;
 			int ifmt = (int)p_format;
@@ -1572,6 +1558,43 @@ WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p
 			}
 			return WGPUTextureFormat_Undefined;
 		}
+	}
+}
+
+// WebGPU does not support R8/RG8/R16/RG16 as storage texel formats. Any texture or
+// render target that must carry STORAGE usage has to be created as a 32-bit variant
+// instead. This helper centralizes that promotion so texture_create() and
+// render_pipeline_create() stay in sync — otherwise a texture upgraded to R32Float
+// gets bound to a pipeline that was built for R8Unorm and every submit fails with a
+// GPUValidationError. Canvas SDF (R8_UNORM + STORAGE_BIT + COLOR_ATTACHMENT_BIT) is
+// the motivating case.
+WGPUTextureFormat RenderingDeviceDriverWebGPU::_promote_storage_format(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_R8Unorm:
+		case WGPUTextureFormat_R8Snorm:
+		case WGPUTextureFormat_R16Float:
+		// R16Snorm/R16Unorm not in base emdawnwebgpu 4.0.10 headers
+			return WGPUTextureFormat_R32Float;
+		case WGPUTextureFormat_R8Uint:
+		case WGPUTextureFormat_R16Uint:
+			return WGPUTextureFormat_R32Uint;
+		case WGPUTextureFormat_R8Sint:
+		case WGPUTextureFormat_R16Sint:
+			return WGPUTextureFormat_R32Sint;
+		case WGPUTextureFormat_RG8Unorm:
+		case WGPUTextureFormat_RG8Snorm:
+		case WGPUTextureFormat_RG16Float:
+		// RG16Snorm/RG16Unorm not in base emdawnwebgpu 4.0.10 headers
+			return WGPUTextureFormat_RG32Float;
+		case WGPUTextureFormat_RG8Uint:
+		case WGPUTextureFormat_RG16Uint:
+			return WGPUTextureFormat_RG32Uint;
+		case WGPUTextureFormat_RG8Sint:
+		case WGPUTextureFormat_RG16Sint:
+			return WGPUTextureFormat_RG32Sint;
+		// RGBA16Snorm/RGBA16Unorm not in base emdawnwebgpu 4.0.10 headers
+		default:
+			return p_format;
 	}
 }
 
@@ -5644,7 +5667,16 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 		if (i < (uint32_t)subpass.color_references.size()) {
 			int32_t att_idx = subpass.color_references[i].attachment;
 			if (att_idx != ATTACHMENT_UNUSED && (uint32_t)att_idx < (uint32_t)rp->attachments.size()) {
-				fmt = _data_format_to_wgpu(rp->attachments[att_idx].format);
+				const RDD::Attachment &att_desc = rp->attachments[att_idx];
+				fmt = _data_format_to_wgpu(att_desc.format);
+				// Mirror the R8/RG8/R16/RG16 → 32-bit promotion in texture_create() for
+				// attachments that will also be used as storage textures. Canvas SDF
+				// (renderer_canvas_render_rd.cpp) declares R8_UNORM + STORAGE_BIT +
+				// COLOR_ATTACHMENT_BIT; the texture gets upgraded to R32Float but the
+				// pipeline would otherwise still target R8Unorm → validation mismatch.
+				if (att_desc.usage_flags & TEXTURE_USAGE_STORAGE_BIT) {
+					fmt = _promote_storage_format(fmt);
+				}
 				if (fmt == WGPUTextureFormat_Undefined) {
 					fmt = WGPUTextureFormat_RGBA8Unorm;
 				}

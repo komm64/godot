@@ -2544,6 +2544,7 @@ RDD::RenderPassID RenderingDevice::_render_pass_create(RenderingDeviceDriver *p_
 		RDD::Attachment description;
 		description.format = p_attachments[i].format;
 		description.samples = p_attachments[i].samples;
+		description.usage_flags = p_attachments[i].usage_flags;
 
 		// We can setup a framebuffer where we write to our VRS texture to set it up.
 		// We make the assumption here that if our texture is actually used as our VRS attachment.

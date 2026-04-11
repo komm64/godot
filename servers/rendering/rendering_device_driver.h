@@ -610,6 +610,10 @@ public:
 		AttachmentStoreOp stencil_store_op = ATTACHMENT_STORE_OP_DONT_CARE;
 		TextureLayout initial_layout = TEXTURE_LAYOUT_UNDEFINED;
 		TextureLayout final_layout = TEXTURE_LAYOUT_UNDEFINED;
+		// Original TextureUsageBits from AttachmentFormat — needed by drivers (e.g. WebGPU)
+		// that must promote the texture format when STORAGE_BIT is set, to keep pipelines in
+		// sync with the actual texture format produced by texture_create().
+		uint32_t usage_flags = 0;
 	};
 
 	struct AttachmentReference {

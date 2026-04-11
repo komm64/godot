@@ -151,6 +151,10 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	WGPUTextureFormat _data_format_to_wgpu(DataFormat p_format) const;
 	DataFormat _wgpu_to_data_format(WGPUTextureFormat p_format) const;
 	static WGPUVertexFormat _data_format_to_wgpu_vertex(DataFormat p_format);
+	// Promotes R8/RG8/R16/RG16 formats to their 32-bit equivalents when a texture
+	// or render target needs STORAGE usage (WebGPU does not support those as storage
+	// texel formats). Returns the input format unchanged for all other cases.
+	static WGPUTextureFormat _promote_storage_format(WGPUTextureFormat p_format);
 	WGPUBufferUsage _buffer_usage_to_wgpu(BitField<BufferUsageBits> p_usage) const;
 	WGPUTextureUsage _texture_usage_to_wgpu(BitField<TextureUsageBits> p_usage) const;
 	WGPUTextureDimension _texture_type_to_dimension(TextureType p_type) const;
