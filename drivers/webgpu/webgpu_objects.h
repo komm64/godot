@@ -62,6 +62,9 @@ struct WGTexture {
 	WGPUTextureView default_view = nullptr;
 	uint32_t debug_create_id = UINT32_MAX; // Monotonic counter for correlating [WGTEX] log lines.
 	WGPUTextureFormat format = WGPUTextureFormat_Undefined;
+	// Godot-side DataFormat remembered at creation so readback / allocation-size
+	// paths can look up true bytes-per-pixel instead of hardcoding bpp=4.
+	RDD::DataFormat rd_format = RDD::DATA_FORMAT_MAX;
 	WGPUTextureDimension dimension = WGPUTextureDimension_2D;
 	WGPUTextureViewDimension view_dimension = WGPUTextureViewDimension_2D;
 	uint32_t width = 0, height = 0, depth = 1;

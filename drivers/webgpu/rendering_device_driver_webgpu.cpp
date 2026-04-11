@@ -843,6 +843,7 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	WGTexture *tex = new WGTexture();
 
 	tex->format = _data_format_to_wgpu(p_format.format);
+	tex->rd_format = p_format.format;
 	tex->dimension = _texture_type_to_dimension(p_format.texture_type);
 	tex->view_dimension = _texture_type_to_view_dimension(p_format.texture_type);
 	tex->width = p_format.width;
@@ -984,6 +985,7 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared(TextureID p_or
 	if (p_view.format != DATA_FORMAT_MAX) {
 		view_desc.format = _data_format_to_wgpu(p_view.format);
 		tex->format = view_desc.format;
+		tex->rd_format = p_view.format;
 	} else {
 		view_desc.format = orig->format;
 	}
@@ -1018,6 +1020,9 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared_from_slice(Tex
 
 	WGPUTextureViewDescriptor view_desc = {};
 	view_desc.format = (p_view.format != DATA_FORMAT_MAX) ? _data_format_to_wgpu(p_view.format) : orig->format;
+	if (p_view.format != DATA_FORMAT_MAX) {
+		tex->rd_format = p_view.format;
+	}
 	view_desc.baseMipLevel = p_mipmap;
 	view_desc.mipLevelCount = p_mipmaps;
 	view_desc.baseArrayLayer = p_layer;
@@ -1101,10 +1106,14 @@ void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
 uint64_t RenderingDeviceDriverWebGPU::texture_get_allocation_size(TextureID p_texture) {
 	WGTexture *tex = (WGTexture *)(p_texture.id);
 	ERR_FAIL_NULL_V(tex, 0);
-	// Approximate: width * height * depth * layers * bpp * mipmaps.
-	// TODO: Use proper bytes_per_pixel for the format.
-	uint64_t bpp = 4; // Assume 4 bytes per pixel for now.
-	return tex->width * tex->height * tex->depth * tex->layers * bpp;
+	// Use Godot's format-aware helper (handles compressed block sizes, mipmaps,
+	// and per-format bpp). Fall back to a conservative bpp=4 estimate when the
+	// rd_format wasn't stored (shared/sliced views, etc.).
+	if (tex->rd_format != DATA_FORMAT_MAX) {
+		uint64_t layer_size = get_image_format_required_size(tex->rd_format, tex->width, tex->height, tex->depth, tex->mipmaps);
+		return layer_size * tex->layers;
+	}
+	return (uint64_t)tex->width * tex->height * tex->depth * tex->layers * 4;
 }
 
 void RenderingDeviceDriverWebGPU::texture_get_copyable_layout(TextureID p_texture, const TextureSubresource &p_subresource, TextureCopyableLayout *r_layout) {
@@ -1112,13 +1121,33 @@ void RenderingDeviceDriverWebGPU::texture_get_copyable_layout(TextureID p_textur
 	ERR_FAIL_NULL(tex);
 	ERR_FAIL_NULL(r_layout);
 
-	uint32_t bpp = 4; // TODO: Get from format.
 	uint32_t mip_width = MAX(1u, tex->width >> p_subresource.mipmap);
 	uint32_t mip_height = MAX(1u, tex->height >> p_subresource.mipmap);
+	uint32_t row_bytes = 0;
+	uint32_t rows_for_size = mip_height;
+
+	if (tex->rd_format != DATA_FORMAT_MAX) {
+		// Compressed formats (BCn / ETC2 / ASTC) pack their data in fixed-size
+		// blocks. Row pitch is (blocks_wide * block_byte_size) and "height" is
+		// measured in blocks for the copy layout.
+		uint32_t block_w = 1, block_h = 1;
+		get_compressed_image_format_block_dimensions(tex->rd_format, block_w, block_h);
+		if (block_w > 1 || block_h > 1) {
+			uint32_t block_byte_size = get_compressed_image_format_block_byte_size(tex->rd_format);
+			uint32_t blocks_wide = (mip_width + block_w - 1) / block_w;
+			uint32_t blocks_tall = (mip_height + block_h - 1) / block_h;
+			row_bytes = blocks_wide * block_byte_size;
+			rows_for_size = blocks_tall;
+		} else {
+			row_bytes = mip_width * get_image_format_pixel_size(tex->rd_format);
+		}
+	} else {
+		row_bytes = mip_width * 4; // Conservative fallback.
+	}
 
 	// WebGPU requires 256-byte row alignment for buffer <-> texture copies.
-	r_layout->row_pitch = ((mip_width * bpp + 255) / 256) * 256;
-	r_layout->size = r_layout->row_pitch * mip_height;
+	r_layout->row_pitch = ((row_bytes + 255) / 256) * 256;
+	r_layout->size = (uint64_t)r_layout->row_pitch * rows_for_size;
 }
 
 Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_texture, uint32_t p_layer) {
@@ -1136,7 +1165,13 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 		entry = &_readback_cache[key];
 	}
 
-	uint32_t bpp = 4; // Bytes per pixel (RGBA8 default, TODO: per-format)
+	// Format-aware bytes per pixel. Falls back to 4 if rd_format is missing
+	// (e.g. shared / sliced views). Compressed formats aren't exercised by
+	// texture_get_data() in Godot today, so the uncompressed path is sufficient.
+	uint32_t bpp = (tex->rd_format != DATA_FORMAT_MAX) ? get_image_format_pixel_size(tex->rd_format) : 4;
+	if (bpp == 0) {
+		bpp = 4;
+	}
 	uint32_t mip_w = tex->width;
 	uint32_t mip_h = tex->height;
 	uint32_t row_pitch = ((mip_w * bpp + 255) / 256) * 256; // 256-byte aligned
