@@ -2471,7 +2471,16 @@ Ref<Image> TextureStorage::_validate_texture_format(const Ref<Image> &p_image, T
 
 	// RGB formats are often not supported, only print warnings about them when launched with the --verbose flag.
 	const bool is_rgb_format = original_format == Image::FORMAT_RGB8 || original_format == Image::FORMAT_RGBH || original_format == Image::FORMAT_RGBF;
-	if ((is_print_verbose_enabled() || !is_rgb_format) && original_format != image->get_format()) {
+#ifdef WEBGPU_ENABLED
+	// L8 / LA8 are always converted to RGBA8 on WebGPU (no component swizzle;
+	// the luminance broadcast is baked into the texture data above). This is
+	// the intended path, not a fallback, so don't print the "not supported"
+	// warning for them unless --verbose is on.
+	const bool is_la_format = original_format == Image::FORMAT_L8 || original_format == Image::FORMAT_LA8;
+#else
+	const bool is_la_format = false;
+#endif
+	if ((is_print_verbose_enabled() || (!is_rgb_format && !is_la_format)) && original_format != image->get_format()) {
 		WARN_PRINT(vformat("Image format %s not supported by hardware, converting to %s.", Image::get_format_name(original_format), Image::get_format_name(image->get_format())));
 	}
 
