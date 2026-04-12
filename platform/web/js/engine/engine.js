@@ -436,6 +436,13 @@ const Engine = (function () {
 				'rg11b10ufloat-renderable',
 				'clip-distances',
 				'dual-source-blending',
+				// Texture compression families — without these, Godot's DXT5/ETC2/ASTC
+				// assets get decompressed on the CPU to RGBA8, which triggers a warning
+				// and wastes VRAM. The driver only reports the formats as supported
+				// when the corresponding feature is actually enabled here.
+				'texture-compression-bc',
+				'texture-compression-etc2',
+				'texture-compression-astc',
 			];
 			for (var i = 0; i < optionalFeatures.length; i++) {
 				if (adapter.features.has(optionalFeatures[i])) {

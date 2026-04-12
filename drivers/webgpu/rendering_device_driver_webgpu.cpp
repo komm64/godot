@@ -509,6 +509,22 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	// mapped to Undefined in pixel_formats_webgpu.h.
 	has_texture_formats_tier1 = false;
 
+	// Optional texture-compression families. The JS shell opts in to these when
+	// the adapter supports them; we must match that here so Godot only advertises
+	// the corresponding DataFormats when they'll actually work.
+	has_texture_compression_bc = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureCompressionBC);
+	has_texture_compression_etc2 = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureCompressionETC2);
+	has_texture_compression_astc = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureCompressionASTC);
+	if (has_texture_compression_bc) {
+		print_verbose("WebGPU: texture-compression-bc feature is available.");
+	}
+	if (has_texture_compression_etc2) {
+		print_verbose("WebGPU: texture-compression-etc2 feature is available.");
+	}
+	if (has_texture_compression_astc) {
+		print_verbose("WebGPU: texture-compression-astc feature is available.");
+	}
+
 	// Multiview not supported in WebGPU.
 	multiview_capabilities.is_supported = false;
 
@@ -1313,6 +1329,11 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_
 	// Classify the format into depth/stencil, compressed, or plain color.
 	bool is_depth_stencil = false;
 	bool is_compressed = false;
+	// Which optional compression family the format belongs to (so we can gate on
+	// the corresponding adapter feature). Only meaningful when is_compressed.
+	bool needs_bc = false;
+	bool needs_etc2 = false;
+	bool needs_astc = false;
 
 	switch (p_format) {
 		// Depth and depth/stencil formats.
@@ -1343,6 +1364,9 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_
 		case DATA_FORMAT_BC6H_SFLOAT_BLOCK:
 		case DATA_FORMAT_BC7_UNORM_BLOCK:
 		case DATA_FORMAT_BC7_SRGB_BLOCK:
+			is_compressed = true;
+			needs_bc = true;
+			break;
 		// ETC2 compressed formats.
 		case DATA_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
 		case DATA_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
@@ -1354,6 +1378,9 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_
 		case DATA_FORMAT_EAC_R11_SNORM_BLOCK:
 		case DATA_FORMAT_EAC_R11G11_UNORM_BLOCK:
 		case DATA_FORMAT_EAC_R11G11_SNORM_BLOCK:
+			is_compressed = true;
+			needs_etc2 = true;
+			break;
 		// ASTC compressed formats.
 		case DATA_FORMAT_ASTC_4x4_UNORM_BLOCK:
 		case DATA_FORMAT_ASTC_4x4_SRGB_BLOCK:
@@ -1384,6 +1411,7 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_
 		case DATA_FORMAT_ASTC_12x12_UNORM_BLOCK:
 		case DATA_FORMAT_ASTC_12x12_SRGB_BLOCK:
 			is_compressed = true;
+			needs_astc = true;
 			break;
 
 		default:
@@ -1398,8 +1426,18 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_
 	}
 
 	if (is_compressed) {
-		// Compressed textures: sampling + copy only. No render attachment, no storage.
-		flags.clear_flag(TEXTURE_USAGE_CAN_UPDATE_BIT); // Must use CAN_COPY_TO to upload.
+		// Gate on the corresponding optional feature — if the device didn't
+		// request it, the WGPU format technically exists in the enum but any
+		// attempt to create a texture with it will fail validation. Reporting
+		// it as unsupported here lets Godot fall back to CPU decompression.
+		if ((needs_bc && !has_texture_compression_bc) ||
+				(needs_etc2 && !has_texture_compression_etc2) ||
+				(needs_astc && !has_texture_compression_astc)) {
+			return 0;
+		}
+		// Compressed textures: sampling + copy only, no render attachment, no
+		// storage. CAN_UPDATE stays set — it maps to WGPUTextureUsage_CopyDst,
+		// which is valid for compressed textures (uploaded via queue.writeTexture).
 		return flags;
 	}
 
@@ -4172,15 +4210,31 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 
 	cmd->end_active_encoder();
 
+	// Compressed formats must pass a block-aligned copy extent. For mip levels
+	// smaller than the block size (e.g. a 2x2 mip of a BC3 texture), the physical
+	// size is the next block multiple, and WebGPU rejects non-multiple extents.
+	uint32_t block_w = 1, block_h = 1;
+	if (dst->rd_format != DATA_FORMAT_MAX) {
+		get_compressed_image_format_block_dimensions(dst->rd_format, block_w, block_h);
+	}
+
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferTextureCopyRegion &region = p_regions[i];
+
+		uint32_t copy_w = (uint32_t)region.texture_region_size.x;
+		uint32_t copy_h = (uint32_t)region.texture_region_size.y;
+		if (block_w > 1 || block_h > 1) {
+			copy_w = ((copy_w + block_w - 1) / block_w) * block_w;
+			copy_h = ((copy_h + block_h - 1) / block_h) * block_h;
+		}
 
 		// WGPUTexelCopyBufferInfo combines the buffer handle + layout (Dawn API)
 		WGPUTexelCopyBufferInfo src_info = {};
 		src_info.buffer = src->handle;
 		src_info.layout.offset = region.buffer_offset;
 		src_info.layout.bytesPerRow = ((region.row_pitch + 255) / 256) * 256; // 256-byte aligned.
-		src_info.layout.rowsPerImage = region.texture_region_size.y;
+		// rowsPerImage is measured in block rows for compressed formats.
+		src_info.layout.rowsPerImage = (block_h > 1) ? (copy_h / block_h) : copy_h;
 
 		WGPUTexelCopyTextureInfo dst_copy = {};
 		dst_copy.texture = dst->handle;
@@ -4188,7 +4242,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 		dst_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y, region.texture_subresource.layer };
 		dst_copy.aspect = WGPUTextureAspect_All;
 
-		WGPUExtent3D extent = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
+		WGPUExtent3D extent = { copy_w, copy_h, (uint32_t)region.texture_region_size.z };
 
 		wgpuCommandEncoderCopyBufferToTexture(cmd->encoder, &src_info, &dst_copy, &extent);
 	}
@@ -4204,8 +4258,21 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 
 	cmd->end_active_encoder();
 
+	// Block-alignment: see command_copy_buffer_to_texture for the rationale.
+	uint32_t block_w = 1, block_h = 1;
+	if (src->rd_format != DATA_FORMAT_MAX) {
+		get_compressed_image_format_block_dimensions(src->rd_format, block_w, block_h);
+	}
+
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferTextureCopyRegion &region = p_regions[i];
+
+		uint32_t copy_w = (uint32_t)region.texture_region_size.x;
+		uint32_t copy_h = (uint32_t)region.texture_region_size.y;
+		if (block_w > 1 || block_h > 1) {
+			copy_w = ((copy_w + block_w - 1) / block_w) * block_w;
+			copy_h = ((copy_h + block_h - 1) / block_h) * block_h;
+		}
 
 		WGPUTexelCopyTextureInfo src_copy = {};
 		src_copy.texture = src->handle;
@@ -4218,9 +4285,9 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 		dst_info.buffer = dst->handle;
 		dst_info.layout.offset = region.buffer_offset;
 		dst_info.layout.bytesPerRow = ((region.row_pitch + 255) / 256) * 256;
-		dst_info.layout.rowsPerImage = region.texture_region_size.y;
+		dst_info.layout.rowsPerImage = (block_h > 1) ? (copy_h / block_h) : copy_h;
 
-		WGPUExtent3D extent = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
+		WGPUExtent3D extent = { copy_w, copy_h, (uint32_t)region.texture_region_size.z };
 
 		wgpuCommandEncoderCopyTextureToBuffer(cmd->encoder, &src_copy, &dst_info, &extent);
 	}

@@ -81,6 +81,13 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	bool timestamp_supported = false;
 	bool has_texture_formats_tier1 = false;
 	bool float32_filterable_supported = false;
+	// Optional texture-compression features (BC, ETC2, ASTC). Requested by the JS
+	// shell at device creation; the driver must only report the corresponding
+	// DataFormats as supported when the feature is actually enabled, otherwise
+	// texture creation will fail at runtime.
+	bool has_texture_compression_bc = false;
+	bool has_texture_compression_etc2 = false;
+	bool has_texture_compression_astc = false;
 
 	RenderingShaderContainerFormatWebGPU *shader_container_format = nullptr;
 
