@@ -4236,6 +4236,160 @@ void RenderingDeviceDriverWebGPU::command_resolve_texture(CommandBufferID p_cmd_
 	WARN_PRINT_ONCE("WebGPU: command_resolve_texture not yet implemented.");
 }
 
+// Return the byte size of a single texel for a given WGPUTextureFormat.
+// Returns 0 for compressed or unknown formats.
+static uint32_t _wgpu_format_byte_size(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_R8Unorm:
+		case WGPUTextureFormat_R8Snorm:
+		case WGPUTextureFormat_R8Uint:
+		case WGPUTextureFormat_R8Sint:
+			return 1;
+		case WGPUTextureFormat_R16Uint:
+		case WGPUTextureFormat_R16Sint:
+		case WGPUTextureFormat_R16Float:
+		case WGPUTextureFormat_RG8Unorm:
+		case WGPUTextureFormat_RG8Snorm:
+		case WGPUTextureFormat_RG8Uint:
+		case WGPUTextureFormat_RG8Sint:
+			return 2;
+		case WGPUTextureFormat_R32Float:
+		case WGPUTextureFormat_R32Uint:
+		case WGPUTextureFormat_R32Sint:
+		case WGPUTextureFormat_RG16Uint:
+		case WGPUTextureFormat_RG16Sint:
+		case WGPUTextureFormat_RG16Float:
+		case WGPUTextureFormat_RGBA8Unorm:
+		case WGPUTextureFormat_RGBA8UnormSrgb:
+		case WGPUTextureFormat_RGBA8Snorm:
+		case WGPUTextureFormat_RGBA8Uint:
+		case WGPUTextureFormat_RGBA8Sint:
+		case WGPUTextureFormat_BGRA8Unorm:
+		case WGPUTextureFormat_BGRA8UnormSrgb:
+		case WGPUTextureFormat_RGB10A2Unorm:
+		case WGPUTextureFormat_RG11B10Ufloat:
+			return 4;
+		case WGPUTextureFormat_RG32Float:
+		case WGPUTextureFormat_RG32Uint:
+		case WGPUTextureFormat_RG32Sint:
+		case WGPUTextureFormat_RGBA16Uint:
+		case WGPUTextureFormat_RGBA16Sint:
+		case WGPUTextureFormat_RGBA16Float:
+			return 8;
+		case WGPUTextureFormat_RGBA32Float:
+		case WGPUTextureFormat_RGBA32Uint:
+		case WGPUTextureFormat_RGBA32Sint:
+			return 16;
+		default:
+			return 0;
+	}
+}
+
+// Encode a clear Color into the raw texel bytes for a given WGPUTextureFormat.
+// r_texel must point to at least 16 bytes and be pre-zeroed.
+static void _encode_clear_texel(WGPUTextureFormat p_format, const Color &p_color, uint8_t *r_texel) {
+	switch (p_format) {
+		// Float32 formats.
+		case WGPUTextureFormat_R32Float: {
+			float v = p_color.r;
+			memcpy(r_texel, &v, 4);
+		} break;
+		case WGPUTextureFormat_RG32Float: {
+			float v[2] = { p_color.r, p_color.g };
+			memcpy(r_texel, v, 8);
+		} break;
+		case WGPUTextureFormat_RGBA32Float: {
+			float v[4] = { p_color.r, p_color.g, p_color.b, p_color.a };
+			memcpy(r_texel, v, 16);
+		} break;
+
+		// Uint32 formats.
+		case WGPUTextureFormat_R32Uint: {
+			uint32_t v = (uint32_t)p_color.r;
+			memcpy(r_texel, &v, 4);
+		} break;
+		case WGPUTextureFormat_RG32Uint: {
+			uint32_t v[2] = { (uint32_t)p_color.r, (uint32_t)p_color.g };
+			memcpy(r_texel, v, 8);
+		} break;
+		case WGPUTextureFormat_RGBA32Uint: {
+			uint32_t v[4] = { (uint32_t)p_color.r, (uint32_t)p_color.g, (uint32_t)p_color.b, (uint32_t)p_color.a };
+			memcpy(r_texel, v, 16);
+		} break;
+
+		// Sint32 formats.
+		case WGPUTextureFormat_R32Sint: {
+			int32_t v = (int32_t)p_color.r;
+			memcpy(r_texel, &v, 4);
+		} break;
+		case WGPUTextureFormat_RG32Sint: {
+			int32_t v[2] = { (int32_t)p_color.r, (int32_t)p_color.g };
+			memcpy(r_texel, v, 8);
+		} break;
+		case WGPUTextureFormat_RGBA32Sint: {
+			int32_t v[4] = { (int32_t)p_color.r, (int32_t)p_color.g, (int32_t)p_color.b, (int32_t)p_color.a };
+			memcpy(r_texel, v, 16);
+		} break;
+
+		// Unorm8 formats.
+		case WGPUTextureFormat_R8Unorm: {
+			r_texel[0] = (uint8_t)CLAMP(p_color.r * 255.0f, 0.0f, 255.0f);
+		} break;
+		case WGPUTextureFormat_RG8Unorm: {
+			r_texel[0] = (uint8_t)CLAMP(p_color.r * 255.0f, 0.0f, 255.0f);
+			r_texel[1] = (uint8_t)CLAMP(p_color.g * 255.0f, 0.0f, 255.0f);
+		} break;
+		case WGPUTextureFormat_RGBA8Unorm:
+		case WGPUTextureFormat_RGBA8UnormSrgb: {
+			r_texel[0] = (uint8_t)CLAMP(p_color.r * 255.0f, 0.0f, 255.0f);
+			r_texel[1] = (uint8_t)CLAMP(p_color.g * 255.0f, 0.0f, 255.0f);
+			r_texel[2] = (uint8_t)CLAMP(p_color.b * 255.0f, 0.0f, 255.0f);
+			r_texel[3] = (uint8_t)CLAMP(p_color.a * 255.0f, 0.0f, 255.0f);
+		} break;
+		case WGPUTextureFormat_BGRA8Unorm:
+		case WGPUTextureFormat_BGRA8UnormSrgb: {
+			r_texel[0] = (uint8_t)CLAMP(p_color.b * 255.0f, 0.0f, 255.0f);
+			r_texel[1] = (uint8_t)CLAMP(p_color.g * 255.0f, 0.0f, 255.0f);
+			r_texel[2] = (uint8_t)CLAMP(p_color.r * 255.0f, 0.0f, 255.0f);
+			r_texel[3] = (uint8_t)CLAMP(p_color.a * 255.0f, 0.0f, 255.0f);
+		} break;
+
+		// Float16 formats.
+		case WGPUTextureFormat_R16Float: {
+			uint16_t v = Math::make_half_float(p_color.r);
+			memcpy(r_texel, &v, 2);
+		} break;
+		case WGPUTextureFormat_RG16Float: {
+			uint16_t v[2] = { Math::make_half_float(p_color.r), Math::make_half_float(p_color.g) };
+			memcpy(r_texel, v, 4);
+		} break;
+		case WGPUTextureFormat_RGBA16Float: {
+			uint16_t v[4] = { Math::make_half_float(p_color.r), Math::make_half_float(p_color.g),
+				Math::make_half_float(p_color.b), Math::make_half_float(p_color.a) };
+			memcpy(r_texel, v, 8);
+		} break;
+
+		// Uint16 formats.
+		case WGPUTextureFormat_R16Uint: {
+			uint16_t v = (uint16_t)p_color.r;
+			memcpy(r_texel, &v, 2);
+		} break;
+		case WGPUTextureFormat_RG16Uint: {
+			uint16_t v[2] = { (uint16_t)p_color.r, (uint16_t)p_color.g };
+			memcpy(r_texel, v, 4);
+		} break;
+		case WGPUTextureFormat_RGBA16Uint: {
+			uint16_t v[4] = { (uint16_t)p_color.r, (uint16_t)p_color.g,
+				(uint16_t)p_color.b, (uint16_t)p_color.a };
+			memcpy(r_texel, v, 8);
+		} break;
+
+		default:
+			// Zero-fill for unhandled formats (already zeroed).
+			break;
+	}
+}
+
 void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, const Color &p_color, const TextureSubresourceRange &p_subresources) {
 	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
 	WGTexture *tex = (WGTexture *)(p_texture.id);
@@ -4244,34 +4398,92 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 
 	cmd->end_active_encoder();
 
-	for (uint32_t mip = p_subresources.base_mipmap; mip < p_subresources.base_mipmap + p_subresources.mipmap_count; mip++) {
-		for (uint32_t layer = p_subresources.base_layer; layer < p_subresources.base_layer + p_subresources.layer_count; layer++) {
-			WGPUTextureViewDescriptor view_desc = {};
-			view_desc.format = tex->format;
-			view_desc.dimension = WGPUTextureViewDimension_2D;
-			view_desc.baseMipLevel = mip;
-			view_desc.mipLevelCount = 1;
-			view_desc.baseArrayLayer = layer;
-			view_desc.arrayLayerCount = 1;
-			view_desc.aspect = WGPUTextureAspect_All;
+	if (tex->usage & WGPUTextureUsage_RenderAttachment) {
+		// Fast path: clear via a zero-draw render pass (requires RenderAttachment usage).
+		for (uint32_t mip = p_subresources.base_mipmap; mip < p_subresources.base_mipmap + p_subresources.mipmap_count; mip++) {
+			for (uint32_t layer = p_subresources.base_layer; layer < p_subresources.base_layer + p_subresources.layer_count; layer++) {
+				WGPUTextureViewDescriptor view_desc = {};
+				view_desc.format = tex->format;
+				view_desc.dimension = WGPUTextureViewDimension_2D;
+				view_desc.baseMipLevel = mip;
+				view_desc.mipLevelCount = 1;
+				view_desc.baseArrayLayer = layer;
+				view_desc.arrayLayerCount = 1;
+				view_desc.aspect = WGPUTextureAspect_All;
 
-			WGPUTextureView view = wgpuTextureCreateView(tex->view_source, &view_desc);
+				WGPUTextureView view = wgpuTextureCreateView(tex->view_source, &view_desc);
 
-			WGPURenderPassColorAttachment color_att = {};
-			color_att.view = view;
-			color_att.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
-			color_att.loadOp = WGPULoadOp_Clear;
-			color_att.storeOp = WGPUStoreOp_Store;
-			color_att.clearValue = { p_color.r, p_color.g, p_color.b, p_color.a };
+				WGPURenderPassColorAttachment color_att = {};
+				color_att.view = view;
+				color_att.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+				color_att.loadOp = WGPULoadOp_Clear;
+				color_att.storeOp = WGPUStoreOp_Store;
+				color_att.clearValue = { p_color.r, p_color.g, p_color.b, p_color.a };
 
-			WGPURenderPassDescriptor rp_desc = {};
-			rp_desc.colorAttachmentCount = 1;
-			rp_desc.colorAttachments = &color_att;
+				WGPURenderPassDescriptor rp_desc = {};
+				rp_desc.colorAttachmentCount = 1;
+				rp_desc.colorAttachments = &color_att;
 
-			WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(cmd->encoder, &rp_desc);
-			wgpuRenderPassEncoderEnd(pass);
-			wgpuRenderPassEncoderRelease(pass);
-			wgpuTextureViewRelease(view);
+				WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(cmd->encoder, &rp_desc);
+				wgpuRenderPassEncoderEnd(pass);
+				wgpuRenderPassEncoderRelease(pass);
+				wgpuTextureViewRelease(view);
+			}
+		}
+	} else {
+		// Fallback for textures without RenderAttachment usage (e.g. storage-only
+		// compute textures). Uses wgpuQueueWriteTexture to fill with the clear color.
+		ERR_FAIL_COND_MSG(!(tex->usage & WGPUTextureUsage_CopyDst),
+				"Cannot clear texture: texture has neither RenderAttachment nor CopyDst usage.");
+
+		uint32_t bpp = _wgpu_format_byte_size(tex->format);
+		ERR_FAIL_COND_MSG(bpp == 0,
+				"Cannot clear texture via writeTexture: unsupported format.");
+
+		bool is_zero = (p_color.r == 0.0f && p_color.g == 0.0f && p_color.b == 0.0f && p_color.a == 0.0f);
+
+		// Encode one texel of the clear color.
+		uint8_t texel[16] = {};
+		if (!is_zero) {
+			_encode_clear_texel(tex->format, p_color, texel);
+		}
+
+		for (uint32_t mip = p_subresources.base_mipmap; mip < p_subresources.base_mipmap + p_subresources.mipmap_count; mip++) {
+			for (uint32_t layer = p_subresources.base_layer; layer < p_subresources.base_layer + p_subresources.layer_count; layer++) {
+				uint32_t w = MAX(1u, tex->width >> mip);
+				uint32_t h = MAX(1u, tex->height >> mip);
+				uint32_t row_bytes = w * bpp;
+
+				// Fill a CPU buffer with the clear texel pattern.
+				Vector<uint8_t> data;
+				data.resize(row_bytes * h);
+				uint8_t *ptr = data.ptrw();
+
+				if (is_zero) {
+					memset(ptr, 0, data.size());
+				} else {
+					for (uint32_t y = 0; y < h; y++) {
+						for (uint32_t x = 0; x < w; x++) {
+							memcpy(ptr + y * row_bytes + x * bpp, texel, bpp);
+						}
+					}
+				}
+
+				WGPUTexelCopyTextureInfo dst = {};
+				dst.texture = tex->view_source ? tex->view_source : tex->handle;
+				dst.mipLevel = mip;
+				dst.origin = { 0, 0, layer };
+				dst.aspect = WGPUTextureAspect_All;
+
+				WGPUTexelCopyBufferLayout layout = {};
+				layout.offset = 0;
+				layout.bytesPerRow = row_bytes;
+				layout.rowsPerImage = h;
+
+				WGPUExtent3D extent = { w, h, 1 };
+
+				wgpuQueueWriteTexture(queue, &dst, ptr, data.size(), &layout, &extent);
+			}
 		}
 	}
 }
