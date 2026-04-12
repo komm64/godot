@@ -196,6 +196,31 @@ public:
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) = 0;
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) = 0;
 	virtual void buffer_flush(BufferID p_buffer) {}
+	virtual void buffer_initiate_async_map(BufferID p_buffer) {} // WebGPU: start async map so it completes by next frame.
+
+	// Returns the actual pixel size of texture data on the GPU, when it differs
+	// from the engine's format pixel size (e.g. WebGPU promotes R8→R32Float for
+	// storage textures). Returns 0 if no conversion is needed (default).
+	virtual uint32_t texture_get_gpu_pixel_size(TextureID p_texture) { return 0; }
+
+	// Converts readback data from GPU format to engine format. Only called when
+	// texture_get_gpu_pixel_size() returned non-zero. Converts `p_width` pixels
+	// per row for `p_height` rows, reading from p_src (gpu_pitch stride) and
+	// writing to p_dst (engine_pitch stride).
+	virtual void texture_readback_convert(TextureID p_texture,
+			const uint8_t *p_src, uint32_t p_src_pitch,
+			uint8_t *p_dst, uint32_t p_dst_pitch,
+			uint32_t p_width, uint32_t p_height) {}
+
+	// Converts upload data from engine format to GPU format. Only called when
+	// texture_get_gpu_pixel_size() returned non-zero. Converts `p_width` pixels
+	// per row for `p_height` rows, reading from p_src (engine_pitch stride) and
+	// writing to p_dst (gpu_pitch stride).
+	virtual void texture_upload_convert(TextureID p_texture,
+			const uint8_t *p_src, uint32_t p_src_pitch,
+			uint8_t *p_dst, uint32_t p_dst_pitch,
+			uint32_t p_width, uint32_t p_height) {}
+
 	// Only for a buffer with BUFFER_USAGE_DEVICE_ADDRESS_BIT.
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) = 0;
 

@@ -416,6 +416,8 @@ public:
 		uint32_t depth = 0;
 		uint32_t mipmaps = 0;
 		RDD::DataFormat format = RDD::DATA_FORMAT_MAX;
+		uint32_t gpu_pixel_size = 0; // Non-zero when driver promotes format (e.g. R8→R32Float).
+		RDD::TextureID driver_texture_id = {}; // For readback conversion.
 	};
 
 public:

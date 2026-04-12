@@ -206,6 +206,17 @@ public:
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
 	/// Flush a buffer's shadow CPU data to the GPU via wgpuQueueWriteBuffer.
 	virtual void buffer_flush(BufferID p_buffer) override final;
+	/// WebGPU: initiate async buffer map so it completes by next frame.
+	virtual void buffer_initiate_async_map(BufferID p_buffer) override final;
+	virtual uint32_t texture_get_gpu_pixel_size(TextureID p_texture) override final;
+	virtual void texture_readback_convert(TextureID p_texture,
+			const uint8_t *p_src, uint32_t p_src_pitch,
+			uint8_t *p_dst, uint32_t p_dst_pitch,
+			uint32_t p_width, uint32_t p_height) override final;
+	virtual void texture_upload_convert(TextureID p_texture,
+			const uint8_t *p_src, uint32_t p_src_pitch,
+			uint8_t *p_dst, uint32_t p_dst_pitch,
+			uint32_t p_width, uint32_t p_height) override final;
 	/// Stub — WebGPU has no buffer device addresses. Returns 0.
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override final;
 	/// WebGPU-specific: direct buffer readback using persistent staging buffer cache.

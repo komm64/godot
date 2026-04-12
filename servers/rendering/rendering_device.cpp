@@ -1660,6 +1660,15 @@ Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vec
 	uint32_t pixel_rshift = get_compressed_image_format_pixel_rshift(texture->format);
 	uint32_t block_size = get_compressed_image_format_block_byte_size(texture->format);
 
+	// When the driver promotes the texture format (e.g. R8→R32Float for WebGPU
+	// storage textures), staging buffers must be sized for the GPU format and
+	// the data must be converted during upload.
+	uint32_t gpu_pixel_size = driver->texture_get_gpu_pixel_size(texture->driver_id);
+	uint32_t staging_pixel_size = (gpu_pixel_size > 0) ? gpu_pixel_size : pixel_size;
+	if (gpu_pixel_size > 0) {
+		// Format was promoted by the driver (e.g. R8→R32Float on WebGPU).
+	}
+
 	uint32_t region_size = texture_upload_region_size_px;
 
 	const uint8_t *read_ptr = p_data.ptr();
@@ -1692,7 +1701,7 @@ Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vec
 					uint32_t region_logic_w = MIN(region_size, logic_width - x);
 					uint32_t region_logic_h = MIN(region_size, logic_height - y);
 
-					uint32_t region_pitch = (region_w * pixel_size * block_w) >> pixel_rshift;
+					uint32_t region_pitch = (region_w * staging_pixel_size * block_w) >> pixel_rshift;
 					uint32_t pitch_step = driver->api_trait_get(RDD::API_TRAIT_TEXTURE_DATA_ROW_PITCH_STEP);
 					region_pitch = STEPIFY(region_pitch, pitch_step);
 					uint32_t to_allocate = region_pitch * region_h;
@@ -1719,7 +1728,18 @@ Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vec
 					ERR_FAIL_COND_V(region_w % block_w, ERR_BUG);
 					ERR_FAIL_COND_V(region_h % block_h, ERR_BUG);
 
-					_copy_region_block_or_regular(read_ptr_mipmap_layer, write_ptr, x, y, width, region_w, region_h, block_w, block_h, region_pitch, pixel_size, block_size);
+					if (gpu_pixel_size > 0 && block_w == 1 && block_h == 1) {
+						// Driver promoted the format. Convert engine data to GPU
+						// format in the staging buffer (e.g. R8 uint8 → R32Float).
+						uint32_t src_pitch = width * pixel_size;
+						const uint8_t *src_region = read_ptr_mipmap_layer + (y * width + x) * pixel_size;
+						driver->texture_upload_convert(texture->driver_id,
+								src_region, src_pitch,
+								write_ptr, region_pitch,
+								region_w, region_h);
+					} else {
+						_copy_region_block_or_regular(read_ptr_mipmap_layer, write_ptr, x, y, width, region_w, region_h, block_w, block_h, region_pitch, pixel_size, block_size);
+					}
 
 					RDD::BufferTextureCopyRegion copy_region;
 					copy_region.buffer_offset = alloc_offset;
@@ -2174,12 +2194,18 @@ Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, c
 	get_data_request.depth = tex->depth;
 	get_data_request.format = tex->format;
 	get_data_request.mipmaps = tex->mipmaps;
+	get_data_request.gpu_pixel_size = driver->texture_get_gpu_pixel_size(tex->driver_id);
+	get_data_request.driver_texture_id = tex->driver_id;
 
 	uint32_t block_w, block_h;
 	get_compressed_image_format_block_dimensions(tex->format, block_w, block_h);
 
 	uint32_t pixel_size = get_image_format_pixel_size(tex->format);
 	uint32_t pixel_rshift = get_compressed_image_format_pixel_rshift(tex->format);
+
+	// When the driver promotes the texture format (e.g. R8→R32Float for WebGPU
+	// storage textures), staging buffers must be sized for the GPU format.
+	uint32_t staging_pixel_size = (get_data_request.gpu_pixel_size > 0) ? get_data_request.gpu_pixel_size : pixel_size;
 
 	uint32_t w, h, d;
 	uint32_t required_align = driver->api_trait_get(RDD::API_TRAIT_TEXTURE_TRANSFER_ALIGNMENT);
@@ -2204,7 +2230,7 @@ Error RenderingDevice::texture_get_data_async(RID p_texture, uint32_t p_layer, c
 
 					uint32_t region_logic_w = MIN(region_size, logic_w - x);
 					uint32_t region_logic_h = MIN(region_size, logic_h - y);
-					uint32_t region_pitch = (region_w * pixel_size * block_w) >> pixel_rshift;
+					uint32_t region_pitch = (region_w * staging_pixel_size * block_w) >> pixel_rshift;
 					region_pitch = STEPIFY(region_pitch, pitch_step);
 
 					uint32_t to_allocate = region_pitch * region_h;
@@ -6740,6 +6766,18 @@ void RenderingDevice::_end_frame() {
 		ERR_PRINT("Found open compute list at the end of the frame, this should never happen (further compute will likely not work).");
 	}
 
+	// Flush upload staging buffers to the GPU. On backends where buffer_map()
+	// returns a CPU shadow copy (e.g. WebGPU), the data written during
+	// texture_update() / buffer_update() lives only in the shadow until
+	// buffer_unmap() flushes it via wgpuQueueWriteBuffer. This must happen
+	// before the command buffer that references these staging buffers is submitted.
+	// On Vulkan/Metal this is a no-op since buffer_map() returns GPU-visible memory.
+	for (int i = 0; i < upload_staging_buffers.blocks.size(); i++) {
+		driver->buffer_unmap(upload_staging_buffers.blocks[i].driver_id);
+		// Re-map immediately so the pointer stays valid for subsequent frames.
+		upload_staging_buffers.blocks.write[i].data_ptr = driver->buffer_map(upload_staging_buffers.blocks[i].driver_id);
+	}
+
 	// The command buffer must be copied into a stack variable as the driver workarounds can change the command buffer in use.
 	RDD::CommandBufferID command_buffer = frames[frame].command_buffer;
 	GodotProfileZoneGroupedFirst(_profile_zone, "_submit_transfer_workers");
@@ -6829,6 +6867,17 @@ void RenderingDevice::_execute_frame(bool p_present) {
 	// used, the CPU needs to wait on the work to be completed.
 	frames[frame].fence_signaled = true;
 
+	// Initiate async buffer maps for download staging buffers. On WebGPU,
+	// buffer_map is async (completes on next JS event loop tick). By starting
+	// the maps here (right after GPU submit), they will be complete by the
+	// time _stall_for_frame() reads the data on the next frame.
+	for (uint32_t i = 0; i < frames[frame].download_buffer_staging_buffers.size(); i++) {
+		driver->buffer_initiate_async_map(frames[frame].download_buffer_staging_buffers[i]);
+	}
+	for (uint32_t i = 0; i < frames[frame].download_texture_staging_buffers.size(); i++) {
+		driver->buffer_initiate_async_map(frames[frame].download_texture_staging_buffers[i]);
+	}
+
 	if (frame_can_present) {
 		if (separate_present_queue) {
 			// Issue the presentation separately if the presentation queue is different from the main queue.
@@ -6906,10 +6955,21 @@ void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 					}
 
 					write_ptr += ((region.texture_offset.y / block_h) * (w / block_w) + (region.texture_offset.x / block_w)) * unit_size;
-					for (uint32_t y = region_h / block_h; y > 0; y--) {
-						memcpy(write_ptr, read_ptr, (region_w / block_w) * unit_size);
-						write_ptr += (w / block_w) * unit_size;
-						read_ptr += region.row_pitch;
+
+					if (request.gpu_pixel_size > 0 && block_w == 1 && block_h == 1) {
+						// Driver promoted the format (e.g. R8→R32Float). The staging
+						// buffer holds GPU-format data that must be converted back.
+						uint32_t dst_pitch = (w / block_w) * unit_size;
+						driver->texture_readback_convert(request.driver_texture_id,
+								read_ptr, region.row_pitch,
+								write_ptr, dst_pitch,
+								region_w, region_h);
+					} else {
+						for (uint32_t y = region_h / block_h; y > 0; y--) {
+							memcpy(write_ptr, read_ptr, (region_w / block_w) * unit_size);
+							write_ptr += (w / block_w) * unit_size;
+							read_ptr += region.row_pitch;
+						}
 					}
 
 					driver->buffer_unmap(frames[p_frame].download_texture_staging_buffers[local_index]);

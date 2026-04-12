@@ -430,6 +430,7 @@ const Engine = (function () {
 			}
 			// Request optional texture format tiers used by Godot (r16snorm, rg16snorm, etc.).
 			var optionalFeatures = [
+				'readonly-and-readwrite-storage-textures',
 				'texture-formats-tier1',
 				'texture-formats-tier2',
 				'float32-filterable',
