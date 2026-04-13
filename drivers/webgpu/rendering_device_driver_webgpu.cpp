@@ -80,6 +80,19 @@ static bool _is_depth_format(WGPUTextureFormat p_format) {
 	}
 }
 
+// Returns true for 32-bit float formats that require the float32-filterable
+// feature for linear sampling (R32Float, RG32Float, RGBA32Float).
+static bool _is_float32_format(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_R32Float:
+		case WGPUTextureFormat_RG32Float:
+		case WGPUTextureFormat_RGBA32Float:
+			return true;
+		default:
+			return false;
+	}
+}
+
 // WebGPU only allows a specific subset of formats for storage textures.
 // Returns true if the format is valid, false otherwise.
 static bool _is_valid_storage_texture_format(WGPUTextureFormat p_format) {
@@ -3691,6 +3704,20 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 							} else {
 								entry.textureView = fallback_float_texture_view;
 							}
+						} else if (expected_sample == WGPUTextureSampleType_Float &&
+								!float32_filterable_supported &&
+								_is_float32_format(tex->format) &&
+								fallback_float_texture_view != nullptr) {
+							// R32Float/RG32Float/RGBA32Float textures are unfilterable
+							// without the float32-filterable feature (e.g., Android Chrome
+							// on Adreno). Substitute a filterable RGBA8 fallback to avoid
+							// validation errors. The texture data is lost but rendering
+							// continues without GPU errors.
+							if (expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
+								entry.textureView = fallback_cube_texture_view;
+							} else {
+								entry.textureView = fallback_float_texture_view;
+							}
 						} else if (expected_dim != WGPUTextureViewDimension_Undefined &&
 								expected_dim != tex->view_dimension) {
 							// Fix dimension mismatch: if the layout expects a different dimension
@@ -3773,6 +3800,15 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 							// Fix depth/float mismatch: combined sampler+texture bindings
 							// are always Float. If a depth fallback texture is provided,
 							// substitute a float fallback.
+							if (swt_expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
+								te.textureView = fallback_cube_texture_view;
+							} else {
+								te.textureView = fallback_float_texture_view;
+							}
+						} else if (!float32_filterable_supported &&
+								_is_float32_format(tex->format) &&
+								fallback_float_texture_view != nullptr) {
+							// R32Float/RG32Float/RGBA32Float unfilterable without feature.
 							if (swt_expected_dim == WGPUTextureViewDimension_Cube && fallback_cube_texture_view != nullptr) {
 								te.textureView = fallback_cube_texture_view;
 							} else {
