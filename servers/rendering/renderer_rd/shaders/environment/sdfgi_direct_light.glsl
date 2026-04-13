@@ -263,7 +263,7 @@ void main() {
 	for (uint i = 0; i < params.light_count; i++) {
 		float attenuation = 1.0;
 		vec3 direction;
-		float light_distance = 1e20;
+		float light_distance = 1e6;
 
 		switch (lights.data[i].type) {
 			case LIGHT_TYPE_DIRECTIONAL: {

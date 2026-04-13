@@ -2815,7 +2815,7 @@ void fragment_shader(in SceneData scene_data) {
 
 		vec3 cam_normal = mat3(inv_view_matrix) * normalize(normal_interp);
 
-		float closest_dist = -1e20;
+		float closest_dist = -1e6;
 
 		for (uint i = 0; i < 6; i++) {
 			float d = dot(cam_normal, aniso_dir[i]);

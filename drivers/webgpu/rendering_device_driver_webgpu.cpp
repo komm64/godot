@@ -2693,9 +2693,11 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		}
 
 		// Chrome doesn't support the 'sized_binding_array' WGSL language feature.
-		// Naga converts GLSL sampler arrays like "sampler2DArray tex[1]" to
-		// "binding_array<texture_2d_array<f32>, 1>" in WGSL. Fix: replace
-		// "binding_array<T, 1>" with just "T", and fix "varname[0]" → "varname".
+		// Naga converts GLSL sampler arrays like "sampler2DArray tex[N]" to
+		// "binding_array<texture_2d_array<f32>, N>" in WGSL. Fix: replace
+		// "binding_array<T, N>" with just "T", and fix "varname[expr]" → "varname".
+		// For N>1 (e.g. lightmap_textures[16]), this degrades to single-element
+		// access — acceptable on web where multi-lightmap scenes are rare.
 		if (strstr(wgsl_str, "binding_array<")) {
 			String ws(wgsl_str);
 			Vector<String> binding_array_vars;
@@ -2718,8 +2720,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				int64_t last_comma = inner.rfind(",");
 				if (last_comma == -1) { search_from = p; continue; }
 				String type_part = inner.substr(0, last_comma).strip_edges();
-				int count_val = inner.substr(last_comma + 1).strip_edges().to_int();
-				if (count_val == 1) {
+				{
 					// Extract variable name (identifier immediately before the ':')
 					int64_t name_end = ba_pos;
 					while (name_end > 0 && ws[name_end - 1] == ' ') name_end--;
@@ -2734,15 +2735,13 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					if (!var_name.is_empty()) {
 						binding_array_vars.push_back(var_name);
 					}
-					// Replace ": binding_array<TYPE, 1>" with ": TYPE"
+					// Replace ": binding_array<TYPE, N>" with ": TYPE"
 					String new_type = ": " + type_part;
 					ws = ws.substr(0, ba_pos) + new_type + ws.substr(p);
 					search_from = ba_pos + (int64_t)new_type.length();
-				} else {
-					search_from = p;
 				}
 			}
-			// Replace VAR_NAME[any_expr] with VAR_NAME for all unwrapped size-1 binding arrays.
+			// Replace VAR_NAME[any_expr] with VAR_NAME for all unwrapped binding arrays.
 			// Naga may use a variable index (e.g. varname[_e889]) not just varname[0].
 			for (const String &var : binding_array_vars) {
 				int64_t vlen = (int64_t)var.length();
@@ -3082,10 +3081,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					entry = {};
 					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
 					entry.visibility = vis;
-					// NAGA reduces binding arrays to size 1.
-					if (u.length > 1) {
-						entry.bindingArraySize = 1;
-					}
+					// FLATTEN-BA pass removes all binding_array<T,N> from WGSL,
+					// so layout entries are always non-array (no bindingArraySize).
 					{ uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
 					  entry.sampler.type = (wgsl_is_comparison_sampler.has(k) && wgsl_is_comparison_sampler[k])
 						  ? WGPUSamplerBindingType_Comparison : WGPUSamplerBindingType_Filtering; }
@@ -3099,10 +3096,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					entry = {};
 					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
 					entry.visibility = vis;
-					// NAGA reduces binding arrays to size 1.
-					if (u.length > 1) {
-						entry.bindingArraySize = 1;
-					}
+					// FLATTEN-BA pass removes all binding_array<T,N> from WGSL,
+					// so layout entries are always non-array (no bindingArraySize).
 					{ uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
 					  bool is_ms = wgsl_is_multisampled_texture.has(k) && wgsl_is_multisampled_texture[k];
 					  bool is_depth = wgsl_is_depth_texture.has(k) && wgsl_is_depth_texture[k];
@@ -5797,6 +5792,80 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 			memcpy(q, "var<storage, read>      ", 24);
 			q += 24;
 		}
+	}
+
+	// FLATTEN-BA: Remove binding_array<T, N> → T (same pass as in shader_create_from_container).
+	// Chrome doesn't support 'sized_binding_array'; Naga emits it for GLSL texture arrays.
+	if (strstr(wgsl_str, "binding_array<")) {
+		String ws(wgsl_str);
+		Vector<String> binding_array_vars;
+		int64_t search_from = 0;
+		while (true) {
+			int64_t ba_pos = ws.find(": binding_array<", search_from);
+			if (ba_pos == -1) break;
+			int64_t inner_start = ba_pos + (int64_t)strlen(": binding_array<");
+			int depth = 1;
+			int64_t p = inner_start;
+			int64_t ws_len = (int64_t)ws.length();
+			while (p < ws_len && depth > 0) {
+				char32_t c = ws[p];
+				if (c == '<') depth++;
+				else if (c == '>') depth--;
+				p++;
+			}
+			String inner = ws.substr(inner_start, p - 1 - inner_start);
+			int64_t last_comma = inner.rfind(",");
+			if (last_comma == -1) { search_from = p; continue; }
+			String type_part = inner.substr(0, last_comma).strip_edges();
+			{
+				int64_t name_end = ba_pos;
+				while (name_end > 0 && ws[name_end - 1] == ' ') name_end--;
+				int64_t name_start = name_end;
+				while (name_start > 0) {
+					char32_t c = ws[name_start - 1];
+					if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+						name_start--;
+					else break;
+				}
+				String var_name = ws.substr(name_start, name_end - name_start);
+				if (!var_name.is_empty()) {
+					binding_array_vars.push_back(var_name);
+				}
+				String new_type = ": " + type_part;
+				ws = ws.substr(0, ba_pos) + new_type + ws.substr(p);
+				search_from = ba_pos + (int64_t)new_type.length();
+			}
+		}
+		for (const String &var : binding_array_vars) {
+			int64_t vlen = (int64_t)var.length();
+			int64_t search_pos = 0;
+			while (true) {
+				String needle = var + "[";
+				int64_t idx_pos = ws.find(needle, search_pos);
+				if (idx_pos == -1) break;
+				if (idx_pos > 0) {
+					char32_t before = ws[idx_pos - 1];
+					if (before == '_' || (before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') || (before >= '0' && before <= '9')) {
+						search_pos = idx_pos + 1;
+						continue;
+					}
+				}
+				int64_t pp = idx_pos + vlen + 1;
+				int depth2 = 1;
+				int64_t ws_len2 = (int64_t)ws.length();
+				while (pp < ws_len2 && depth2 > 0) {
+					if (ws[pp] == '[') depth2++;
+					else if (ws[pp] == ']') depth2--;
+					pp++;
+				}
+				ws = ws.substr(0, idx_pos) + var + ws.substr(pp);
+				search_pos = idx_pos + vlen;
+			}
+		}
+		free(wgsl_str);
+		CharString cs = ws.utf8();
+		wgsl_str = (char *)malloc(cs.length() + 1);
+		memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
 	}
 
 	WGPUShaderSourceWGSL wgsl_source = {};
