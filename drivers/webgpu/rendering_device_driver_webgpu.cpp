@@ -129,6 +129,14 @@ RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
 		wgpuBufferRelease(push_constant_ring_buffer);
 		push_constant_ring_buffer = nullptr;
 	}
+	if (empty_bind_group) {
+		wgpuBindGroupRelease(empty_bind_group);
+		empty_bind_group = nullptr;
+	}
+	if (empty_bind_group_layout) {
+		wgpuBindGroupLayoutRelease(empty_bind_group_layout);
+		empty_bind_group_layout = nullptr;
+	}
 
 	// Release fallback textures and views.
 	if (fallback_float_texture_view) {
@@ -248,6 +256,22 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		bg_desc.entries = &bg_entry;
 		push_constant_bind_group = wgpuDeviceCreateBindGroup(device, &bg_desc);
 		ERR_FAIL_COND_V(push_constant_bind_group == nullptr, ERR_CANT_CREATE);
+	}
+
+	// Create a persistent empty bind group for pipeline layout gaps.
+	// Firefox/wgpu requires all bind group slots to be set before draw calls,
+	// even if the BGL at that slot has zero entries.
+	{
+		WGPUBindGroupLayoutDescriptor empty_desc = {};
+		empty_desc.entryCount = 0;
+		empty_bind_group_layout = wgpuDeviceCreateBindGroupLayout(device, &empty_desc);
+		ERR_FAIL_COND_V(empty_bind_group_layout == nullptr, ERR_CANT_CREATE);
+
+		WGPUBindGroupDescriptor bg_desc = {};
+		bg_desc.layout = empty_bind_group_layout;
+		bg_desc.entryCount = 0;
+		empty_bind_group = wgpuDeviceCreateBindGroup(device, &bg_desc);
+		ERR_FAIL_COND_V(empty_bind_group == nullptr, ERR_CANT_CREATE);
 	}
 
 	// Create a small fallback float texture (4x4, RGBA8Unorm, all zeros).
@@ -2563,6 +2587,12 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	// Maps (set_index << 16 | alias_binding) → depth_binding (the adjacent depth texture).
 	HashMap<uint32_t, uint32_t> wgsl_depth_alias_bindings;
 
+	// Maps (set_index << 16 | binding) → WGPUShaderStage bitmask of stages that actually
+	// declare this storage buffer binding in their WGSL.  Used to set per-stage visibility
+	// so fragment-only storage buffers don't consume vertex buffer slots on Metal.
+	// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
+	HashMap<uint32_t, uint32_t> wgsl_buffer_stages;
+
 	// --- Create one WGPUShaderModule per stage ---
 	Vector<RenderingShaderContainer::Shader> &stage_shaders = p_shader_container->shaders;
 	for (int i = 0; i < stage_shaders.size(); i++) {
@@ -2909,12 +2939,58 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			}
 		}
 
-		// Scan WGSL for storage buffer access modes.
+		// Parse storage buffer binding usage metadata from the naga converter.
+		// Each "//SSBO_USED:group,binding" line at the top of the WGSL indicates
+		// a storage buffer that the entry point actually uses (via naga's call-graph
+		// reachability analysis). This lets us set per-stage BGL visibility so
+		// fragment-only storage buffers don't consume vertex buffer slots on Metal.
+		// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
+		{
+			WGPUShaderStage current_wgpu_stage = WGPUShaderStage_None;
+			if (s.shader_stage == RDD::SHADER_STAGE_VERTEX) { current_wgpu_stage = WGPUShaderStage_Vertex; }
+			else if (s.shader_stage == RDD::SHADER_STAGE_FRAGMENT) { current_wgpu_stage = WGPUShaderStage_Fragment; }
+			else if (s.shader_stage == RDD::SHADER_STAGE_COMPUTE) { current_wgpu_stage = WGPUShaderStage_Compute; }
+
+			const char *p = wgsl_str;
+			int ssbo_count = 0;
+			while (strncmp(p, "//SSBO_USED:", 12) == 0) {
+				p += 12;
+				uint32_t group = 0, binding = 0;
+				while (*p >= '0' && *p <= '9') { group = group * 10 + (*p - '0'); p++; }
+				if (*p == ',') { p++; }
+				while (*p >= '0' && *p <= '9') { binding = binding * 10 + (*p - '0'); p++; }
+				while (*p == '\n' || *p == '\r') { p++; }
+
+				uint32_t key = (group << 16) | binding;
+				if (wgsl_buffer_stages.has(key)) {
+					wgsl_buffer_stages[key] |= (uint32_t)current_wgpu_stage;
+				} else {
+					wgsl_buffer_stages[key] = (uint32_t)current_wgpu_stage;
+				}
+				ssbo_count++;
+			}
+#ifdef WEB_ENABLED
+			EM_ASM({
+				console.log('[SSBO-META] godot_stage=' + $0 + ' wgpu_stage=' + $1 + ' ssbo_used_count=' + $2);
+			}, (int)s.shader_stage, (int)current_wgpu_stage, ssbo_count);
+			if (ssbo_count > 0) {
+				for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_buffer_stages) {
+					static int _meta_entry_log = 0;
+					if (_meta_entry_log < 30) {
+						EM_ASM({
+							console.log('  [META-ENTRY] key=0x' + $0.toString(16) + ' vis=' + $1);
+						}, (int)kv.key, (int)kv.value);
+						_meta_entry_log++;
+					}
+				}
+			}
+#endif
+		}
+
+		// Scan WGSL for storage buffer access modes and uniform bindings.
 		// NAGA actual output formats:
 		//   - Read-write: "var<storage, read_write>"  (space after comma)
 		//   - Read-only:  "var<storage>"              (NO access modifier — NAGA omits "read" for LOAD-only)
-		// Note: "var<storage, read>" and "var<storage,read>" are valid WGSL but NOT emitted by NAGA;
-		// we match them anyway for robustness.
 		{
 			const char *p = wgsl_str;
 			while ((p = strstr(p, "@group(")) != nullptr) {
@@ -2934,8 +3010,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 							wgsl_ssbo_readonly[key] = true;
 							break;
 						} else if (strncmp(fwd, "var<storage>", 12) == 0) {
-							// NAGA emits var<storage> (no access mode) for LOAD-only (read-only) storage:
-							// address_space_str returns (Some("storage"), None) when !access.contains(STORE).
 							uint32_t key = ((uint32_t)grp << 16) | (uint32_t)bnd;
 							wgsl_ssbo_readonly[key] = true;
 							break;
@@ -3043,6 +3117,21 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	}
 
 	// --- Build WGPUBindGroupLayout for each descriptor set ---
+#ifdef WEB_ENABLED
+	// Dump metadata for shaders with many storage buffers (scene shader has 10+).
+	if (wgsl_buffer_stages.size() > 5) {
+		static int _scene_meta_dump = 0;
+		if (_scene_meta_dump < 3) {
+			EM_ASM({ console.log('[SCENE-META] wgsl_buffer_stages entries=' + $0); }, (int)wgsl_buffer_stages.size());
+			for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_buffer_stages) {
+				EM_ASM({
+					console.log('  [SCENE-META] key=0x' + $0.toString(16) + ' (set=' + ($0 >> 16) + ' bind=' + ($0 & 0xFFFF) + ') vis=' + $1);
+				}, (int)kv.key, (int)kv.value);
+			}
+			_scene_meta_dump++;
+		}
+	}
+#endif
 	const uint32_t set_count = (uint32_t)shader_refl.uniform_sets.size();
 	shader->bind_group_infos.resize(set_count);
 	shader->bind_group_layouts.resize(set_count);
@@ -3196,8 +3285,15 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					} else {
 						bool is_readonly = wgsl_ssbo_readonly.has(k) ? wgsl_ssbo_readonly[k] : !u.writable;
 						entry.buffer.type = is_readonly ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
-						if (!is_readonly) { entry.visibility = entry.visibility & ~(WGPUShaderStage)WGPUShaderStage_Vertex; }
-
+						// Use per-stage visibility from naga metadata for storage buffers.
+						// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
+						if (wgsl_buffer_stages.has(k)) {
+							entry.visibility = (WGPUShaderStage)wgsl_buffer_stages[k];
+						} else if (!wgsl_buffer_stages.is_empty()) {
+							// Buffer is declared in SPIR-V but not used by any entry point.
+							// Set visibility to None — doesn't count against any stage's limit.
+							entry.visibility = (WGPUShaderStage)0;
+						}
 					}
 					bge.layout_entry = entry;
 				} break;
@@ -3236,7 +3332,12 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					  } else {
 						  bool is_readonly = wgsl_ssbo_readonly.has(k) ? wgsl_ssbo_readonly[k] : !u.writable;
 						  entry.buffer.type = is_readonly ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
-						  if (!is_readonly) { entry.visibility = entry.visibility & ~(WGPUShaderStage)WGPUShaderStage_Vertex; }
+						  // Use per-stage visibility from naga metadata (see UNIFORM_TYPE_STORAGE_BUFFER above).
+						  if (wgsl_buffer_stages.has(k)) {
+							  entry.visibility = (WGPUShaderStage)wgsl_buffer_stages[k];
+						  } else if (!wgsl_buffer_stages.is_empty()) {
+							  entry.visibility = (WGPUShaderStage)0;
+						  }
 					  } }
 					// Only buffer bindings support dynamic offsets; storage textures must not set it.
 					entry.buffer.hasDynamicOffset = !is_storage_tex;
@@ -3356,13 +3457,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	LocalVector<WGPUBindGroupLayout> all_layouts;
 	all_layouts.resize(total_groups);
 
-	// Create empty layouts for any gaps between sets and push constant slot.
-	WGPUBindGroupLayout empty_layout = nullptr;
-	if (total_groups > set_count) {
-		WGPUBindGroupLayoutDescriptor empty_desc = {};
-		empty_desc.entryCount = 0;
-		empty_layout = wgpuDeviceCreateBindGroupLayout(device, &empty_desc);
-	}
+	// Use the persistent empty layout for gap slots between sets and push constant slot.
 
 	for (uint32_t i = 0; i < total_groups; i++) {
 		if (has_pc && i == pc_group) {
@@ -3395,7 +3490,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						merged_entries.push_back(shader->bind_group_infos[i].entries[u_idx2].layout_entry);
 					}
 				}
-				// Add the PC ring-buffer entry: PUSH_CONSTANT_RING_BINDING, read-only storage, hasDynamicOffset=true.
+				// Add the PC ring-buffer entry: PUSH_CONSTANT_RING_BINDING, uniform, hasDynamicOffset=true.
 				// Safety: skip if any existing entry is already at PUSH_CONSTANT_RING_BINDING.
 				bool has_pc_binding = false;
 				for (const auto &me : merged_entries) { if (me.binding == PUSH_CONSTANT_RING_BINDING) { has_pc_binding = true; break; } }
@@ -3435,9 +3530,20 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				all_layouts[i] = push_constant_bind_group_layout;
 			}
 		} else if (i < set_count) {
-			all_layouts[i] = shader->bind_group_layouts[i];
+			// Check if this set is empty (no uniforms defined in GLSL).
+			// E.g., CanvasShaderRD has sets 0, 2, 3 but no set 1.
+			bool is_empty_set = (i >= (uint32_t)shader->bind_group_infos.size() ||
+					shader->bind_group_infos[i].entries.is_empty());
+			if (is_empty_set) {
+				all_layouts[i] = empty_bind_group_layout;
+				shader->gap_bind_group_indices.push_back(i);
+			} else {
+				all_layouts[i] = shader->bind_group_layouts[i];
+			}
 		} else {
-			all_layouts[i] = empty_layout ? empty_layout : push_constant_bind_group_layout;
+			// Gap slot — use empty layout and record for pre-binding at draw time.
+			all_layouts[i] = empty_bind_group_layout;
+			shader->gap_bind_group_indices.push_back(i);
 		}
 	}
 
@@ -3452,10 +3558,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 	shader->pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &pl_desc);
 	ERR_FAIL_COND_V_MSG(shader->pipeline_layout == nullptr, ShaderID(), "WebGPU: wgpuDeviceCreatePipelineLayout failed.");
-
-	if (empty_layout) {
-		wgpuBindGroupLayoutRelease(empty_layout);
-	}
 
 	return ShaderID(shader);
 }
@@ -5381,6 +5483,14 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 
 	wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, pw->render_handle);
 	cmd->render_state.current_pipeline = pw;
+
+	// Pre-bind empty bind groups at pipeline layout gap slots.
+	// Firefox/wgpu requires all bind group indices to be set before draw calls.
+	if (pw->shader) {
+		for (uint32_t gap_idx : pw->shader->gap_bind_group_indices) {
+			wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, gap_idx, empty_bind_group, 0, nullptr);
+		}
+	}
 }
 
 void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) {
@@ -6239,6 +6349,49 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	CharString _pipeline_label_cs = _pipeline_label_str.utf8();
 	desc.label = { _pipeline_label_cs.get_data(), WGPU_STRLEN };
 
+	// DIAG-3: Count vertex-stage storage buffer slots across all descriptor sets.
+	{
+		int vtx_storage_count = 0;
+		int vtx_uniform_count = 0;
+		for (uint32_t s = 0; s < (uint32_t)shader->bind_group_infos.size(); s++) {
+			for (const auto &e : shader->bind_group_infos[s].entries) {
+				bool has_vtx = (e.layout_entry.visibility & WGPUShaderStage_Vertex) != 0;
+				bool is_storage = (e.layout_entry.buffer.type == WGPUBufferBindingType_ReadOnlyStorage ||
+								  e.layout_entry.buffer.type == WGPUBufferBindingType_Storage);
+				bool is_uniform = (e.layout_entry.buffer.type == WGPUBufferBindingType_Uniform);
+				if (has_vtx && is_storage) vtx_storage_count++;
+				if (has_vtx && is_uniform) vtx_uniform_count++;
+			}
+		}
+		static int _buf_count_log = 0;
+		if (_buf_count_log < 30) {
+			EM_ASM({
+				console.log('[BUF-SLOTS] pipe=' + UTF8ToString($0) + ' vtx_storage=' + $1 +
+					' vtx_uniform=' + $2 + ' specialized=' + ($3 ? 'yes' : 'no'));
+			}, _pipeline_label_cs.get_data(), vtx_storage_count, vtx_uniform_count, specialized_vertex ? 1 : 0);
+			// Log individual vertex storage buffers for the first few pipelines
+			if (_buf_count_log < 5 && vtx_storage_count > 6) {
+				for (uint32_t s = 0; s < (uint32_t)shader->bind_group_infos.size(); s++) {
+					for (uint32_t ei = 0; ei < (uint32_t)shader->bind_group_infos[s].entries.size(); ei++) {
+						const auto &e = shader->bind_group_infos[s].entries[ei];
+						bool has_vtx = (e.layout_entry.visibility & WGPUShaderStage_Vertex) != 0;
+						bool is_storage = (e.layout_entry.buffer.type == WGPUBufferBindingType_ReadOnlyStorage ||
+										  e.layout_entry.buffer.type == WGPUBufferBindingType_Storage);
+						bool is_uniform = (e.layout_entry.buffer.type == WGPUBufferBindingType_Uniform);
+						if (has_vtx && (is_storage || is_uniform)) {
+							EM_ASM({
+								console.log('  [BUF-DETAIL] set=' + $0 + ' binding=' + $1 +
+									' type=' + ($2 ? 'storage' : 'uniform') +
+									' vis=' + $3);
+							}, (int)s, (int)e.layout_entry.binding, is_storage ? 1 : 0, (int)e.layout_entry.visibility);
+						}
+					}
+				}
+			}
+			_buf_count_log++;
+		}
+	}
+
 	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
 	ERR_FAIL_COND_V_MSG(!pipeline, PipelineID(), "WebGPU: Failed to create render pipeline.");
 
@@ -6273,6 +6426,13 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_pipeline(CommandBufferID 
 
 	wgpuComputePassEncoderSetPipeline(cmd->compute_encoder, pw->compute_handle);
 	cmd->render_state.current_pipeline = pw;
+
+	// Pre-bind empty bind groups at pipeline layout gap slots.
+	if (pw->shader) {
+		for (uint32_t gap_idx : pw->shader->gap_bind_group_indices) {
+			wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, gap_idx, empty_bind_group, 0, nullptr);
+		}
+	}
 }
 
 void RenderingDeviceDriverWebGPU::command_bind_compute_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) {

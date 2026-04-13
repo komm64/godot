@@ -30,6 +30,9 @@
 
 #include "render_forward_mobile.h"
 #include "core/config/project_settings.h"
+#ifdef WEB_ENABLED
+#include <emscripten.h>
+#endif
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
@@ -2351,6 +2354,20 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 		pipeline_specialization.multimesh_has_color = bool(inst->flags_cache & INSTANCE_DATA_FLAG_MULTIMESH_HAS_COLOR);
 		pipeline_specialization.multimesh_has_custom_data = bool(inst->flags_cache & INSTANCE_DATA_FLAG_MULTIMESH_HAS_CUSTOM_DATA);
 
+#ifdef WEB_ENABLED
+		// DIAG-1: Verify multimesh flags reach the pipeline specialization.
+		static int _mm_flag_log = 0;
+		if (inst->instance_count > 1 && _mm_flag_log < 30) {
+			EM_ASM({
+				console.log('[MM-FLAGS] inst=' + $0 + ' base=0x' + ($1>>>0).toString(16) +
+					' cache=0x' + ($2>>>0).toString(16) + ' mm=' + $3 +
+					' p0=0x' + ($4>>>0).toString(16));
+			}, (int)inst->instance_count, (int)inst->base_flags, (int)inst->flags_cache,
+				pipeline_specialization.multimesh ? 1 : 0, (int)pipeline_specialization.packed_0);
+			_mm_flag_log++;
+		}
+#endif
+
 		SceneState::PushConstant push_constant;
 		push_constant.base_index = i + p_params->element_offset;
 
@@ -2488,6 +2505,19 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 					pipeline_valid = true;
 					prev_shader = shader;
 					prev_pipeline_hash = pipeline_hash;
+#ifdef WEB_ENABLED
+					// DIAG-2: Which pipeline variant is used for multimesh draws?
+					static int _mm_pipe_log = 0;
+					if (inst->instance_count > 1 && _mm_pipe_log < 30) {
+						EM_ASM({
+							console.log('[MM-PIPE] inst=' + $0 + ' uber=' + $1 +
+								' mm_spec=' + $2 + ' p0=0x' + ($3>>>0).toString(16));
+						}, (int)inst->instance_count, (int)pipeline_key.ubershader,
+							pipeline_specialization.multimesh ? 1 : 0,
+							(int)pipeline_specialization.packed_0);
+						_mm_pipe_log++;
+					}
+#endif
 					break;
 				} else {
 					pipeline_key.ubershader++;

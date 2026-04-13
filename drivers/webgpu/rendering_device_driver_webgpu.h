@@ -109,12 +109,18 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	uint32_t push_constant_shadow_dirty_start = UINT32_MAX;
 	uint32_t push_constant_shadow_dirty_end = 0;
 
-	// Universal push constant bind group layout: group N, binding 0,
-	// uniform buffer with hasDynamicOffset=true. Created once at initialize().
-	// All shaders that use push constants share this layout in their pipeline layouts.
+	// Universal push constant bind group layout: group N, binding PUSH_CONSTANT_RING_BINDING,
+	// ReadOnlyStorage buffer with hasDynamicOffset=true. Created once at initialize().
+	// All shaders use var<storage, read> for the PC ring buffer — var<uniform> would require
+	// std140 layout which is incompatible with push constant structs containing arrays.
 	WGPUBindGroupLayout push_constant_bind_group_layout = nullptr;
-	// Bind group backed by the ring buffer (also created once, reused every frame with dynamic offsets).
+	// Bind group backed by the ring buffer (reused every frame with dynamic offsets).
 	WGPUBindGroup push_constant_bind_group = nullptr;
+
+	// Empty bind group for filling pipeline layout gaps.
+	// Firefox/wgpu requires ALL bind group slots to be set before draw calls.
+	WGPUBindGroupLayout empty_bind_group_layout = nullptr;
+	WGPUBindGroup empty_bind_group = nullptr;
 
 	// --- Fallback Textures ---
 	// Small float texture used when a depth-format fallback texture is bound

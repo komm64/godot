@@ -151,6 +151,10 @@ struct WGShader {
 	// Used by uniform_set_create to add extra bind group entries for split depth textures.
 	HashMap<uint32_t, uint32_t> depth_alias_bindings;
 
+	// Pipeline layout gap indices — slots between set_count and pc_group that
+	// need empty bind groups bound before draw (Firefox/wgpu requirement).
+	LocalVector<uint32_t> gap_bind_group_indices;
+
 	String name;
 };
 

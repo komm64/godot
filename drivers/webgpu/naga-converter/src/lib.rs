@@ -1595,6 +1595,34 @@ pub fn spirv_to_wgsl(spirv_bytes: &[u8]) -> Result<String, JsError> {
     let (module, info) = process_overrides(&module, &info, None, &pipeline_constants)
         .map_err(|e| JsError::new(&format!("Pipeline constants error: {e:?}")))?;
 
+    // Extract per-entry-point storage buffer binding usage metadata.
+    // Naga's validator computes which global variables are transitively reachable
+    // from each entry point through the call graph. We output this as WGSL comments
+    // so the C++ driver can set BGL visibility per-stage, keeping per-stage storage
+    // buffer counts under Firefox/wgpu's Metal limit of 8.
+    let mut binding_metadata = String::new();
+    let mut total_globals = 0u32;
+    let mut storage_globals = 0u32;
+    for (ep_idx, _ep) in module.entry_points.iter().enumerate() {
+        let ep_info = info.get_entry_point(ep_idx);
+        for (handle, var) in module.global_variables.iter() {
+            total_globals += 1;
+            let usage = ep_info[handle];
+            if let Some(ref bind) = var.binding {
+                if matches!(var.space, AddressSpace::Storage { .. }) {
+                    storage_globals += 1;
+                    if !usage.is_empty() {
+                        binding_metadata.push_str(&format!(
+                            "//SSBO_USED:{},{}\n", bind.group, bind.binding
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    log(&format!("[SSBO-META-GEN] globals={total_globals} storage={storage_globals} used_lines={}",
+        binding_metadata.matches("//SSBO_USED:").count()));
+
     // process_overrides remaps Expression::Override → Expression::Constant
     // but leaves the overrides arena populated. The WGSL writer rejects
     // modules with any overrides, so clear the arena.
@@ -1605,23 +1633,16 @@ pub fn spirv_to_wgsl(spirv_bytes: &[u8]) -> Result<String, JsError> {
     let wgsl = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty())
         .map_err(|e| JsError::new(&format!("WGSL write error: {e:?}")))?;
 
-    // Post-process 1: Rewrite push_constant address space to uniform buffer
-    // binding at group 3 / binding PC_RING_BUFFER_BINDING (our ring-buffer emulation).
-    // Dawn/WebGPU limits var<push_constant> to device's maxPushConstantSize
-    // (often 64 bytes on Apple), but Godot canvas shaders use up to 128 bytes.
-    let pc_count = wgsl.matches("push_constant").count();
-    if pc_count > 0 {
-        log(&format!("[NAGA] push_constant occurrences: {pc_count}"));
-        // Print surrounding context for the first occurrence.
-        if let Some(pos) = wgsl.find("push_constant") {
-            let start = pos.saturating_sub(30);
-            let end = (pos + 50).min(wgsl.len());
-            log(&format!("[NAGA] push_const context: {:?}", &wgsl[start..end]));
-        }
-    }
+    // Post-process 1: Rewrite push_constant address space.
+    // convert_push_constants_to_uniforms() changed the SPIR-V storage class from
+    // PushConstant to StorageBuffer, so naga writes var<storage, read>.
+    // We keep var<storage, read> for ALL shaders — var<uniform> requires std140 layout
+    // which is incompatible with push constant structs containing arrays (stride 4 vs 16).
+    // The 8-buffer-per-stage limit is addressed by per-stage visibility metadata instead.
+    // Fallback: if naga still emits var<push_constant> (shouldn't happen after SPIR-V rewrite).
     let wgsl = wgsl.replace(
         "var<push_constant>",
-        &format!("@group(3) @binding({PC_RING_BUFFER_BINDING}) var<uniform>"),
+        &format!("@group(3) @binding({PC_RING_BUFFER_BINDING}) var<storage, read>"),
     );
     log(&format!("[NAGA] spirv_to_wgsl returned, output length={}", wgsl.len()));
 
@@ -1656,7 +1677,7 @@ pub fn spirv_to_wgsl(spirv_bytes: &[u8]) -> Result<String, JsError> {
     // No depth aliases needed — depth=2 images are now depth=1, and WGSL's
     // texture_depth_2d supports both textureSample and textureSampleCompare.
 
-    let wgsl = format!("{prefix}{wgsl}");
+    let wgsl = format!("{binding_metadata}{prefix}{wgsl}");
 
     Ok(wgsl)
 }
