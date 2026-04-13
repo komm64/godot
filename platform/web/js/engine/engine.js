@@ -434,6 +434,7 @@ const Engine = (function () {
 				'texture-formats-tier1',
 				'texture-formats-tier2',
 				'float32-filterable',
+				'float32-blendable',
 				'rg11b10ufloat-renderable',
 				'clip-distances',
 				'dual-source-blending',

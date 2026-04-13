@@ -541,6 +541,17 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 		WARN_PRINT("WebGPU: float32-filterable feature NOT available — 32F linear sampling will fall back to nearest.");
 	}
 
+	// float32-blendable: required for blending on R32Float / RG32Float / RGBA32Float
+	// render targets. Without this, blend operations on float32 targets silently fail
+	// (particles, post-processing compositing).
+	// Feature name enum value 14 per WebGPU spec (0x0E, not yet in emdawnwebgpu 4.0.10 header).
+	float32_blendable_supported = wgpuDeviceHasFeature(device, (WGPUFeatureName)14);
+	if (float32_blendable_supported) {
+		print_verbose("WebGPU: float32-blendable feature is available.");
+	} else {
+		WARN_PRINT("WebGPU: float32-blendable feature NOT available — blend on float32 targets will be disabled.");
+	}
+
 	// 16-bit SNORM/UNORM texture formats (texture-formats-tier1) are not available
 	// in the base emdawnwebgpu 4.0.10 API. Mark as unavailable — these formats are
 	// mapped to Undefined in pixel_formats_webgpu.h.
@@ -6350,9 +6361,24 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 			}
 			color_targets[i].writeMask = mask;
 			if (ba.enable_blend) {
-				blend_states[i].color = { blend_op(ba.color_blend_op), blend_factor(ba.src_color_blend_factor), blend_factor(ba.dst_color_blend_factor) };
-				blend_states[i].alpha = { blend_op(ba.alpha_blend_op), blend_factor(ba.src_alpha_blend_factor), blend_factor(ba.dst_alpha_blend_factor) };
-				color_targets[i].blend = &blend_states[i];
+				// float32-blendable: if the device lacks this feature, blending on
+				// float32 render targets causes GPU validation errors. Skip the
+				// blend state for these targets — writes still happen (writeMask),
+				// but the GPU composites without blending.
+				if (!float32_blendable_supported && _is_float32_format(fmt)) {
+					static int _f32_blend_skip_log = 0;
+					if (_f32_blend_skip_log < 10) {
+						const char *sname = (p_shader.id) ? ((WGShader *)(p_shader.id))->name.utf8().get_data() : "?";
+						WEBGPU_DIAG({ console.log('[FLOAT32-BLEND-SKIP] Pipeline fmt=' + $0 + ' shader=' + UTF8ToString($1) + ' — device lacks float32-blendable, disabling blend'); },
+								(int)fmt, sname);
+						_f32_blend_skip_log++;
+					}
+					// Don't set blend — leave color_targets[i].blend = nullptr.
+				} else {
+					blend_states[i].color = { blend_op(ba.color_blend_op), blend_factor(ba.src_color_blend_factor), blend_factor(ba.dst_color_blend_factor) };
+					blend_states[i].alpha = { blend_op(ba.alpha_blend_op), blend_factor(ba.src_alpha_blend_factor), blend_factor(ba.dst_alpha_blend_factor) };
+					color_targets[i].blend = &blend_states[i];
+				}
 			}
 		} else {
 			color_targets[i].writeMask = WGPUColorWriteMask_All;
