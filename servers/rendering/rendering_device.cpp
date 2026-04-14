@@ -1502,6 +1502,12 @@ Error RenderingDevice::_texture_initialize(RID p_texture, uint32_t p_layer, cons
 	uint32_t pixel_rshift = get_compressed_image_format_pixel_rshift(texture->format);
 	uint32_t block_size = get_compressed_image_format_block_byte_size(texture->format);
 
+	// When the driver promotes the texture format (e.g. RGBA32Float→RGBA16Float for
+	// devices lacking float32-filterable), staging buffers must be sized for the GPU
+	// format and the data must be converted during upload.
+	uint32_t gpu_pixel_size = driver->texture_get_gpu_pixel_size(texture->driver_id);
+	uint32_t staging_pixel_size = (gpu_pixel_size > 0) ? gpu_pixel_size : pixel_size;
+
 	// The algorithm operates on two passes, one to figure out the total size the staging buffer will require to allocate and another one where the copy is actually performed.
 	uint32_t staging_worker_offset = 0;
 	uint32_t staging_local_offset = 0;
@@ -1557,7 +1563,7 @@ Error RenderingDevice::_texture_initialize(RID p_texture, uint32_t p_layer, cons
 					}
 				}
 
-				uint32_t pitch = (width * pixel_size * block_w) >> pixel_rshift;
+				uint32_t pitch = (width * staging_pixel_size * block_w) >> pixel_rshift;
 				uint32_t pitch_step = driver->api_trait_get(RDD::API_TRAIT_TEXTURE_DATA_ROW_PITCH_STEP);
 				pitch = STEPIFY(pitch, pitch_step);
 				uint32_t to_allocate = pitch * height;
@@ -1567,7 +1573,17 @@ Error RenderingDevice::_texture_initialize(RID p_texture, uint32_t p_layer, cons
 					const uint8_t *read_ptr_mipmap_layer = read_ptr_mipmap + (tight_mip_size / depth) * z;
 					uint64_t staging_buffer_offset = staging_worker_offset + staging_local_offset;
 					uint8_t *write_ptr_mipmap_layer = write_ptr + staging_buffer_offset;
-					_copy_region_block_or_regular(read_ptr_mipmap_layer, write_ptr_mipmap_layer, 0, 0, width, width, height, block_w, block_h, pitch, pixel_size, block_size);
+					if (gpu_pixel_size > 0 && block_w == 1 && block_h == 1) {
+						// Driver promoted the format. Convert engine data to GPU
+						// format in the staging buffer (e.g. RGBA32Float → RGBA16Float).
+						uint32_t src_pitch = width * pixel_size;
+						driver->texture_upload_convert(texture->driver_id,
+								read_ptr_mipmap_layer, src_pitch,
+								write_ptr_mipmap_layer, pitch,
+								width, height);
+					} else {
+						_copy_region_block_or_regular(read_ptr_mipmap_layer, write_ptr_mipmap_layer, 0, 0, width, width, height, block_w, block_h, pitch, pixel_size, block_size);
+					}
 
 					RDD::BufferTextureCopyRegion copy_region;
 					copy_region.buffer_offset = staging_buffer_offset;

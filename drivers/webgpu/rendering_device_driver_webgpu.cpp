@@ -552,10 +552,16 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 		WARN_PRINT("WebGPU: float32-blendable feature NOT available — blend on float32 targets will be disabled.");
 	}
 
-	// 16-bit SNORM/UNORM texture formats (texture-formats-tier1) are not available
-	// in the base emdawnwebgpu 4.0.10 API. Mark as unavailable — these formats are
-	// mapped to Undefined in pixel_formats_webgpu.h.
-	has_texture_formats_tier1 = false;
+	// texture-formats-tier1: adds storage binding support for r8unorm, rg8unorm, etc.
+	// The emdawnwebgpu 4.0.10 header lacks the WGPUFeatureName enum value for this
+	// feature, so query the JS device object directly.
+	has_texture_formats_tier1 = (bool)EM_ASM_INT({
+		var d = Module['preinitializedWebGPUDevice'];
+		return (d && d.features && d.features.has('texture-formats-tier1')) ? 1 : 0;
+	});
+	if (has_texture_formats_tier1) {
+		print_verbose("WebGPU: texture-formats-tier1 feature is available — r8/rg8 storage formats supported natively.");
+	}
 
 	// Optional texture-compression families. The JS shell opts in to these when
 	// the adapter supports them; we must match that here so Godot only advertises
@@ -881,6 +887,36 @@ void RenderingDeviceDriverWebGPU::texture_readback_convert(TextureID p_texture,
 		return;
 	}
 
+	// Float16 → Float32 readback: reverse of the float32→float16 downgrade.
+	bool is_f16_to_f32 = false;
+	uint32_t f16_channels = 0;
+	if (tex->format == WGPUTextureFormat_R16Float &&
+			tex->rd_format == DATA_FORMAT_R32_SFLOAT) {
+		is_f16_to_f32 = true;
+		f16_channels = 1;
+	} else if (tex->format == WGPUTextureFormat_RG16Float &&
+			tex->rd_format == DATA_FORMAT_R32G32_SFLOAT) {
+		is_f16_to_f32 = true;
+		f16_channels = 2;
+	} else if (tex->format == WGPUTextureFormat_RGBA16Float &&
+			tex->rd_format == DATA_FORMAT_R32G32B32A32_SFLOAT) {
+		is_f16_to_f32 = true;
+		f16_channels = 4;
+	}
+
+	if (is_f16_to_f32) {
+		for (uint32_t y = 0; y < p_height; y++) {
+			const uint16_t *src_row = (const uint16_t *)(p_src + y * p_src_pitch);
+			float *dst_row = (float *)(p_dst + y * p_dst_pitch);
+			for (uint32_t x = 0; x < p_width; x++) {
+				for (uint32_t c = 0; c < f16_channels; c++) {
+					dst_row[x * f16_channels + c] = Math::half_to_float(src_row[x * f16_channels + c]);
+				}
+			}
+		}
+		return;
+	}
+
 	// R8/RG8 promoted to R32Float/RG32Float: convert float [0,1] → uint8 [0,255]
 	// R8/RG8 promoted to R32Uint/RG32Uint: convert uint32 → uint8
 	uint32_t channels = rd_size; // For R8 = 1 channel, RG8 = 2 channels, etc.
@@ -932,6 +968,45 @@ void RenderingDeviceDriverWebGPU::texture_upload_convert(TextureID p_texture,
 			memcpy(p_dst + y * p_dst_pitch, p_src + y * p_src_pitch, p_width * rd_size);
 		}
 		return;
+	}
+
+	// Float32 → Float16 downgrade: convert f32 data to f16 for devices
+	// lacking float32-filterable (e.g. CurveTextures on Adreno).
+	bool is_f32_to_f16 = false;
+	uint32_t f16_channels = 0;
+	if (tex->format == WGPUTextureFormat_R16Float &&
+			tex->rd_format == DATA_FORMAT_R32_SFLOAT) {
+		is_f32_to_f16 = true;
+		f16_channels = 1;
+	} else if (tex->format == WGPUTextureFormat_RG16Float &&
+			tex->rd_format == DATA_FORMAT_R32G32_SFLOAT) {
+		is_f32_to_f16 = true;
+		f16_channels = 2;
+	} else if (tex->format == WGPUTextureFormat_RGBA16Float &&
+			tex->rd_format == DATA_FORMAT_R32G32B32A32_SFLOAT) {
+		is_f32_to_f16 = true;
+		f16_channels = 4;
+	}
+
+	if (is_f32_to_f16) {
+		WEBGPU_DIAG({ console.log('[F32-UPLOAD] f32→f16 ch=' + $0 + ' w=' + $1 + ' h=' + $2 + ' src_pitch=' + $3 + ' dst_pitch=' + $4 + ' gpu_fmt=' + $5 + ' rd_fmt=' + $6); },
+				(int)f16_channels, (int)p_width, (int)p_height, (int)p_src_pitch, (int)p_dst_pitch, (int)tex->format, (int)tex->rd_format);
+		for (uint32_t y = 0; y < p_height; y++) {
+			const float *src_row = (const float *)(p_src + y * p_src_pitch);
+			uint16_t *dst_row = (uint16_t *)(p_dst + y * p_dst_pitch);
+			for (uint32_t x = 0; x < p_width; x++) {
+				for (uint32_t c = 0; c < f16_channels; c++) {
+					dst_row[x * f16_channels + c] = Math::make_half_float(src_row[x * f16_channels + c]);
+				}
+			}
+		}
+		return;
+	}
+
+	// Log if we reach here unexpectedly for a format-downgraded texture.
+	if (tex->format == WGPUTextureFormat_R16Float || tex->format == WGPUTextureFormat_RG16Float || tex->format == WGPUTextureFormat_RGBA16Float) {
+		WEBGPU_DIAG({ console.error('[F32-UPLOAD-MISS] NO conversion for gpu_fmt=' + $0 + ' rd_fmt=' + $1 + ' gpu_size=' + $2 + ' rd_size=' + $3); },
+				(int)tex->format, (int)tex->rd_format, (int)gpu_size, (int)rd_size);
 	}
 
 	// R8/RG8 promoted to R32Float/RG32Float: convert uint8 [0,255] → float [0,1]
@@ -1141,6 +1216,29 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	// Upgrade to 32-bit equivalents when storage binding is needed.
 	if (tex->usage & WGPUTextureUsage_StorageBinding) {
 		tex->format = _promote_storage_format(tex->format);
+	}
+
+	// When float32-filterable is not supported (e.g. Adreno GPU), float32
+	// textures cannot use linear filtering and get substituted with blank
+	// fallbacks at bind time, losing all data.  Downgrade to float16 which
+	// is universally filterable and preserves the data with sufficient
+	// precision.  Only target textures that are:
+	//   - Not storage/render-attachment/multisampled (those need full float32)
+	//   - RGBA32Float or R32Float (skip RG32Float — emission point textures
+	//     use textureLoad and the format downgrade corrupts their data)
+	if (!float32_filterable_supported &&
+			!(tex->usage & WGPUTextureUsage_StorageBinding) &&
+			!(tex->usage & WGPUTextureUsage_RenderAttachment) &&
+			tex->sample_count == 1) {
+		if (tex->format == WGPUTextureFormat_RGBA32Float) {
+			tex->format = WGPUTextureFormat_RGBA16Float;
+			WEBGPU_DIAG({ console.log('[F32-DOWNGRADE] RGBA32Float→RGBA16Float size=' + $0 + 'x' + $1 + ' usage=0x' + ($2).toString(16)); },
+					(int)tex->width, (int)tex->height, (int)tex->usage);
+		} else if (tex->format == WGPUTextureFormat_R32Float) {
+			tex->format = WGPUTextureFormat_R16Float;
+			WEBGPU_DIAG({ console.log('[F32-DOWNGRADE] R32Float→R16Float size=' + $0 + 'x' + $1 + ' usage=0x' + ($2).toString(16)); },
+					(int)tex->width, (int)tex->height, (int)tex->usage);
+		}
 	}
 
 	// WebGPU has no texture component swizzle (unlike Vulkan's VkComponentSwizzle).
@@ -1810,28 +1908,47 @@ WGPUTextureFormat RenderingDeviceDriverWebGPU::_data_format_to_wgpu(DataFormat p
 // gets bound to a pipeline that was built for R8Unorm and every submit fails with a
 // GPUValidationError. Canvas SDF (R8_UNORM + STORAGE_BIT + COLOR_ATTACHMENT_BIT) is
 // the motivating case.
-WGPUTextureFormat RenderingDeviceDriverWebGPU::_promote_storage_format(WGPUTextureFormat p_format) {
+WGPUTextureFormat RenderingDeviceDriverWebGPU::_promote_storage_format(WGPUTextureFormat p_format) const {
 	switch (p_format) {
+		// 8-bit formats: with texture-formats-tier1, these are valid storage texel
+		// formats natively. Keeping the original format preserves blendable/filterable
+		// properties (R32Float is not blendable on Adreno without float32-blendable).
+		// The WGSL r8/rg8 replacement is also tier1-conditional, so shader and texture
+		// formats stay in sync.
 		case WGPUTextureFormat_R8Unorm:
 		case WGPUTextureFormat_R8Snorm:
-		case WGPUTextureFormat_R16Float:
-		// R16Snorm/R16Unorm not in base emdawnwebgpu 4.0.10 headers
+			if (has_texture_formats_tier1) { return p_format; }
 			return WGPUTextureFormat_R32Float;
 		case WGPUTextureFormat_R8Uint:
-		case WGPUTextureFormat_R16Uint:
+			if (has_texture_formats_tier1) { return p_format; }
 			return WGPUTextureFormat_R32Uint;
 		case WGPUTextureFormat_R8Sint:
-		case WGPUTextureFormat_R16Sint:
+			if (has_texture_formats_tier1) { return p_format; }
 			return WGPUTextureFormat_R32Sint;
 		case WGPUTextureFormat_RG8Unorm:
 		case WGPUTextureFormat_RG8Snorm:
+			if (has_texture_formats_tier1) { return p_format; }
+			return WGPUTextureFormat_RG32Float;
+		case WGPUTextureFormat_RG8Uint:
+			if (has_texture_formats_tier1) { return p_format; }
+			return WGPUTextureFormat_RG32Uint;
+		case WGPUTextureFormat_RG8Sint:
+			if (has_texture_formats_tier1) { return p_format; }
+			return WGPUTextureFormat_RG32Sint;
+		// 16-bit formats: always promote. Shaders reference the 32-bit version
+		// and there is no matching WGSL replacement for these.
+		case WGPUTextureFormat_R16Float:
+		// R16Snorm/R16Unorm not in base emdawnwebgpu 4.0.10 headers
+			return WGPUTextureFormat_R32Float;
+		case WGPUTextureFormat_R16Uint:
+			return WGPUTextureFormat_R32Uint;
+		case WGPUTextureFormat_R16Sint:
+			return WGPUTextureFormat_R32Sint;
 		case WGPUTextureFormat_RG16Float:
 		// RG16Snorm/RG16Unorm not in base emdawnwebgpu 4.0.10 headers
 			return WGPUTextureFormat_RG32Float;
-		case WGPUTextureFormat_RG8Uint:
 		case WGPUTextureFormat_RG16Uint:
 			return WGPUTextureFormat_RG32Uint;
-		case WGPUTextureFormat_RG8Sint:
 		case WGPUTextureFormat_RG16Sint:
 			return WGPUTextureFormat_RG32Sint;
 		// RGBA16Snorm/RGBA16Unorm not in base emdawnwebgpu 4.0.10 headers
@@ -2662,12 +2779,14 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		// and a single texture_depth_2d variable handles both sampling modes.
 
 		// Remap unsupported 8-bit storage texture format names in WGSL.
-		// r8* and rg8* are not valid WebGPU storage texel formats — remap to 32-bit equivalents.
-		// This changes string length, so we rebuild the string via Godot's String class.
-		if (strstr(wgsl_str, "r8unorm") || strstr(wgsl_str, "r8snorm") ||
+		// r8* and rg8* are not valid base WebGPU storage texel formats — remap to
+		// 32-bit equivalents. With texture-formats-tier1 these formats are valid
+		// natively, so skip the remap to preserve blendable/filterable properties.
+		if (!has_texture_formats_tier1 &&
+				(strstr(wgsl_str, "r8unorm") || strstr(wgsl_str, "r8snorm") ||
 				strstr(wgsl_str, "r8uint") || strstr(wgsl_str, "r8sint") ||
 				strstr(wgsl_str, "rg8unorm") || strstr(wgsl_str, "rg8snorm") ||
-				strstr(wgsl_str, "rg8uint") || strstr(wgsl_str, "rg8sint")) {
+				strstr(wgsl_str, "rg8uint") || strstr(wgsl_str, "rg8sint"))) {
 			String ws(wgsl_str);
 			ws = ws.replace("rg8unorm", "rg32float");
 			ws = ws.replace("rg8snorm", "rg32float");
