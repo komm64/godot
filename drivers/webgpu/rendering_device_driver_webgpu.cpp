@@ -1222,10 +1222,8 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	// textures cannot use linear filtering and get substituted with blank
 	// fallbacks at bind time, losing all data.  Downgrade to float16 which
 	// is universally filterable and preserves the data with sufficient
-	// precision.  Only target textures that are:
-	//   - Not storage/render-attachment/multisampled (those need full float32)
-	//   - RGBA32Float or R32Float (skip RG32Float — emission point textures
-	//     use textureLoad and the format downgrade corrupts their data)
+	// precision.  Only target textures that are not storage/render-attachment/
+	// multisampled (those need exact format matching with compute shaders).
 	if (!float32_filterable_supported &&
 			!(tex->usage & WGPUTextureUsage_StorageBinding) &&
 			!(tex->usage & WGPUTextureUsage_RenderAttachment) &&
@@ -1233,6 +1231,10 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 		if (tex->format == WGPUTextureFormat_RGBA32Float) {
 			tex->format = WGPUTextureFormat_RGBA16Float;
 			WEBGPU_DIAG({ console.log('[F32-DOWNGRADE] RGBA32Float→RGBA16Float size=' + $0 + 'x' + $1 + ' usage=0x' + ($2).toString(16)); },
+					(int)tex->width, (int)tex->height, (int)tex->usage);
+		} else if (tex->format == WGPUTextureFormat_RG32Float) {
+			tex->format = WGPUTextureFormat_RG16Float;
+			WEBGPU_DIAG({ console.log('[F32-DOWNGRADE] RG32Float→RG16Float size=' + $0 + 'x' + $1 + ' usage=0x' + ($2).toString(16)); },
 					(int)tex->width, (int)tex->height, (int)tex->usage);
 		} else if (tex->format == WGPUTextureFormat_R32Float) {
 			tex->format = WGPUTextureFormat_R16Float;
