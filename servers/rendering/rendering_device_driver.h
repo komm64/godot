@@ -842,6 +842,13 @@ public:
 		API_TRAIT_USE_GENERAL_IN_COPY_QUEUES,
 		API_TRAIT_BUFFERS_REQUIRE_TRANSITIONS,
 		API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS,
+		// If non-zero, RenderingDevice::texture_get_data() routes through
+		// driver->texture_get_data() instead of the synchronous draw-graph +
+		// buffer_map path. WebGPU sets this because mapAsync requires a JS
+		// event-loop tick to complete; the driver's texture_get_data keeps a
+		// persistent staging buffer per (texture, layer) and returns cached
+		// data once the async map fires.
+		API_TRAIT_TEXTURE_GET_DATA_VIA_DRIVER,
 	};
 
 	enum ShaderChangeInvalidation {

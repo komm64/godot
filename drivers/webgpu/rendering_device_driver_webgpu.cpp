@@ -1444,6 +1444,31 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared_from_slice(Tex
 void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
 	WGTexture *tex = (WGTexture *)(p_texture.id);
 	ERR_FAIL_NULL(tex);
+
+	// Drop any readback-cache entries keyed on this texture before its
+	// pointer can be recycled by a future allocation. The cache key is
+	// (uintptr_t)tex ^ (layer << 48) — see texture_get_data — so we mask
+	// the high 16 bits when comparing to match across all layers.
+	{
+		const uint64_t LAYER_MASK = 0xFFFF000000000000ULL;
+		const uint64_t base = (uint64_t)(uintptr_t)tex;
+		LocalVector<uint64_t> to_remove;
+		for (KeyValue<uint64_t, ReadbackEntry> &kv : _readback_cache) {
+			if ((kv.key & ~LAYER_MASK) == (base & ~LAYER_MASK)) {
+				if (kv.value.staging) {
+					wgpuBufferRelease(kv.value.staging);
+				}
+				if (kv.value.shadow) {
+					memfree(kv.value.shadow);
+				}
+				to_remove.push_back(kv.key);
+			}
+		}
+		for (uint64_t k : to_remove) {
+			_readback_cache.erase(k);
+		}
+	}
+
 	if (tex->default_view) {
 		wgpuTextureViewRelease(tex->default_view);
 	}
@@ -1530,6 +1555,27 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 	uint32_t row_pitch = ((mip_w * bpp + 255) / 256) * 256; // 256-byte aligned
 	uint64_t buffer_size = (uint64_t)row_pitch * mip_h;
 
+	// If a readback is in flight, deliver pending callbacks and then probe the
+	// buffer's map state directly. emdawnwebgpu may have completed the map at
+	// the JS level even though the C callback hasn't been delivered yet (same
+	// trick as buffer_map). If mapped, copy data into shadow and mark complete.
+	if (entry && !entry->map_complete) {
+		WGPUInstance inst = context_driver ? context_driver->get_instance() : nullptr;
+		if (inst) wgpuInstanceProcessEvents(inst);
+		if (!entry->map_complete) {
+			WGPUBufferMapState state = wgpuBufferGetMapState(entry->staging);
+			if (state == WGPUBufferMapState_Mapped) {
+				const void *mapped = wgpuBufferGetConstMappedRange(entry->staging, 0, entry->size);
+				if (mapped && entry->shadow) {
+					memcpy(entry->shadow, mapped, entry->size);
+					entry->has_data = true;
+				}
+				wgpuBufferUnmap(entry->staging);
+				entry->map_complete = true;
+			}
+		}
+	}
+
 	// Return cached data if previous readback completed.
 	if (entry && entry->has_data && entry->map_complete) {
 		Vector<uint8_t> result;
@@ -1542,31 +1588,17 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 			memcpy(dst + y * tight_row, entry->shadow + y * row_pitch, tight_row);
 		}
 
-		// Initiate next readback.
-		entry->map_complete = false;
-		WGPUCommandEncoderDescriptor enc_desc = {};
-		WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
-		WGPUTexelCopyTextureInfo src_info = {};
-		src_info.texture = tex->view_source ? tex->view_source : tex->handle;
-		src_info.mipLevel = 0;
-		src_info.origin = { 0, 0, p_layer };
-		WGPUTexelCopyBufferInfo dst_info = {};
-		dst_info.buffer = entry->staging;
-		dst_info.layout.offset = 0;
-		dst_info.layout.bytesPerRow = row_pitch;
-		dst_info.layout.rowsPerImage = mip_h;
-		WGPUExtent3D extent = { mip_w, mip_h, 1 };
-		wgpuCommandEncoderCopyTextureToBuffer(encoder, &src_info, &dst_info, &extent);
-		WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
-		wgpuQueueSubmit(queue, 1, &cmd);
-		wgpuCommandBufferRelease(cmd);
-		wgpuCommandEncoderRelease(encoder);
-
-		WGPUBufferMapCallbackInfo cb = {};
-		cb.mode = WGPUCallbackMode_AllowSpontaneous;
-		cb.callback = _readback_map_cb;
-		cb.userdata1 = entry;
-		wgpuBufferMapAsync(entry->staging, WGPUMapMode_Read, 0, entry->size, cb);
+		// Mark consumed; do NOT auto-requeue. Each top-level call (e.g.
+		// viewport.get_texture().get_image()) should reflect GPU state at call
+		// time, not the previous call's snapshot. The next call to
+		// texture_get_data falls through to the queue-fresh-copy path below.
+		// For continuous readback the caller can simply call again next frame
+		// and will get a fresh capture (one-frame extra latency, but always
+		// current). Earlier streaming-style auto-requeue here caused
+		// scroll-screenshot to show t_(n-1) on subsequent scrolls because the
+		// post-Path-A copy snapshotted the *post-scroll* frame, not the next
+		// pre-scroll frame.
+		entry->has_data = false;
 
 		return result;
 	}
@@ -1587,13 +1619,29 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 
 		_readback_cache[key] = new_entry;
 		entry = &_readback_cache[key];
+	} else if (!entry->map_complete) {
+		// Readback in flight from a previous call. Don't queue another copy /
+		// mapAsync — wgpuBufferMapAsync on an already-pending buffer is a
+		// validation error. Just return zeros; caller should retry next frame.
+		Vector<uint8_t> zeros;
+		zeros.resize(mip_w * mip_h * bpp);
+		memset(zeros.ptrw(), 0, zeros.size());
+		return zeros;
 	}
+
+	// Reaching here means: either a brand-new entry, or an existing entry
+	// whose data was just consumed by Path A (has_data=false, map_complete=true).
+	// In the latter case we're about to issue a fresh mapAsync, so reset
+	// map_complete first — otherwise the next call's in-flight check would
+	// see stale state.
+	entry->map_complete = false;
+	entry->has_data = false;
 
 	// Copy texture to staging buffer.
 	WGPUCommandEncoderDescriptor enc_desc = {};
 	WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
 	WGPUTexelCopyTextureInfo src_info = {};
-	src_info.texture = tex->view_source ? tex->view_source : tex->handle;
+	src_info.texture = tex->gpu_handle();
 	src_info.mipLevel = 0;
 	src_info.origin = { 0, 0, p_layer };
 	WGPUTexelCopyBufferInfo dst_info = {};
@@ -4478,13 +4526,13 @@ void RenderingDeviceDriverWebGPU::command_copy_texture(CommandBufferID p_cmd_buf
 		const TextureCopyRegion &region = p_regions[i];
 
 		WGPUTexelCopyTextureInfo src_copy = {};
-		src_copy.texture = src->handle;
+		src_copy.texture = src->gpu_handle();
 		src_copy.mipLevel = region.src_subresources.mipmap;
 		src_copy.origin = { (uint32_t)region.src_offset.x, (uint32_t)region.src_offset.y, region.src_subresources.base_layer };
 		src_copy.aspect = WGPUTextureAspect_All;
 
 		WGPUTexelCopyTextureInfo dst_copy = {};
-		dst_copy.texture = dst->handle;
+		dst_copy.texture = dst->gpu_handle();
 		dst_copy.mipLevel = region.dst_subresources.mipmap;
 		dst_copy.origin = { (uint32_t)region.dst_offset.x, (uint32_t)region.dst_offset.y, region.dst_subresources.base_layer };
 		dst_copy.aspect = WGPUTextureAspect_All;
@@ -4735,7 +4783,7 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 				}
 
 				WGPUTexelCopyTextureInfo dst = {};
-				dst.texture = tex->view_source ? tex->view_source : tex->handle;
+				dst.texture = tex->gpu_handle();
 				dst.mipLevel = mip;
 				dst.origin = { 0, 0, layer };
 				dst.aspect = WGPUTextureAspect_All;
@@ -4844,7 +4892,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 		}
 
 		WGPUTexelCopyTextureInfo dst_copy = {};
-		dst_copy.texture = dst->handle;
+		dst_copy.texture = dst->gpu_handle();
 		dst_copy.mipLevel = region.texture_subresource.mipmap;
 		dst_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y, region.texture_subresource.layer };
 		dst_copy.aspect = WGPUTextureAspect_All;
@@ -4905,7 +4953,7 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 		}
 
 		WGPUTexelCopyTextureInfo src_copy = {};
-		src_copy.texture = src->handle;
+		src_copy.texture = src->gpu_handle();
 		src_copy.mipLevel = region.texture_subresource.mipmap;
 		src_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y, region.texture_subresource.layer };
 		src_copy.aspect = WGPUTextureAspect_All;
@@ -5129,7 +5177,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 		for (uint32_t j = 0; j < fb->attachments.size(); j++) {
 			WGTexture *new_tex = fb->attachments[j];
 			if (new_tex) {
-				WGPUTexture new_gpu_tex = new_tex->view_source ? new_tex->view_source : new_tex->handle;
+				WGPUTexture new_gpu_tex = new_tex->gpu_handle();
 				if (new_gpu_tex == prev_att) {
 					still_an_attachment = true;
 					break;
@@ -5182,7 +5230,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	for (uint32_t i = 0; i < fb->attachments.size(); i++) {
 		WGTexture *att_tex = fb->attachments[i];
 		if (att_tex) {
-			WGPUTexture gpu_tex = att_tex->view_source ? att_tex->view_source : att_tex->handle;
+			WGPUTexture gpu_tex = att_tex->gpu_handle();
 			cmd->render_state.add_attachment_texture(gpu_tex);
 		}
 	}
@@ -5198,7 +5246,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 		if (att_idx != RDD::AttachmentReference::UNUSED && att_idx < fb->attachments.size()) {
 			WGTexture *tex = fb->attachments[att_idx];
 			if (tex) {
-				cmd->render_state.add_current_pass_attachment(tex->view_source ? tex->view_source : tex->handle);
+				cmd->render_state.add_current_pass_attachment(tex->gpu_handle());
 			}
 		}
 	}
@@ -5206,7 +5254,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 			subpass.depth_stencil_reference.attachment < fb->attachments.size()) {
 		WGTexture *tex = fb->attachments[subpass.depth_stencil_reference.attachment];
 		if (tex) {
-			cmd->render_state.add_current_pass_attachment(tex->view_source ? tex->view_source : tex->handle);
+			cmd->render_state.add_current_pass_attachment(tex->gpu_handle());
 		}
 	}
 
@@ -5223,7 +5271,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 			for (uint32_t j = 0; j < fb->attachments.size(); j++) {
 				WGTexture *tex = fb->attachments[j];
 				if (tex) {
-					WGPUTexture gpu_tex = tex->view_source ? tex->view_source : tex->handle;
+					WGPUTexture gpu_tex = tex->gpu_handle();
 					if (gpu_tex == cmd->render_state.current_pass_attachments[i] &&
 							(tex->usage & WGPUTextureUsage_TextureBinding) &&
 							(tex->usage & WGPUTextureUsage_RenderAttachment)) {
@@ -5692,7 +5740,7 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 				for (uint32_t a = 0; a < _cur_fb->attachments.size(); a++) {
 					WGTexture *atex = _cur_fb->attachments[a];
 					if (!atex) continue;
-					WGPUTexture a_src = atex->view_source ? atex->view_source : atex->handle;
+					WGPUTexture a_src = atex->gpu_handle();
 					if (a_src == btex->view_source) {
 						_sync_conflict_log_count++;
 						if (_sync_conflict_log_count >= 20) break;
@@ -7082,6 +7130,12 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 		case API_TRAIT_USE_GENERAL_IN_COPY_QUEUES: return 0;
 		case API_TRAIT_BUFFERS_REQUIRE_TRANSITIONS: return 0;
 		case API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS: return 0;
+		// Force RD::texture_get_data() to route through driver->texture_get_data()
+		// because the synchronous draw-graph + buffer_map path can't wait for
+		// wgpuBufferMapAsync (no Asyncify, can't yield to JS during a sync C call).
+		// driver->texture_get_data() handles this with a persistent staging buffer
+		// + frame-deferred async map (see ASYNC BUFFER READBACK section).
+		case API_TRAIT_TEXTURE_GET_DATA_VIA_DRIVER: return 1;
 		default: return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
 }

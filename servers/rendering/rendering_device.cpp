@@ -2083,6 +2083,14 @@ Vector<uint8_t> RenderingDevice::texture_get_data(RID p_texture, uint32_t p_laye
 
 	if (tex->usage_flags & TEXTURE_USAGE_CPU_READ_BIT) {
 		return driver->texture_get_data(tex->driver_id, p_layer);
+	} else if (driver->api_trait_get(RDD::API_TRAIT_TEXTURE_GET_DATA_VIA_DRIVER)) {
+		// WebGPU: the synchronous draw-graph + _flush_and_stall + buffer_map path
+		// below can't wait for wgpuBufferMapAsync (no Asyncify on web). Route to
+		// the driver's texture_get_data which keeps a persistent staging buffer
+		// per (texture, layer) and returns cached data once the async map fires.
+		// First call returns zeros; caller should retry next frame. See:
+		// drivers/webgpu/rendering_device_driver_webgpu.cpp:texture_get_data
+		return driver->texture_get_data(tex->driver_id, p_layer);
 	} else {
 		RDD::TextureAspect aspect = tex->read_aspect_flags.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT) ? RDD::TEXTURE_ASPECT_DEPTH : RDD::TEXTURE_ASPECT_COLOR;
 		uint32_t mip_alignment = driver->api_trait_get(RDD::API_TRAIT_TEXTURE_TRANSFER_ALIGNMENT);
