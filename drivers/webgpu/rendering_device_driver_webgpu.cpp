@@ -35,6 +35,9 @@
 #include "rendering_shader_container_webgpu.h"
 #include "pixel_formats_webgpu.h"
 
+#include "core/templates/hash_map.h"
+#include "core/templates/hashfuncs.h"
+
 #include <webgpu/webgpu.h>
 #include <emscripten/emscripten.h>
 #include <cstdlib>
@@ -60,6 +63,75 @@ static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_
 	if (fence) {
 		fence->signaled = true;
 	}
+}
+
+// =============================================================================
+// SPIR-V → WGSL conversion cache
+// =============================================================================
+//
+// emdawnwebgpu only accepts WGSL, so every shader stage must be converted from
+// SPIR-V via naga (Rust→WASM, exposed as window.nagaSpirvToWgsl). naga is the
+// dominant cost at startup (~40 ms × ~383 stages ≈ 15 s) and is serialized on
+// the main thread. Many shader stages share SPIR-V bytes (specialization
+// variants of the same base), so cache the post-naga WGSL keyed on a hash of
+// the SPIR-V bytes. The caller still owns the returned buffer (must `free()`),
+// so on a cache hit we malloc + memcpy a fresh copy.
+//
+// Cache lives for process lifetime — the SPIR-V → WGSL mapping is independent
+// of the WebGPU device, and a single process never creates more than ~1k
+// distinct shaders, so unbounded growth is fine in practice.
+static HashMap<uint32_t, String> _spv_to_wgsl_cache;
+static uint32_t _spv_to_wgsl_cache_hits = 0;
+static uint32_t _spv_to_wgsl_cache_misses = 0;
+
+// Returns a malloc'd null-terminated WGSL string (caller must free), or nullptr on
+// failure. Looks up the cache first, falls back to naga on miss.
+static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
+	uint32_t spv_hash = hash_murmur3_buffer(p_spv_ptr, p_spv_size);
+	const String *cached = _spv_to_wgsl_cache.getptr(spv_hash);
+	if (cached) {
+		_spv_to_wgsl_cache_hits++;
+		CharString cs = cached->utf8();
+		size_t len = (size_t)cs.length() + 1;
+		char *out = (char *)malloc(len);
+		if (!out) return nullptr;
+		memcpy(out, cs.get_data(), len);
+		return out;
+	}
+
+	_spv_to_wgsl_cache_misses++;
+	char *wgsl_str = (char *)(uintptr_t)MAIN_THREAD_EM_ASM_PTR({
+		try {
+			if (typeof window.nagaSpirvToWgsl !== 'function') {
+				console.error('naga SPIR-V→WGSL converter not loaded!');
+				return 0;
+			}
+			var spirvBytes = new Uint8Array(HEAPU8.buffer, $0, $1);
+			var wgsl = window.nagaSpirvToWgsl(spirvBytes);
+			if (!wgsl) { return 0; }
+			var len = lengthBytesUTF8(wgsl) + 1;
+			var ptr = _malloc(len);
+			stringToUTF8(wgsl, ptr, len);
+			return ptr;
+		} catch (e) {
+			console.error('[SHADER] NAGA conversion exception:', e.message || e);
+			return 0;
+		}
+	}, p_spv_ptr, p_spv_size);
+
+	if (wgsl_str) {
+		_spv_to_wgsl_cache[spv_hash] = String(wgsl_str);
+	}
+
+	// Log cache stats every 50 calls so we can measure hit-rate during startup.
+	uint32_t total = _spv_to_wgsl_cache_hits + _spv_to_wgsl_cache_misses;
+	if (total > 0 && (total % 50) == 0) {
+		EM_ASM({
+			console.log('[SPV-CACHE] total=' + $0 + ' hits=' + $1 + ' misses=' + $2 + ' size=' + $3);
+		}, (int)total, (int)_spv_to_wgsl_cache_hits, (int)_spv_to_wgsl_cache_misses, (int)_spv_to_wgsl_cache.size());
+	}
+
+	return wgsl_str;
 }
 
 // =============================================================================
@@ -403,6 +475,12 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	// createRenderPipeline/createShaderModule/createBindGroupLayout call. We also
 	// kick off a parallel createRenderPipelineAsync() to catch validation errors
 	// that the error-scope path misses (Dawn may defer validation past popErrorScope).
+	//
+	// Gated behind WEBGPU_VERBOSE because the parallel async pipeline creation
+	// doubles every render-pipeline compile, and the per-module getCompilationInfo()
+	// forces a sync compile path. On shiny_gen with ~383 shaders, leaving these on
+	// adds ~12s to startup. Re-enable by uncommenting #define WEBGPU_VERBOSE above.
+#ifdef WEBGPU_VERBOSE
 	MAIN_THREAD_EM_ASM({
 		var d = Module['preinitializedWebGPUDevice'];
 		if (!d) { console.error('[DIAG-PATCH] preinitializedWebGPUDevice missing'); return; }
@@ -508,6 +586,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 			d._plytPatched = true;
 		}
 	});
+#endif // WEBGPU_VERBOSE
 
 	return OK;
 }
@@ -2800,28 +2879,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		// emdawnwebgpu does NOT support WGPUShaderSourceSPIRV — it's a thin wrapper
 		// around the browser's WebGPU API which only accepts WGSL.
 		// We convert SPIR-V → WGSL at runtime using naga (compiled to WASM).
-		// The naga converter is loaded in the HTML shell and exposed as window.nagaSpirvToWgsl().
-		// NOTE: Must use MAIN_THREAD_EM_ASM_PTR because shader creation runs on a
-		// worker thread (pthread) where `window` is not defined. This proxies the
-		// call to the main thread synchronously.
-		char *wgsl_str = (char *)(uintptr_t)MAIN_THREAD_EM_ASM_PTR({
-			try {
-				if (typeof window.nagaSpirvToWgsl !== 'function') {
-					console.error('naga SPIR-V→WGSL converter not loaded!');
-					return 0;
-				}
-				var spirvBytes = new Uint8Array(HEAPU8.buffer, $0, $1);
-				var wgsl = window.nagaSpirvToWgsl(spirvBytes);
-				if (!wgsl) { return 0; }
-				var len = lengthBytesUTF8(wgsl) + 1;
-				var ptr = _malloc(len);
-				stringToUTF8(wgsl, ptr, len);
-				return ptr;
-			} catch (e) {
-				console.error('[SHADER] NAGA conversion exception:', e.message || e);
-				return 0;
-			}
-		}, spv_bytes.ptr(), (int)spv_bytes.size());
+		// Many shader stages share SPIR-V bytes; _spv_to_wgsl_cached looks up a
+		// process-lifetime cache before invoking naga (see helper definition).
+		char *wgsl_str = _spv_to_wgsl_cached(spv_bytes.ptr(), (int)spv_bytes.size());
 
 		ERR_FAIL_COND_V_MSG(wgsl_str == nullptr, ShaderID(), vformat("WebGPU: SPIR-V→WGSL conversion failed for stage %d.", (int)s.shader_stage));
 
@@ -4926,6 +4986,139 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 	}
 }
 
+// Single-call multi-layer buffer→texture upload. The WGSL queue.writeTexture
+// API supports `extent.depthOrArrayLayers > 1` for 2D-array textures, with
+// consecutive layers laid out at `rowsPerImage * bytesPerRow` byte stride
+// in the source buffer. The engine packs all N layers contiguously in the
+// staging buffer, so we issue a single wgpuQueueWriteTexture covering
+// [layer .. layer+N) instead of looping. Each wgpuQueueWriteTexture call
+// crosses wasm→JS→WebGPU and incurs ~9-11 ms fixed overhead, so this saves
+// (N-1) × ~10 ms during initial Texture2DArray uploads.
+void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture_layered(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, const BufferTextureCopyRegion &p_base_region, uint32_t p_layer_count, uint64_t p_per_layer_byte_stride) {
+	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
+	WGBuffer *src = (WGBuffer *)(p_src_buffer.id);
+	WGTexture *dst = (WGTexture *)(p_dst_texture.id);
+	ERR_FAIL_NULL(cmd);
+	ERR_FAIL_NULL(src);
+	ERR_FAIL_NULL(dst);
+
+	if (p_layer_count == 0) {
+		return;
+	}
+
+	cmd->end_active_encoder();
+
+	// Block-aligned copy extent (matches command_copy_buffer_to_texture).
+	uint32_t block_w = 1, block_h = 1;
+	if (dst->rd_format != DATA_FORMAT_MAX) {
+		get_compressed_image_format_block_dimensions(dst->rd_format, block_w, block_h);
+	}
+
+	uint32_t copy_w = (uint32_t)p_base_region.texture_region_size.x;
+	uint32_t copy_h = (uint32_t)p_base_region.texture_region_size.y;
+	if (block_w > 1 || block_h > 1) {
+		copy_w = ((copy_w + block_w - 1) / block_w) * block_w;
+		copy_h = ((copy_h + block_h - 1) / block_h) * block_h;
+	}
+
+	WGPUTexelCopyTextureInfo dst_copy = {};
+	dst_copy.texture = dst->gpu_handle();
+	dst_copy.mipLevel = p_base_region.texture_subresource.mipmap;
+	// .origin.z is the starting array layer; extent.depthOrArrayLayers covers N.
+	dst_copy.origin = { (uint32_t)p_base_region.texture_offset.x, (uint32_t)p_base_region.texture_offset.y, p_base_region.texture_subresource.layer };
+	dst_copy.aspect = WGPUTextureAspect_All;
+
+	WGPUExtent3D extent = { copy_w, copy_h, p_layer_count };
+
+	uint32_t aligned_bpr = ((p_base_region.row_pitch + 255) / 256) * 256; // 256-byte aligned per WebGPU spec.
+	uint32_t rows_per_image = (block_h > 1) ? (copy_h / block_h) : copy_h;
+
+	// Sanity check: layer stride must match aligned_bpr * rows_per_image, else
+	// consecutive layers in staging won't be at the offsets WebGPU expects.
+	// _texture_initialize_layered packs with this exact stride.
+	const uint64_t expected_stride = (uint64_t)aligned_bpr * rows_per_image;
+	if (p_per_layer_byte_stride != expected_stride) {
+		// Fall back to the per-layer default behavior — preserves correctness
+		// at the cost of the optimization. Should not happen with our caller.
+		for (uint32_t i = 0; i < p_layer_count; i++) {
+			BufferTextureCopyRegion r = p_base_region;
+			r.texture_subresource.layer += i;
+			r.buffer_offset += i * p_per_layer_byte_stride;
+			command_copy_buffer_to_texture(p_cmd_buffer, p_src_buffer, p_dst_texture, p_dst_texture_layout, r);
+		}
+		return;
+	}
+
+	const bool use_write_texture = (src->shadow_map != nullptr);
+
+	if (use_write_texture) {
+		// Direct CPU→GPU upload via queue.writeTexture covering all N layers.
+		WGPUTexelCopyBufferLayout layout = {};
+		layout.offset = 0;
+		layout.bytesPerRow = aligned_bpr;
+		layout.rowsPerImage = rows_per_image;
+
+		const uint8_t *data_ptr = src->shadow_map + p_base_region.buffer_offset;
+		uint64_t data_size = expected_stride * (uint64_t)p_layer_count;
+
+		wgpuQueueWriteTexture(queue, &dst_copy, data_ptr, data_size, &layout, &extent);
+	} else {
+		// Standard path: GPU buffer → texture, single command covering N layers.
+		WGPUTexelCopyBufferInfo src_info = {};
+		src_info.buffer = src->handle;
+		src_info.layout.offset = p_base_region.buffer_offset;
+		src_info.layout.bytesPerRow = aligned_bpr;
+		src_info.layout.rowsPerImage = rows_per_image;
+
+		wgpuCommandEncoderCopyBufferToTexture(cmd->encoder, &src_info, &dst_copy, &extent);
+	}
+}
+
+// Direct CPU->GPU multi-layer texture write. Mirrors the writeTexture branch
+// of command_copy_buffer_to_texture_layered, but takes a CPU pointer directly
+// instead of going through a transfer worker's GPU staging buffer + shadow_map.
+//
+// Save vs transfer-worker path on tier 1024 (75 layers, 300 MB total):
+//   - 1x wgpuDeviceCreateBuffer(300 MB) eliminated (peak VRAM -300 MB)
+//   - 1x command encoder begin/end eliminated
+//   - 1x pipeline-barrier no-op eliminated
+//   - The single multi-layer wgpuQueueWriteTexture is the same as before.
+void RenderingDeviceDriverWebGPU::texture_initialize_direct_layered(TextureID p_dst_texture, TextureLayout p_dst_layout, const uint8_t *p_cpu_data, uint64_t p_total_size, uint32_t p_aligned_bpr, uint32_t p_rows_per_image, uint32_t p_width, uint32_t p_height, uint32_t p_layer_count, uint32_t p_base_layer, uint32_t p_mip_level) {
+	WGTexture *dst = (WGTexture *)(p_dst_texture.id);
+	ERR_FAIL_NULL(dst);
+	ERR_FAIL_NULL(p_cpu_data);
+	if (p_layer_count == 0 || p_total_size == 0) {
+		return;
+	}
+
+	// Block-aligned copy extent (matches command_copy_buffer_to_texture).
+	uint32_t block_w = 1, block_h = 1;
+	if (dst->rd_format != DATA_FORMAT_MAX) {
+		get_compressed_image_format_block_dimensions(dst->rd_format, block_w, block_h);
+	}
+	uint32_t copy_w = p_width;
+	uint32_t copy_h = p_height;
+	if (block_w > 1 || block_h > 1) {
+		copy_w = ((copy_w + block_w - 1) / block_w) * block_w;
+		copy_h = ((copy_h + block_h - 1) / block_h) * block_h;
+	}
+
+	WGPUTexelCopyTextureInfo dst_copy = {};
+	dst_copy.texture = dst->gpu_handle();
+	dst_copy.mipLevel = p_mip_level;
+	dst_copy.origin = { 0, 0, p_base_layer };
+	dst_copy.aspect = WGPUTextureAspect_All;
+
+	WGPUExtent3D extent = { copy_w, copy_h, p_layer_count };
+
+	WGPUTexelCopyBufferLayout layout = {};
+	layout.offset = 0;
+	layout.bytesPerRow = p_aligned_bpr;
+	layout.rowsPerImage = p_rows_per_image;
+
+	wgpuQueueWriteTexture(queue, &dst_copy, p_cpu_data, p_total_size, &layout, &extent);
+}
+
 void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) {
 	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
 	WGTexture *src = (WGTexture *)(p_src_texture.id);
@@ -6083,28 +6276,8 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 		ShaderStage p_stage) {
 	PackedByteArray patched = _patch_spirv_spec_constants(p_spirv, p_constants);
 
-	char *wgsl_str = (char *)(uintptr_t)MAIN_THREAD_EM_ASM_PTR(
-			{
-				try {
-					if (typeof window.nagaSpirvToWgsl !== 'function') {
-						console.error('naga SPIR-V→WGSL converter not loaded!');
-						return 0;
-					}
-					var spirvBytes = new Uint8Array(HEAPU8.buffer, $0, $1);
-					var wgsl = window.nagaSpirvToWgsl(spirvBytes);
-					if (!wgsl) {
-						return 0;
-					}
-					var len = lengthBytesUTF8(wgsl) + 1;
-					var ptr = _malloc(len);
-					stringToUTF8(wgsl, ptr, len);
-					return ptr;
-				} catch (e) {
-					console.error('[SHADER-SPEC] NAGA conversion exception:', e.message || e);
-					return 0;
-				}
-			},
-			patched.ptr(), (int)patched.size());
+	// Cached SPIR-V → WGSL via naga (see _spv_to_wgsl_cached above).
+	char *wgsl_str = _spv_to_wgsl_cached(patched.ptr(), (int)patched.size());
 
 	if (!wgsl_str) {
 		ERR_PRINT("WebGPU: SPIR-V→WGSL conversion failed for specialized shader module.");
@@ -7136,6 +7309,12 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 		// driver->texture_get_data() handles this with a persistent staging buffer
 		// + frame-deferred async map (see ASYNC BUFFER READBACK section).
 		case API_TRAIT_TEXTURE_GET_DATA_VIA_DRIVER: return 1;
+		// Skip transfer-worker path for layered Texture2DArray uploads; we
+		// implement texture_initialize_direct_layered using wgpuQueueWriteTexture
+		// directly (no GPU staging buffer, no command encoder, no barriers).
+		// Eliminates a same-size wasted VRAM allocation per Texture2DArray
+		// upload and the queue serialization that came with it.
+		case API_TRAIT_TEXTURE_INITIALIZE_DIRECT_WRITE: return 1;
 		default: return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
 }

@@ -592,6 +592,41 @@ public:
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) = 0;
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) = 0;
 
+	// Multi-layer buffer→texture copy: covers `p_layer_count` consecutive
+	// array layers starting at `p_base_region.texture_subresource.layer`,
+	// with source data laid out contiguously in the staging buffer at
+	// `p_base_region.buffer_offset` with stride `p_per_layer_byte_stride`.
+	//
+	// Backends that support a single multi-layer copy (e.g. WebGPU's
+	// `extent.depthOrArrayLayers`, Vulkan's `imageSubresource.layerCount`)
+	// should override to issue one driver call. The default implementation
+	// fans out to per-layer `command_copy_buffer_to_texture`, mirroring the
+	// pre-existing per-layer behavior — safe for all current backends.
+	virtual void command_copy_buffer_to_texture_layered(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, const BufferTextureCopyRegion &p_base_region, uint32_t p_layer_count, uint64_t p_per_layer_byte_stride) {
+		for (uint32_t i = 0; i < p_layer_count; i++) {
+			BufferTextureCopyRegion r = p_base_region;
+			r.texture_subresource.layer += i;
+			r.buffer_offset += i * p_per_layer_byte_stride;
+			command_copy_buffer_to_texture(p_cmd_buffer, p_src_buffer, p_dst_texture, p_dst_texture_layout, r);
+		}
+	}
+
+	// Direct CPU->GPU layered texture initialization. Writes `p_layer_count`
+	// consecutive array layers into `p_dst_texture` from a contiguous CPU
+	// buffer at `p_cpu_data`. Used by RenderingDevice::_texture_initialize_layered
+	// when API_TRAIT_TEXTURE_INITIALIZE_DIRECT_WRITE is non-zero, as an
+	// alternative to the transfer-worker path (which requires a GPU staging
+	// buffer + command encoder).
+	//
+	// Layout of `p_cpu_data`: `p_layer_count` contiguous layer images, each
+	// of size `p_aligned_bpr * p_rows_per_image`. Total = `p_total_size`.
+	//
+	// Default impl errors; only called when the trait opts in, so non-WebGPU
+	// drivers are unaffected.
+	virtual void texture_initialize_direct_layered(TextureID p_dst_texture, TextureLayout p_dst_layout, const uint8_t *p_cpu_data, uint64_t p_total_size, uint32_t p_aligned_bpr, uint32_t p_rows_per_image, uint32_t p_width, uint32_t p_height, uint32_t p_layer_count, uint32_t p_base_layer, uint32_t p_mip_level) {
+		ERR_FAIL_MSG("texture_initialize_direct_layered called but driver did not override it. API_TRAIT_TEXTURE_INITIALIZE_DIRECT_WRITE should be 0 for this driver.");
+	}
+
 	/******************/
 	/**** PIPELINE ****/
 	/******************/
@@ -849,6 +884,15 @@ public:
 		// persistent staging buffer per (texture, layer) and returns cached
 		// data once the async map fires.
 		API_TRAIT_TEXTURE_GET_DATA_VIA_DRIVER,
+		// If non-zero, RenderingDevice::_texture_initialize_layered uses a
+		// CPU-only staging path that bypasses transfer workers entirely (no
+		// GPU staging buffer, no command encoder, no barriers). The driver
+		// writes directly from a CPU pointer via
+		// `texture_initialize_direct_layered`. Useful on backends (e.g.
+		// WebGPU) where a synchronous CPU->GPU `writeTexture` API exists and
+		// the transfer worker's GPU staging buffer would be wasted (peak
+		// memory drops by ~N bytes per upload, where N is the staging size).
+		API_TRAIT_TEXTURE_INITIALIZE_DIRECT_WRITE,
 	};
 
 	enum ShaderChangeInvalidation {

@@ -397,6 +397,7 @@ public:
 	uint32_t _texture_layer_count(Texture *p_texture) const;
 	uint32_t _texture_alignment(Texture *p_texture) const;
 	Error _texture_initialize(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data, RDD::TextureLayout p_dst_layout, bool p_immediate_flush);
+	Error _texture_initialize_layered(RID p_texture, const Vector<Vector<uint8_t>> &p_layers, RDD::TextureLayout p_dst_layout, bool p_immediate_flush);
 	void _texture_check_shared_fallback(Texture *p_texture);
 	void _texture_update_shared_fallback(RID p_texture_rid, Texture *p_texture, bool p_for_writing);
 	void _texture_free_shared_fallback(Texture *p_texture);

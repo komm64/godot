@@ -1120,8 +1120,20 @@ RID RenderingDevice::texture_create(const TextureFormat &p_format, const Texture
 	if (data.size()) {
 		const bool use_general_in_copy_queues = driver->api_trait_get(RDD::API_TRAIT_USE_GENERAL_IN_COPY_QUEUES);
 		const RDD::TextureLayout dst_layout = use_general_in_copy_queues ? RDD::TEXTURE_LAYOUT_GENERAL : RDD::TEXTURE_LAYOUT_COPY_DST_OPTIMAL;
-		for (uint32_t i = 0; i < format.array_layers; i++) {
-			_texture_initialize(id, i, data[i], dst_layout, immediate_flush);
+
+		// Multi-layer fast path for 2D arrays with no mipmaps: coalesce N
+		// per-layer staging+barrier+driver-call sequences into a single
+		// transfer-worker acquisition with a layered driver call. On WebGPU
+		// the override collapses N writeTexture calls into one (the dominant
+		// cost on web). Other backends fall back to per-layer driver commands
+		// internally via the default override, but still benefit from the
+		// shared staging buffer and pipeline barrier.
+		if (format.array_layers > 1 && format.mipmaps == 1 && format.texture_type == TEXTURE_TYPE_2D_ARRAY) {
+			_texture_initialize_layered(id, data, dst_layout, immediate_flush);
+		} else {
+			for (uint32_t i = 0; i < format.array_layers; i++) {
+				_texture_initialize(id, i, data[i], dst_layout, immediate_flush);
+			}
 		}
 
 		if (texture.draw_tracker != nullptr) {
@@ -1630,6 +1642,195 @@ Error RenderingDevice::_texture_initialize(RID p_texture, uint32_t p_layer, cons
 			_release_transfer_worker(transfer_worker);
 		}
 	}
+
+	return OK;
+}
+
+// Multi-layer initial-data path for 2D array textures with mipmaps == 1.
+// Coalesces N per-layer uploads (transfer-worker acquire, staging buffer
+// map, pipeline barrier, copy command) into a single staging allocation,
+// single barrier, and single layered driver call. Backends that override
+// command_copy_buffer_to_texture_layered (e.g. WebGPU) can additionally
+// collapse the N driver-level texture writes into one; backends that don't
+// override fall back to the per-layer command path with no behavior change.
+Error RenderingDevice::_texture_initialize_layered(RID p_texture, const Vector<Vector<uint8_t>> &p_layers, RDD::TextureLayout p_dst_layout, bool p_immediate_flush) {
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_V(texture, ERR_INVALID_PARAMETER);
+
+	if (texture->owner != RID()) {
+		p_texture = texture->owner;
+		texture = texture_owner.get_or_null(texture->owner);
+		ERR_FAIL_NULL_V(texture, ERR_BUG);
+	}
+
+	uint32_t layer_count = (uint32_t)p_layers.size();
+	ERR_FAIL_COND_V(layer_count == 0, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(layer_count > _texture_layer_count(texture), ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V_MSG(texture->mipmaps != 1, ERR_INVALID_PARAMETER, "_texture_initialize_layered only supports mipmaps == 1");
+
+	uint32_t width, height;
+	uint32_t tight_mip_size = get_image_format_required_size(texture->format, texture->width, texture->height, texture->depth, texture->mipmaps, &width, &height);
+	uint32_t per_layer_required_size = tight_mip_size;
+	uint32_t required_align = _texture_alignment(texture);
+
+	for (uint32_t i = 0; i < layer_count; i++) {
+		ERR_FAIL_COND_V_MSG((uint32_t)p_layers[i].size() != per_layer_required_size, ERR_INVALID_PARAMETER,
+				"Layer " + itos(i) + " data size (" + itos(p_layers[i].size()) + ") does not match expected (" + itos(per_layer_required_size) + ").");
+	}
+
+	uint32_t block_w, block_h;
+	get_compressed_image_format_block_dimensions(texture->format, block_w, block_h);
+
+	uint32_t pixel_size = get_image_format_pixel_size(texture->format);
+	uint32_t pixel_rshift = get_compressed_image_format_pixel_rshift(texture->format);
+	uint32_t block_size = get_compressed_image_format_block_byte_size(texture->format);
+
+	// Driver may promote the format (e.g. R8 → R32Float on WebGPU storage).
+	uint32_t gpu_pixel_size = driver->texture_get_gpu_pixel_size(texture->driver_id);
+	uint32_t staging_pixel_size = (gpu_pixel_size > 0) ? gpu_pixel_size : pixel_size;
+
+	// Aligned per-layer staging footprint (matches _texture_initialize math).
+	uint32_t pitch = (width * staging_pixel_size * block_w) >> pixel_rshift;
+	uint32_t pitch_step = driver->api_trait_get(RDD::API_TRAIT_TEXTURE_DATA_ROW_PITCH_STEP);
+	pitch = STEPIFY(pitch, pitch_step);
+	uint32_t per_layer_staging_size = pitch * height;
+	per_layer_staging_size >>= pixel_rshift;
+
+	// Per-layer alignment within the shared staging buffer. Layers are
+	// packed back-to-back; if required_align > 0 we pad each layer's footprint
+	// up to a multiple of required_align so each layer's offset stays aligned.
+	uint64_t per_layer_byte_stride = per_layer_staging_size;
+	if (required_align > 0) {
+		per_layer_byte_stride = ((per_layer_byte_stride + required_align - 1) / required_align) * required_align;
+	}
+
+	uint64_t total_staging_size = per_layer_byte_stride * (uint64_t)layer_count;
+	ERR_FAIL_COND_V(total_staging_size > UINT32_MAX, ERR_INVALID_PARAMETER);
+
+	// Direct CPU->GPU write path: bypass transfer worker entirely. Used by
+	// backends (e.g. WebGPU) that have a synchronous CPU->GPU writeTexture
+	// API and would otherwise allocate a same-size GPU staging buffer that
+	// is never read from. Saves N bytes of peak VRAM per upload + the
+	// queue serialization that came with the wasted allocation.
+	if (driver->api_trait_get(RDD::API_TRAIT_TEXTURE_INITIALIZE_DIRECT_WRITE)) {
+		uint8_t *cpu_staging = (uint8_t *)memalloc(total_staging_size);
+		ERR_FAIL_NULL_V(cpu_staging, ERR_OUT_OF_MEMORY);
+
+		// Pack layers contiguously at per_layer_byte_stride.
+		for (uint32_t layer_idx = 0; layer_idx < layer_count; layer_idx++) {
+			const uint8_t *read_ptr_layer = p_layers[layer_idx].ptr();
+			uint8_t *write_ptr_layer = cpu_staging + (uint64_t)layer_idx * per_layer_byte_stride;
+
+			if (gpu_pixel_size > 0 && block_w == 1 && block_h == 1) {
+				uint32_t src_pitch = width * pixel_size;
+				driver->texture_upload_convert(texture->driver_id, read_ptr_layer, src_pitch, write_ptr_layer, pitch, width, height);
+			} else {
+				_copy_region_block_or_regular(read_ptr_layer, write_ptr_layer, 0, 0, width, width, height, block_w, block_h, pitch, pixel_size, block_size);
+			}
+		}
+
+		uint32_t rows_per_image = (block_h > 1) ? (height / block_h) : height;
+		driver->texture_initialize_direct_layered(
+				texture->driver_id,
+				p_dst_layout,
+				cpu_staging,
+				total_staging_size,
+				/*aligned_bpr*/ pitch,
+				rows_per_image,
+				width,
+				height,
+				layer_count,
+				/*base_layer*/ 0,
+				/*mip_level*/ 0);
+
+		memfree(cpu_staging);
+		// texture->transfer_worker_index stays -1 (default) — no deferred
+		// transfer to wait on; writeTexture is queue-ordered with subsequent
+		// commands.
+		return OK;
+	}
+
+	uint32_t staging_worker_offset = 0;
+	TransferWorker *transfer_worker = _acquire_transfer_worker((uint32_t)total_staging_size, required_align, staging_worker_offset);
+	texture->transfer_worker_index = transfer_worker->index;
+
+	{
+		MutexLock lock(transfer_worker->operations_mutex);
+		texture->transfer_worker_operation = ++transfer_worker->operations_counter;
+	}
+
+	uint8_t *write_ptr = driver->buffer_map(transfer_worker->staging_buffer);
+	ERR_FAIL_NULL_V(write_ptr, ERR_CANT_CREATE);
+
+	if (driver->api_trait_get(RDD::API_TRAIT_HONORS_PIPELINE_BARRIERS)) {
+		RDD::TextureBarrier tb;
+		tb.texture = texture->driver_id;
+		tb.dst_access = RDD::BARRIER_ACCESS_COPY_WRITE_BIT;
+		tb.prev_layout = RDD::TEXTURE_LAYOUT_UNDEFINED;
+		tb.next_layout = p_dst_layout;
+		tb.subresources.aspect = texture->barrier_aspect_flags;
+		tb.subresources.mipmap_count = texture->mipmaps;
+		tb.subresources.base_layer = 0;
+		tb.subresources.layer_count = layer_count;
+		driver->command_pipeline_barrier(transfer_worker->command_buffer, RDD::PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, RDD::PIPELINE_STAGE_COPY_BIT, {}, {}, tb);
+	}
+
+	// Pack each layer into the shared staging buffer at its own stride.
+	for (uint32_t layer_idx = 0; layer_idx < layer_count; layer_idx++) {
+		const uint8_t *read_ptr_layer = p_layers[layer_idx].ptr();
+		uint64_t layer_offset = (uint64_t)staging_worker_offset + (uint64_t)layer_idx * per_layer_byte_stride;
+		uint8_t *write_ptr_layer = write_ptr + layer_offset;
+
+		if (gpu_pixel_size > 0 && block_w == 1 && block_h == 1) {
+			uint32_t src_pitch = width * pixel_size;
+			driver->texture_upload_convert(texture->driver_id, read_ptr_layer, src_pitch, write_ptr_layer, pitch, width, height);
+		} else {
+			_copy_region_block_or_regular(read_ptr_layer, write_ptr_layer, 0, 0, width, width, height, block_w, block_h, pitch, pixel_size, block_size);
+		}
+	}
+
+	// One layered copy region covering all N layers starting at base layer 0.
+	RDD::BufferTextureCopyRegion base_region;
+	base_region.buffer_offset = staging_worker_offset;
+	base_region.row_pitch = pitch;
+	base_region.texture_subresource.aspect = texture->read_aspect_flags.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT) ? RDD::TEXTURE_ASPECT_DEPTH : RDD::TEXTURE_ASPECT_COLOR;
+	base_region.texture_subresource.mipmap = 0;
+	base_region.texture_subresource.layer = 0;
+	base_region.texture_offset = Vector3i(0, 0, 0);
+	base_region.texture_region_size = Vector3i(width, height, 1);
+
+	driver->command_copy_buffer_to_texture_layered(
+			transfer_worker->command_buffer,
+			transfer_worker->staging_buffer,
+			texture->driver_id,
+			p_dst_layout,
+			base_region,
+			layer_count,
+			per_layer_byte_stride);
+
+	driver->buffer_unmap(transfer_worker->staging_buffer);
+
+	// If the texture has no draw tracker, transition all layers to sampling.
+	if (texture->draw_tracker == nullptr && driver->api_trait_get(RDD::API_TRAIT_HONORS_PIPELINE_BARRIERS)) {
+		RDD::TextureBarrier tb;
+		tb.texture = texture->driver_id;
+		tb.src_access = RDD::BARRIER_ACCESS_COPY_WRITE_BIT;
+		tb.prev_layout = p_dst_layout;
+		tb.next_layout = RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		tb.subresources.aspect = texture->barrier_aspect_flags;
+		tb.subresources.mipmap_count = texture->mipmaps;
+		tb.subresources.base_layer = 0;
+		tb.subresources.layer_count = layer_count;
+		transfer_worker->texture_barriers.push_back(tb);
+	}
+
+	if (p_immediate_flush) {
+		_end_transfer_worker(transfer_worker);
+		_submit_transfer_worker(transfer_worker);
+		_wait_for_transfer_worker(transfer_worker);
+	}
+
+	_release_transfer_worker(transfer_worker);
 
 	return OK;
 }

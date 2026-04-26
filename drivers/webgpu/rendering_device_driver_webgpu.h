@@ -430,6 +430,17 @@ public:
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override final;
 	/// Copy data from a buffer to a texture.
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override final;
+	/// Multi-layer copy from staging buffer to texture: collapses N per-layer
+	/// wgpuQueueWriteTexture calls into one (extent.depthOrArrayLayers = N),
+	/// removing N-1 wasm↔JS↔WebGPU bridge crossings — the dominant cost
+	/// during initial Texture2DArray uploads on web.
+	virtual void command_copy_buffer_to_texture_layered(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, const BufferTextureCopyRegion &p_base_region, uint32_t p_layer_count, uint64_t p_per_layer_byte_stride) override final;
+	/// Direct CPU->GPU multi-layer texture write via wgpuQueueWriteTexture.
+	/// Skips the transfer-worker GPU staging buffer and command encoder
+	/// entirely — saves N bytes of peak VRAM per Texture2DArray upload (e.g.
+	/// ~300 MB for the 1024x1024 RGBA x 75 layers tier on Shiny Gen) and
+	/// removes queue serialization tied to the wasted wgpuDeviceCreateBuffer.
+	virtual void texture_initialize_direct_layered(TextureID p_dst_texture, TextureLayout p_dst_layout, const uint8_t *p_cpu_data, uint64_t p_total_size, uint32_t p_aligned_bpr, uint32_t p_rows_per_image, uint32_t p_width, uint32_t p_height, uint32_t p_layer_count, uint32_t p_base_layer, uint32_t p_mip_level) override final;
 	/// Copy data from a texture to a buffer.
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override final;
 
