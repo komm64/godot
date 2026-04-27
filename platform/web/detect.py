@@ -341,6 +341,11 @@ def configure(env: "SConsEnvironment"):
     # us since we don't know requirements at compile-time.
     env.Append(LINKFLAGS=["-sALLOW_MEMORY_GROWTH=1"])
 
+    # Ensure malloc returns NULL on failure instead of aborting. Emscripten
+    # sets this automatically when ALLOW_MEMORY_GROWTH=1, but being explicit
+    # prevents regressions if the default ever changes and documents intent.
+    env.Append(LINKFLAGS=["-sABORTING_MALLOC=0"])
+
     # Do not call main immediately when the support code is ready.
     env.Append(LINKFLAGS=["-sINVOKE_RUN=0"])
 
