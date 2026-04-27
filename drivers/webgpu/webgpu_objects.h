@@ -51,6 +51,14 @@ struct WGBuffer {
 	bool is_readback = false;      // True for staging buffers that need GPU→CPU readback.
 	bool map_complete = false;     // Set by async map callback.
 
+	// Dirty range tracking for shadow buffer flushes. On WebGPU, buffer_unmap()
+	// must copy shadow_map data to the GPU buffer via wgpuQueueWriteBuffer. Without
+	// range tracking, the entire buffer (often 32MB for staging) is copied even when
+	// only a few bytes were written — costing ~10ms per unmap on web. These fields
+	// limit the flush to the actually-modified region.
+	uint64_t dirty_offset = 0;
+	uint64_t dirty_end = 0; // Exclusive end. 0 means "no explicit range set."
+
 	// Dynamic persistent rotation (Task 7.5).
 	// `frame_idx` is UINT32_MAX for non-dynamic buffers. For BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT
 	// buffers, buffer_create sets frame_idx=0 and per_frame_size to the aligned single-frame

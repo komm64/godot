@@ -1065,7 +1065,6 @@ RID RenderingDevice::texture_create(const TextureFormat &p_format, const Texture
 	tv.swizzle_a = p_view.swizzle_a;
 
 	// Create.
-
 	Texture texture;
 	format.usage_bits |= forced_usage_bits;
 	texture.driver_id = driver->texture_create(format, tv);
@@ -1140,7 +1139,6 @@ RID RenderingDevice::texture_create(const TextureFormat &p_format, const Texture
 			texture.draw_tracker->usage = use_general_in_copy_queues ? RDG::RESOURCE_USAGE_GENERAL : RDG::RESOURCE_USAGE_COPY_TO;
 		}
 	}
-
 	return id;
 }
 

@@ -857,8 +857,20 @@ void RenderingDeviceDriverWebGPU::buffer_unmap(BufferID p_buffer) {
 	WGBuffer *buf = (WGBuffer *)(p_buffer.id);
 	ERR_FAIL_NULL(buf);
 	if (buf->shadow_map && buf->map_dirty) {
-		wgpuQueueWriteBuffer(queue, buf->handle, 0, buf->shadow_map, buf->size);
+		// Flush only the dirty range if one was set, otherwise fall back to the
+		// full buffer. command_copy_buffer_to_texture and command_copy_buffer
+		// clear map_dirty after handling the transfer themselves, so in practice
+		// this path is only hit for persistent dynamic buffers or unknown callers.
+		uint64_t flush_offset = 0;
+		uint64_t flush_size = buf->size;
+		if (buf->dirty_end > buf->dirty_offset) {
+			flush_offset = buf->dirty_offset;
+			flush_size = buf->dirty_end - buf->dirty_offset;
+		}
+		wgpuQueueWriteBuffer(queue, buf->handle, flush_offset, buf->shadow_map + flush_offset, flush_size);
 		buf->map_dirty = false;
+		buf->dirty_offset = 0;
+		buf->dirty_end = 0;
 	}
 }
 
@@ -874,7 +886,12 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_persistent_map_advance(BufferID p_b
 	// here, and the GPU reads from `frame_idx * per_frame_size` via dynamic offset.
 	if (buf->is_dynamic() && buf->per_frame_size > 0 && frame_count > 1) {
 		buf->frame_idx = (buf->frame_idx + 1) % frame_count;
-		return buf->shadow_map + (uint64_t)buf->frame_idx * buf->per_frame_size;
+		uint64_t slice_offset = (uint64_t)buf->frame_idx * buf->per_frame_size;
+		// Set dirty range to just this frame's slice so buffer_flush() only
+		// writes per_frame_size bytes instead of the entire multi-frame buffer.
+		buf->dirty_offset = slice_offset;
+		buf->dirty_end = slice_offset + buf->per_frame_size;
+		return buf->shadow_map + slice_offset;
 	}
 	return buf->shadow_map;
 }
@@ -900,7 +917,17 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_dynamic_offsets(Span<BufferID> 
 void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
 	WGBuffer *buf = (WGBuffer *)(p_buffer.id);
 	if (buf && buf->shadow_map) {
-		wgpuQueueWriteBuffer(queue, buf->handle, 0, buf->shadow_map, buf->size);
+		// Flush only the dirty range if one was set (e.g., by
+		// buffer_persistent_map_advance), otherwise fall back to full buffer.
+		uint64_t flush_offset = 0;
+		uint64_t flush_size = buf->size;
+		if (buf->dirty_end > buf->dirty_offset) {
+			flush_offset = buf->dirty_offset;
+			flush_size = buf->dirty_end - buf->dirty_offset;
+		}
+		wgpuQueueWriteBuffer(queue, buf->handle, flush_offset, buf->shadow_map + flush_offset, flush_size);
+		buf->dirty_offset = 0;
+		buf->dirty_end = 0;
 	}
 }
 
@@ -4560,6 +4587,9 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 			uint64_t size = (region.size + 3) & ~3ULL;
 			wgpuQueueWriteBuffer(queue, src->handle, region.src_offset, src->shadow_map + region.src_offset, size);
 		}
+		// The specific regions have been flushed above. Clear map_dirty so the
+		// subsequent buffer_unmap() doesn't redundantly flush the entire buffer.
+		src->map_dirty = false;
 		// Fall through to encoder copy below.
 	}
 
@@ -4984,6 +5014,14 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 			wgpuCommandEncoderCopyBufferToTexture(cmd->encoder, &src_info, &dst_copy, &extent);
 		}
 	}
+
+	// When we used the writeTexture path, data went directly from the shadow_map
+	// to the GPU texture — the staging buffer's GPU-side copy was never involved.
+	// Clear map_dirty so the subsequent buffer_unmap() is a no-op instead of
+	// redundantly flushing the entire staging buffer (often 32MB) to the GPU.
+	if (use_write_texture) {
+		src->map_dirty = false;
+	}
 }
 
 // Single-call multi-layer buffer→texture upload. The WGSL queue.writeTexture
@@ -5062,6 +5100,10 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture_layered(Command
 		uint64_t data_size = expected_stride * (uint64_t)p_layer_count;
 
 		wgpuQueueWriteTexture(queue, &dst_copy, data_ptr, data_size, &layout, &extent);
+
+		// Data went directly from shadow_map → GPU texture. Clear map_dirty so
+		// buffer_unmap() doesn't redundantly flush the entire staging buffer.
+		src->map_dirty = false;
 	} else {
 		// Standard path: GPU buffer → texture, single command covering N layers.
 		WGPUTexelCopyBufferInfo src_info = {};
