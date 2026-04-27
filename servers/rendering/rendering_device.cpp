@@ -847,14 +847,18 @@ RID RenderingDevice::storage_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT);
 	}
-	buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+		buffer.driver_id = driver->buffer_create_with_data(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
+	} else {
+		buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	}
 	ERR_FAIL_COND_V(!buffer.driver_id, RID());
 
 	// Storage buffers are assumed to be mutable.
 	buffer.draw_tracker = RDG::resource_tracker_create();
 	buffer.draw_tracker->buffer_driver_id = buffer.driver_id;
 
-	if (p_data.size()) {
+	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
 		_buffer_initialize(&buffer, p_data);
 	}
 
@@ -879,7 +883,11 @@ RID RenderingDevice::texture_buffer_create(uint32_t p_size_elements, DataFormat 
 	Buffer texture_buffer;
 	texture_buffer.size = size_bytes;
 	BitField<RDD::BufferUsageBits> usage = (RDD::BUFFER_USAGE_TRANSFER_FROM_BIT | RDD::BUFFER_USAGE_TRANSFER_TO_BIT | RDD::BUFFER_USAGE_TEXEL_BIT);
-	texture_buffer.driver_id = driver->buffer_create(size_bytes, usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+		texture_buffer.driver_id = driver->buffer_create_with_data(size_bytes, usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
+	} else {
+		texture_buffer.driver_id = driver->buffer_create(size_bytes, usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	}
 	ERR_FAIL_COND_V(!texture_buffer.driver_id, RID());
 
 	// Texture buffers are assumed to be immutable unless they don't have initial data.
@@ -894,7 +902,7 @@ RID RenderingDevice::texture_buffer_create(uint32_t p_size_elements, DataFormat 
 		ERR_FAIL_V(RID());
 	}
 
-	if (p_data.size()) {
+	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
 		_buffer_initialize(&texture_buffer, p_data);
 	}
 
@@ -3443,7 +3451,11 @@ RID RenderingDevice::vertex_buffer_create(uint32_t p_size_bytes, Span<uint8_t> p
 	if (p_creation_bits.has_flag(BUFFER_CREATION_DEVICE_ADDRESS_BIT)) {
 		buffer.usage.set_flag(RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT);
 	}
-	buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+		buffer.driver_id = driver->buffer_create_with_data(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
+	} else {
+		buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	}
 	ERR_FAIL_COND_V(!buffer.driver_id, RID());
 
 	// Vertex buffers are assumed to be immutable unless they don't have initial data or they've been marked for storage explicitly.
@@ -3452,7 +3464,7 @@ RID RenderingDevice::vertex_buffer_create(uint32_t p_size_bytes, Span<uint8_t> p
 		buffer.draw_tracker->buffer_driver_id = buffer.driver_id;
 	}
 
-	if (p_data.size()) {
+	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
 		_buffer_initialize(&buffer, p_data);
 	}
 
@@ -3648,7 +3660,11 @@ RID RenderingDevice::index_buffer_create(uint32_t p_index_count, IndexBufferForm
 	if (p_creation_bits.has_flag(BUFFER_CREATION_DEVICE_ADDRESS_BIT)) {
 		index_buffer.usage.set_flag(RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT);
 	}
-	index_buffer.driver_id = driver->buffer_create(index_buffer.size, index_buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+		index_buffer.driver_id = driver->buffer_create_with_data(index_buffer.size, index_buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
+	} else {
+		index_buffer.driver_id = driver->buffer_create(index_buffer.size, index_buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	}
 	ERR_FAIL_COND_V(!index_buffer.driver_id, RID());
 
 	// Index buffers are assumed to be immutable unless they don't have initial data.
@@ -3657,7 +3673,7 @@ RID RenderingDevice::index_buffer_create(uint32_t p_index_count, IndexBufferForm
 		index_buffer.draw_tracker->buffer_driver_id = index_buffer.driver_id;
 	}
 
-	if (p_data.size()) {
+	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
 		_buffer_initialize(&index_buffer, p_data);
 	}
 
@@ -3895,7 +3911,11 @@ RID RenderingDevice::uniform_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 		// stick to the known/intended use cases and scream if we deviate from it.
 		buffer.usage.clear_flag(RDD::BUFFER_USAGE_TRANSFER_TO_BIT);
 	}
-	buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	if (p_data.size() && driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
+		buffer.driver_id = driver->buffer_create_with_data(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, p_data.ptr(), p_data.size());
+	} else {
+		buffer.driver_id = driver->buffer_create(buffer.size, buffer.usage, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+	}
 	ERR_FAIL_COND_V(!buffer.driver_id, RID());
 
 	// Uniform buffers are assumed to be immutable unless they don't have initial data.
@@ -3904,7 +3924,7 @@ RID RenderingDevice::uniform_buffer_create(uint32_t p_size_bytes, Span<uint8_t> 
 		buffer.draw_tracker->buffer_driver_id = buffer.driver_id;
 	}
 
-	if (p_data.size()) {
+	if (p_data.size() && !driver->api_trait_get(RDD::API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION)) {
 		_buffer_initialize(&buffer, p_data);
 	}
 

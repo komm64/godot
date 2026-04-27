@@ -730,6 +730,41 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitFie
 	return BufferID(buf);
 }
 
+RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create_with_data(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, const uint8_t *p_data, uint64_t p_data_size) {
+	WGBuffer *buf = new WGBuffer();
+
+	uint64_t aligned_size = (p_size + 3) & ~3ULL;
+
+	buf->usage = _buffer_usage_to_wgpu(p_usage);
+	buf->usage |= WGPUBufferUsage_CopyDst; // Always allow writes.
+	buf->size = aligned_size;
+
+	WGPUBufferDescriptor desc = {};
+	desc.size = aligned_size;
+	desc.usage = buf->usage;
+	desc.mappedAtCreation = true;
+
+	buf->handle = wgpuDeviceCreateBuffer(device, &desc);
+	if (buf->handle == nullptr) {
+		delete buf;
+		ERR_FAIL_V(BufferID());
+	}
+
+	// Write initial data directly into the mapped range — no staging buffer,
+	// no wgpuQueueWriteBuffer, no command encoder copy needed.
+	void *mapped = wgpuBufferGetMappedRange(buf->handle, 0, aligned_size);
+	if (mapped) {
+		memcpy(mapped, p_data, p_data_size);
+		// Zero-fill any padding between data end and aligned buffer size.
+		if (aligned_size > p_data_size) {
+			memset((uint8_t *)mapped + p_data_size, 0, aligned_size - p_data_size);
+		}
+	}
+	wgpuBufferUnmap(buf->handle);
+
+	return BufferID(buf);
+}
+
 bool RenderingDeviceDriverWebGPU::buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) {
 	// WebGPU has no texel buffer views. Stub: store format, emulate later if needed.
 	return true;
@@ -7357,6 +7392,9 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 		// Eliminates a same-size wasted VRAM allocation per Texture2DArray
 		// upload and the queue serialization that came with it.
 		case API_TRAIT_TEXTURE_INITIALIZE_DIRECT_WRITE: return 1;
+		// Use mappedAtCreation for buffer creation with initial data —
+		// bypasses staging buffer + wgpuQueueWriteBuffer overhead entirely.
+		case API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION: return 1;
 		default: return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
 }

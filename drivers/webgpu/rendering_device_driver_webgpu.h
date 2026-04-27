@@ -196,6 +196,8 @@ public:
 
 	/// Create a GPU buffer. WebGPU sizes are 4-byte aligned internally.
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override final;
+	/// Create a GPU buffer with initial data using mappedAtCreation (zero staging overhead).
+	virtual BufferID buffer_create_with_data(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, const uint8_t *p_data, uint64_t p_data_size) override final;
 	/// Stub — WebGPU has no texel buffer views. Always returns true.
 	virtual bool buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) override final;
 	/// Release a GPU buffer and its shadow CPU memory.

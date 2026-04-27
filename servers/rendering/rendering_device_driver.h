@@ -187,6 +187,16 @@ public:
 	 * @return the buffer.
 	 */
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) = 0;
+
+	// Creates a GPU buffer and uploads initial data in one operation.
+	// Used when API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION is non-zero.
+	// On WebGPU this uses mappedAtCreation to avoid staging buffer overhead.
+	// Default impl returns invalid BufferID (caller falls back to
+	// buffer_create + staging). p_data must not be empty.
+	virtual BufferID buffer_create_with_data(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, const uint8_t *p_data, uint64_t p_data_size) {
+		return BufferID();
+	}
+
 	// Only for a buffer with BUFFER_USAGE_TEXEL_BIT.
 	virtual bool buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) = 0;
 	virtual void buffer_free(BufferID p_buffer) = 0;
@@ -893,6 +903,12 @@ public:
 		// the transfer worker's GPU staging buffer would be wasted (peak
 		// memory drops by ~N bytes per upload, where N is the staging size).
 		API_TRAIT_TEXTURE_INITIALIZE_DIRECT_WRITE,
+		// If non-zero, RenderingDevice uses buffer_create_with_data() instead
+		// of buffer_create() + _buffer_initialize() when initial data is
+		// provided. Useful on backends (e.g. WebGPU) where the staging buffer
+		// path incurs expensive WASM→JS→GPU bridge crossings that can be
+		// avoided by creating the buffer with mappedAtCreation.
+		API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION,
 	};
 
 	enum ShaderChangeInvalidation {
