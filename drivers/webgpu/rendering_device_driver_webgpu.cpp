@@ -1339,14 +1339,16 @@ bool RenderingDeviceDriverWebGPU::buffer_get_data_direct(BufferID p_buffer, uint
 		wgpuBufferMapAsync(entry->staging, WGPUMapMode_Read, 0, entry->size, cb);
 	}
 
-	// Return zeros (first call) or previous frame's data.
-	r_data.resize(p_size);
+	// Return previous frame's data if available, otherwise signal "not ready"
+	// by returning empty data (false → caller sees failure, not misleading zeros).
 	if (entry->has_data) {
+		r_data.resize(p_size);
 		memcpy(r_data.ptrw(), entry->shadow + p_offset, p_size);
+		return true;
 	} else {
-		memset(r_data.ptrw(), 0, p_size);
+		r_data.clear();
+		return false; // Not ready — data will be available next frame.
 	}
-	return true; // Handled — don't use the default staging path.
 }
 
 WGPUBufferUsage RenderingDeviceDriverWebGPU::_buffer_usage_to_wgpu(BitField<BufferUsageBits> p_usage) const {
@@ -1837,11 +1839,9 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 	} else if (!entry->map_complete) {
 		// Readback in flight from a previous call. Don't queue another copy /
 		// mapAsync — wgpuBufferMapAsync on an already-pending buffer is a
-		// validation error. Just return zeros; caller should retry next frame.
-		Vector<uint8_t> zeros;
-		zeros.resize(mip_w * mip_h * bpp);
-		memset(zeros.ptrw(), 0, zeros.size());
-		return zeros;
+		// validation error. Return empty to signal "not ready" — callers must
+		// handle this (null Image) rather than receiving misleading zeros.
+		return Vector<uint8_t>();
 	}
 
 	// Reaching here means: either a brand-new entry, or an existing entry
@@ -1877,11 +1877,9 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 	cb.userdata1 = entry;
 	wgpuBufferMapAsync(entry->staging, WGPUMapMode_Read, 0, entry->size, cb);
 
-	// Return zeros on first call (data available on next frame).
-	Vector<uint8_t> zeros;
-	zeros.resize(mip_w * mip_h * bpp);
-	memset(zeros.ptrw(), 0, zeros.size());
-	return zeros;
+	// Return empty on first call — signals "not ready" to the caller.
+	// Data will be available on the next call after frame_post_draw.
+	return Vector<uint8_t>();
 }
 
 BitField<RDD::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) {

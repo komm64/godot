@@ -1503,7 +1503,11 @@ Ref<Image> TextureStorage::texture_2d_get(RID p_texture) const {
 	}
 #endif
 	Vector<uint8_t> data = RD::get_singleton()->texture_get_data(tex->rd_texture, 0);
-	ERR_FAIL_COND_V(data.is_empty(), Ref<Image>());
+	if (data.is_empty()) {
+		// On WebGPU, readback is async — empty data signals "not ready yet."
+		// Return null without an error; caller should retry next frame.
+		return Ref<Image>();
+	}
 	Ref<Image> image;
 
 	// Expand RGB10_A2 into RGBAH.

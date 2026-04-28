@@ -2295,8 +2295,8 @@ Vector<uint8_t> RenderingDevice::texture_get_data(RID p_texture, uint32_t p_laye
 		// below can't wait for wgpuBufferMapAsync (no Asyncify on web). Route to
 		// the driver's texture_get_data which keeps a persistent staging buffer
 		// per (texture, layer) and returns cached data once the async map fires.
-		// First call returns zeros; caller should retry next frame. See:
-		// drivers/webgpu/rendering_device_driver_webgpu.cpp:texture_get_data
+		// First call returns empty (not ready); subsequent calls return data.
+		// See: drivers/webgpu/rendering_device_driver_webgpu.cpp:texture_get_data
 		return driver->texture_get_data(tex->driver_id, p_layer);
 	} else {
 		RDD::TextureAspect aspect = tex->read_aspect_flags.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT) ? RDD::TEXTURE_ASPECT_DEPTH : RDD::TEXTURE_ASPECT_COLOR;
