@@ -50,6 +50,8 @@ struct WGBuffer {
 	bool map_dirty = false;
 	bool is_readback = false;      // True for staging buffers that need GPU→CPU readback.
 	bool map_complete = false;     // Set by async map callback.
+	bool map_pending = false;      // True while wgpuBufferMapAsync callback is in flight.
+	bool freed = false;            // Source freed while map pending; callback will clean up.
 
 	// Dirty range tracking for shadow buffer flushes. On WebGPU, buffer_unmap()
 	// must copy shadow_map data to the GPU buffer via wgpuQueueWriteBuffer. Without
@@ -404,6 +406,8 @@ struct WGCommandBuffer {
 struct WGFence {
 	bool signaled = false;
 	uint64_t submission_id = 0;
+	bool work_done_pending = false; // True while wgpuQueueOnSubmittedWorkDone callback is in flight.
+	bool freed = false;             // Freed while callback pending; callback will delete.
 };
 
 // =============================================================================
@@ -426,6 +430,7 @@ struct WGQueryPool {
 	// Shadow CPU buffer for async readback results.
 	uint64_t *cpu_results = nullptr;
 	bool readback_pending = false;
+	bool freed = false;             // Freed while readback pending; callback will clean up.
 };
 
 #endif // WEBGPU_ENABLED

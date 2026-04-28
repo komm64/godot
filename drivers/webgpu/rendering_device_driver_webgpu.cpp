@@ -60,9 +60,19 @@ static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUString
 // Fence work-done callback: fires when wgpuQueueSubmit work completes on GPU.
 static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
 	WGFence *fence = (WGFence *)p_userdata1;
-	if (fence) {
-		fence->signaled = true;
+	if (!fence) {
+		return;
 	}
+
+	fence->work_done_pending = false;
+
+	// Fence was freed while this callback was in flight — clean up.
+	if (fence->freed) {
+		delete fence;
+		return;
+	}
+
+	fence->signaled = true;
 }
 
 // =============================================================================
@@ -805,6 +815,13 @@ void RenderingDeviceDriverWebGPU::buffer_free(BufferID p_buffer) {
 		_readback_cache.erase(key);
 	}
 
+	// If an async map callback is in flight for this buffer, mark it freed
+	// and let the callback handle cleanup (use-after-free prevention).
+	if (buf->map_pending) {
+		buf->freed = true;
+		return;
+	}
+
 	if (buf->handle) {
 		wgpuBufferRelease(buf->handle);
 	}
@@ -826,6 +843,23 @@ static void _buffer_deferred_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView 
 	WGBuffer *buf = (WGBuffer *)p_userdata1;
 	if (!buf) return;
 
+	buf->map_pending = false;
+
+	// Buffer was freed while this async map was in flight.
+	if (buf->freed) {
+		if (buf->handle) {
+			if (p_status == WGPUMapAsyncStatus_Success) {
+				wgpuBufferUnmap(buf->handle);
+			}
+			wgpuBufferRelease(buf->handle);
+		}
+		if (buf->shadow_map) {
+			memfree(buf->shadow_map);
+		}
+		delete buf;
+		return;
+	}
+
 	if (p_status == WGPUMapAsyncStatus_Success) {
 		const void *mapped = wgpuBufferGetConstMappedRange(buf->handle, 0, buf->size);
 		if (mapped && buf->shadow_map) {
@@ -835,26 +869,6 @@ static void _buffer_deferred_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView 
 		wgpuBufferUnmap(buf->handle);
 	} else {
 		ERR_PRINT(vformat("WebGPU _buffer_deferred_map_cb: FAILED status=%d", (int)p_status));
-	}
-	buf->map_complete = true;
-}
-
-// Callback for timestamp readback.
-static void _buffer_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
-	WGBuffer *buf = (WGBuffer *)p_userdata1;
-	if (!buf) return;
-
-	if (p_status == WGPUMapAsyncStatus_Success) {
-		const void *mapped = wgpuBufferGetConstMappedRange(buf->handle, 0, buf->size);
-		if (mapped) {
-			if (!buf->shadow_map) {
-				buf->shadow_map = (uint8_t *)memalloc(buf->size);
-			}
-			memcpy(buf->shadow_map, mapped, buf->size);
-		}
-		wgpuBufferUnmap(buf->handle);
-	} else {
-		WARN_PRINT("WebGPU buffer readback failed");
 	}
 	buf->map_complete = true;
 }
@@ -1022,6 +1036,7 @@ void RenderingDeviceDriverWebGPU::buffer_initiate_async_map(BufferID p_buffer) {
 			buf->shadow_map = (uint8_t *)memalloc(buf->size);
 			memset(buf->shadow_map, 0, buf->size);
 		}
+		buf->map_pending = true;
 		WGPUBufferMapCallbackInfo cb = {};
 		cb.mode = WGPUCallbackMode_AllowSpontaneous;
 		cb.callback = _buffer_deferred_map_cb;
@@ -2480,6 +2495,17 @@ Error RenderingDeviceDriverWebGPU::fence_wait(FenceID p_fence) {
 
 void RenderingDeviceDriverWebGPU::fence_free(FenceID p_fence) {
 	WGFence *fence = (WGFence *)(p_fence.id);
+	if (!fence) {
+		return;
+	}
+
+	// If an async work-done callback is in flight, mark freed and let
+	// the callback handle deletion (use-after-free prevention).
+	if (fence->work_done_pending) {
+		fence->freed = true;
+		return;
+	}
+
 	delete fence;
 }
 
@@ -2548,6 +2574,7 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 		WGFence *fence = (WGFence *)(p_cmd_fence.id);
 		if (fence) {
 			fence->signaled = false;
+			fence->work_done_pending = true;
 			WGPUQueueWorkDoneCallbackInfo cb = {};
 			cb.mode = WGPUCallbackMode_AllowSpontaneous;
 			cb.callback = _fence_work_done_callback;
@@ -7150,21 +7177,30 @@ RDD::QueryPoolID RenderingDeviceDriverWebGPU::timestamp_query_pool_create(uint32
 
 void RenderingDeviceDriverWebGPU::timestamp_query_pool_free(QueryPoolID p_pool_id) {
 	WGQueryPool *pool = (WGQueryPool *)(p_pool_id.id);
-	if (pool) {
-		if (pool->handle) {
-			wgpuQuerySetRelease(pool->handle);
-		}
-		if (pool->resolve_buffer) {
-			wgpuBufferRelease(pool->resolve_buffer);
-		}
-		if (pool->readback_buffer) {
-			wgpuBufferRelease(pool->readback_buffer);
-		}
-		if (pool->cpu_results) {
-			memfree(pool->cpu_results);
-		}
-		delete pool;
+	if (!pool) {
+		return;
 	}
+
+	// If an async readback callback is in flight, mark freed and let
+	// the callback handle cleanup (use-after-free prevention).
+	if (pool->readback_pending) {
+		pool->freed = true;
+		return;
+	}
+
+	if (pool->handle) {
+		wgpuQuerySetRelease(pool->handle);
+	}
+	if (pool->resolve_buffer) {
+		wgpuBufferRelease(pool->resolve_buffer);
+	}
+	if (pool->readback_buffer) {
+		wgpuBufferRelease(pool->readback_buffer);
+	}
+	if (pool->cpu_results) {
+		memfree(pool->cpu_results);
+	}
+	delete pool;
 }
 
 void RenderingDeviceDriverWebGPU::timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
@@ -7196,6 +7232,28 @@ static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUString
 	if (!pool) {
 		return;
 	}
+
+	// Pool was freed while this async readback was in flight — clean up.
+	if (pool->freed) {
+		if (pool->readback_buffer) {
+			if (p_status == WGPUMapAsyncStatus_Success) {
+				wgpuBufferUnmap(pool->readback_buffer);
+			}
+			wgpuBufferRelease(pool->readback_buffer);
+		}
+		if (pool->resolve_buffer) {
+			wgpuBufferRelease(pool->resolve_buffer);
+		}
+		if (pool->handle) {
+			wgpuQuerySetRelease(pool->handle);
+		}
+		if (pool->cpu_results) {
+			memfree(pool->cpu_results);
+		}
+		delete pool;
+		return;
+	}
+
 	if (p_status == WGPUMapAsyncStatus_Success) {
 		const void *data = wgpuBufferGetConstMappedRange(pool->readback_buffer, 0, sizeof(uint64_t) * pool->count);
 		if (data) {
