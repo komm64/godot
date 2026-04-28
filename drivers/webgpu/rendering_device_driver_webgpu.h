@@ -235,14 +235,17 @@ public:
 	virtual bool buffer_get_data_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, Vector<uint8_t> &r_data) override final;
 
 	/// Persistent readback entry for async buffer/texture map operations.
+	/// Heap-allocated so that pointers remain stable across HashMap rehashes
+	/// and can safely be passed to async WebGPU map callbacks.
 	struct ReadbackEntry {
 		WGPUBuffer staging = nullptr;   ///< Persistent staging buffer (CopyDst | MapRead).
 		uint8_t *shadow = nullptr;      ///< CPU-side shadow buffer.
 		uint64_t size = 0;              ///< Buffer size in bytes.
 		bool map_complete = false;      ///< Set by async map callback.
 		bool has_data = false;          ///< True after first successful readback.
+		bool cancelled = false;         ///< Source freed while map pending; callback will clean up.
 	};
-	HashMap<uint64_t, ReadbackEntry> _readback_cache; ///< Keyed by source buffer/texture pointer.
+	HashMap<uint64_t, ReadbackEntry *> _readback_cache; ///< Keyed by source buffer/texture pointer.
 	/// Async map callback — copies GPU data to shadow buffer.
 	static void _readback_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 

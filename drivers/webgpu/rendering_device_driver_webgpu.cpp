@@ -266,14 +266,15 @@ RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
 	}
 
 	// Clean up readback cache — release persistent staging buffers and shadow memory.
-	for (KeyValue<uint64_t, ReadbackEntry> &kv : _readback_cache) {
-		ReadbackEntry &entry = kv.value;
-		if (entry.staging) {
-			wgpuBufferRelease(entry.staging);
+	for (KeyValue<uint64_t, ReadbackEntry *> &kv : _readback_cache) {
+		ReadbackEntry *entry = kv.value;
+		if (entry->staging) {
+			wgpuBufferRelease(entry->staging);
 		}
-		if (entry.shadow) {
-			memfree(entry.shadow);
+		if (entry->shadow) {
+			memfree(entry->shadow);
 		}
+		memdelete(entry);
 	}
 	_readback_cache.clear();
 
@@ -469,6 +470,18 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 
 	// Create shader container format.
 	shader_container_format = memnew(RenderingShaderContainerFormatWebGPU);
+
+	// Always-on: uncaptured error listener so WebGPU validation errors appear
+	// in the browser console before any abort(). Lightweight — no extra API calls.
+	MAIN_THREAD_EM_ASM({
+		var d = Module['preinitializedWebGPUDevice'];
+		if (d && !d._uncapturedPatched) {
+			d.addEventListener('uncapturederror', function(e) {
+				console.error('[Godot-WebGPU] uncaptured error: ' + e.error.constructor.name + ' | ' + e.error.message);
+			});
+			d._uncapturedPatched = true;
+		}
+	});
 
 	// Install main-thread JS diagnostic patches early — as soon as the device is
 	// ready, before any pipelines are created. This ensures we intercept EVERY
@@ -773,6 +786,25 @@ bool RenderingDeviceDriverWebGPU::buffer_set_texel_format(BufferID p_buffer, Dat
 void RenderingDeviceDriverWebGPU::buffer_free(BufferID p_buffer) {
 	WGBuffer *buf = (WGBuffer *)(p_buffer.id);
 	ERR_FAIL_NULL(buf);
+
+	// Drop any readback-cache entry for this buffer.
+	uint64_t key = (uint64_t)(uintptr_t)buf;
+	if (_readback_cache.has(key)) {
+		ReadbackEntry *entry = _readback_cache[key];
+		if (!entry->map_complete) {
+			entry->cancelled = true;
+		} else {
+			if (entry->staging) {
+				wgpuBufferRelease(entry->staging);
+			}
+			if (entry->shadow) {
+				memfree(entry->shadow);
+			}
+			memdelete(entry);
+		}
+		_readback_cache.erase(key);
+	}
+
 	if (buf->handle) {
 		wgpuBufferRelease(buf->handle);
 	}
@@ -1187,7 +1219,25 @@ void RenderingDeviceDriverWebGPU::texture_upload_convert(TextureID p_texture,
 
 void RenderingDeviceDriverWebGPU::_readback_map_cb(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
 	ReadbackEntry *entry = (ReadbackEntry *)p_userdata1;
-	if (!entry || !entry->staging) return;
+	if (!entry) return;
+
+	// Source was freed while the async map was in flight. Clean up the
+	// orphaned entry that was kept alive specifically for this callback.
+	if (entry->cancelled) {
+		if (entry->staging) {
+			if (p_status == WGPUMapAsyncStatus_Success) {
+				wgpuBufferUnmap(entry->staging);
+			}
+			wgpuBufferRelease(entry->staging);
+		}
+		if (entry->shadow) {
+			memfree(entry->shadow);
+		}
+		memdelete(entry);
+		return;
+	}
+
+	if (!entry->staging) return;
 
 	if (p_status == WGPUMapAsyncStatus_Success) {
 		const void *mapped = wgpuBufferGetConstMappedRange(entry->staging, 0, entry->size);
@@ -1208,7 +1258,7 @@ bool RenderingDeviceDriverWebGPU::buffer_get_data_direct(BufferID p_buffer, uint
 	ReadbackEntry *entry = nullptr;
 
 	if (_readback_cache.has(key)) {
-		entry = &_readback_cache[key];
+		entry = _readback_cache[key];
 	}
 
 	// If we have completed readback data from a previous frame, return it.
@@ -1240,21 +1290,20 @@ bool RenderingDeviceDriverWebGPU::buffer_get_data_direct(BufferID p_buffer, uint
 	// First call for this buffer, or readback not yet complete.
 	// Create persistent staging buffer and initiate first readback.
 	if (!entry) {
-		ReadbackEntry new_entry;
-		new_entry.size = buf->size;
-		new_entry.shadow = (uint8_t *)memalloc(buf->size);
-		memset(new_entry.shadow, 0, buf->size);
+		entry = memnew(ReadbackEntry);
+		entry->size = buf->size;
+		entry->shadow = (uint8_t *)memalloc(buf->size);
+		memset(entry->shadow, 0, buf->size);
 
 		// Create persistent staging buffer with CopyDst + MapRead.
 		WGPUBufferDescriptor desc = {};
 		desc.size = (buf->size + 3) & ~3ULL;
 		desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
-		new_entry.staging = wgpuDeviceCreateBuffer(device, &desc);
-		new_entry.map_complete = false;
-		new_entry.has_data = false;
+		entry->staging = wgpuDeviceCreateBuffer(device, &desc);
+		entry->map_complete = false;
+		entry->has_data = false;
 
-		_readback_cache[key] = new_entry;
-		entry = &_readback_cache[key];
+		_readback_cache[key] = entry;
 	}
 
 	if (!entry->map_complete) {
@@ -1590,17 +1639,28 @@ void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
 	// pointer can be recycled by a future allocation. The cache key is
 	// (uintptr_t)tex ^ (layer << 48) — see texture_get_data — so we mask
 	// the high 16 bits when comparing to match across all layers.
+	// If an async map is still in flight (!map_complete), we can't free the
+	// entry here — the callback holds a pointer to it. Instead, mark it
+	// cancelled; the callback will release the staging buffer/shadow and
+	// delete the entry when it fires.
 	{
 		const uint64_t LAYER_MASK = 0xFFFF000000000000ULL;
 		const uint64_t base = (uint64_t)(uintptr_t)tex;
 		LocalVector<uint64_t> to_remove;
-		for (KeyValue<uint64_t, ReadbackEntry> &kv : _readback_cache) {
+		for (KeyValue<uint64_t, ReadbackEntry *> &kv : _readback_cache) {
 			if ((kv.key & ~LAYER_MASK) == (base & ~LAYER_MASK)) {
-				if (kv.value.staging) {
-					wgpuBufferRelease(kv.value.staging);
-				}
-				if (kv.value.shadow) {
-					memfree(kv.value.shadow);
+				ReadbackEntry *entry = kv.value;
+				if (!entry->map_complete) {
+					// Async map still in flight — let the callback clean up.
+					entry->cancelled = true;
+				} else {
+					if (entry->staging) {
+						wgpuBufferRelease(entry->staging);
+					}
+					if (entry->shadow) {
+						memfree(entry->shadow);
+					}
+					memdelete(entry);
 				}
 				to_remove.push_back(kv.key);
 			}
@@ -1681,7 +1741,7 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 	ReadbackEntry *entry = nullptr;
 
 	if (_readback_cache.has(key)) {
-		entry = &_readback_cache[key];
+		entry = _readback_cache[key];
 	}
 
 	// Format-aware bytes per pixel. Falls back to 4 if rd_format is missing
@@ -1746,20 +1806,19 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 
 	// First call — create staging buffer and initiate readback.
 	if (!entry) {
-		ReadbackEntry new_entry;
-		new_entry.size = buffer_size;
-		new_entry.shadow = (uint8_t *)memalloc(buffer_size);
-		memset(new_entry.shadow, 0, buffer_size);
+		entry = memnew(ReadbackEntry);
+		entry->size = buffer_size;
+		entry->shadow = (uint8_t *)memalloc(buffer_size);
+		memset(entry->shadow, 0, buffer_size);
 
 		WGPUBufferDescriptor desc = {};
 		desc.size = (buffer_size + 3) & ~3ULL;
 		desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
-		new_entry.staging = wgpuDeviceCreateBuffer(device, &desc);
-		new_entry.map_complete = false;
-		new_entry.has_data = false;
+		entry->staging = wgpuDeviceCreateBuffer(device, &desc);
+		entry->map_complete = false;
+		entry->has_data = false;
 
-		_readback_cache[key] = new_entry;
-		entry = &_readback_cache[key];
+		_readback_cache[key] = entry;
 	} else if (!entry->map_complete) {
 		// Readback in flight from a previous call. Don't queue another copy /
 		// mapAsync — wgpuBufferMapAsync on an already-pending buffer is a
