@@ -7160,7 +7160,12 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 	desc.compute.entryPoint = { "main", WGPU_STRLEN };
 
 	WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(device, &desc);
-	ERR_FAIL_COND_V_MSG(!pipeline, PipelineID(), "WebGPU: Failed to create compute pipeline.");
+	if (!pipeline) {
+		if (specialized_compute) {
+			wgpuShaderModuleRelease(specialized_compute);
+		}
+		ERR_FAIL_V_MSG(PipelineID(), "WebGPU: Failed to create compute pipeline.");
+	}
 
 	WGPipelineWrapper *pw = new WGPipelineWrapper();
 	pw->type = WGPipelineWrapper::COMPUTE;
