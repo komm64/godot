@@ -495,6 +495,12 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 			});
 			d._uncapturedPatched = true;
 		}
+		if (d && d.lost && !d._lostPatched) {
+			d.lost.then(function(info) {
+				console.error('[Godot-WebGPU] DEVICE LOST: reason=' + info.reason + ' | ' + info.message);
+			});
+			d._lostPatched = true;
+		}
 	});
 
 	// Install main-thread JS diagnostic patches early — as soon as the device is
