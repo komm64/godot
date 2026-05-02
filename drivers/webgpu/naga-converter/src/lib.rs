@@ -1485,40 +1485,6 @@ fn dump_spirv_around_error(bytes: &[u8], error_msg: &str) {
     }
 }
 
-/// Strip OpMemoryBarrier (opcode 225) and OpControlBarrier (opcode 224) from SPIR-V.
-/// Naga's SPIR-V parser doesn't support these instructions; WebGPU handles
-/// memory coherence automatically, so removing them is safe.
-/// Instructions are removed entirely and the SPIR-V header word count is updated.
-fn strip_memory_barriers(bytes: &[u8]) -> Vec<u8> {
-    let total_words = bytes.len() / 4;
-    if total_words < 5 {
-        return bytes.to_vec();
-    }
-    // Collect all instruction ranges, skipping barrier instructions.
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    // Copy header (5 words = 20 bytes).
-    out.extend_from_slice(&bytes[..20]);
-    let mut pos: usize = 5;
-    while pos < total_words {
-        let w0 = read_word(bytes, pos);
-        let wc = (w0 >> 16) as usize;
-        let op = (w0 & 0xFFFF) as u16;
-        if wc == 0 || pos + wc > total_words {
-            break;
-        }
-        // OpControlBarrier = 224, OpMemoryBarrier = 225 — skip these.
-        if op != 224 && op != 225 {
-            let byte_start = pos * 4;
-            let byte_end = (pos + wc) * 4;
-            out.extend_from_slice(&bytes[byte_start..byte_end]);
-        }
-        pos += wc;
-    }
-    // Update the bound (word 3) with new total word count isn't needed —
-    // the bound field is the max ID+1, not the word count.
-    out
-}
-
 /// Convert SPIR-V binary to WGSL source string.
 /// Takes a &[u8] of SPIR-V bytes, returns a WGSL string or an error message.
 #[wasm_bindgen]
@@ -1529,9 +1495,6 @@ pub fn spirv_to_wgsl(spirv_bytes: &[u8]) -> Result<String, JsError> {
 
     // Pre-process: freeze OpSpecConstantOp instructions that naga can't handle.
     let spirv_bytes = freeze_spec_constant_ops(spirv_bytes);
-
-    // Pre-process: strip OpMemoryBarrier / OpControlBarrier (unsupported by naga).
-    let spirv_bytes = strip_memory_barriers(&spirv_bytes);
 
     // Pre-process: add OpDecorate NonWritable to storage buffer vars that are never
     // stored to. glslang omits NonWritable for `restrict readonly buffer` blocks, so
