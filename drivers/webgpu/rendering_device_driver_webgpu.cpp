@@ -2716,6 +2716,12 @@ void RenderingDeviceDriverWebGPU::command_buffer_end(CommandBufferID p_cmd_buffe
 	// Resolve any query pools that had timestamps written during this command buffer.
 	for (uint32_t i = 0; i < cmd->written_query_pools.size(); i++) {
 		WGQueryPool *pool = cmd->written_query_pools[i];
+		// If a previous frame's mapAsync is still pending/mapped, cancel it so the
+		// buffer can be used as a copy destination (WebGPU validation requirement).
+		if (pool->readback_pending && pool->readback_buffer) {
+			wgpuBufferUnmap(pool->readback_buffer);
+			pool->readback_pending = false;
+		}
 		wgpuCommandEncoderResolveQuerySet(cmd->encoder, pool->handle, 0, pool->count, pool->resolve_buffer, 0);
 		uint64_t byte_size = sizeof(uint64_t) * pool->count;
 		wgpuCommandEncoderCopyBufferToBuffer(cmd->encoder, pool->resolve_buffer, 0, pool->readback_buffer, 0, byte_size);
