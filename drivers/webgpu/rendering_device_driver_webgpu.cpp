@@ -90,14 +90,18 @@ static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_
 // Cache lives for process lifetime — the SPIR-V → WGSL mapping is independent
 // of the WebGPU device, and a single process never creates more than ~1k
 // distinct shaders, so unbounded growth is fine in practice.
-static HashMap<uint32_t, String> _spv_to_wgsl_cache;
+// Uses a 64-bit key (two MurmurHash3 passes with different seeds) to avoid
+// birthday-paradox collisions that a 32-bit hash would risk at ~1k entries.
+static HashMap<uint64_t, String> _spv_to_wgsl_cache;
 static uint32_t _spv_to_wgsl_cache_hits = 0;
 static uint32_t _spv_to_wgsl_cache_misses = 0;
 
 // Returns a malloc'd null-terminated WGSL string (caller must free), or nullptr on
 // failure. Looks up the cache first, falls back to naga on miss.
 static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
-	uint32_t spv_hash = hash_murmur3_buffer(p_spv_ptr, p_spv_size);
+	uint32_t hash_lo = hash_murmur3_buffer(p_spv_ptr, p_spv_size);
+	uint32_t hash_hi = hash_murmur3_buffer(p_spv_ptr, p_spv_size, 0x9E3779B9);
+	uint64_t spv_hash = ((uint64_t)hash_hi << 32) | hash_lo;
 	const String *cached = _spv_to_wgsl_cache.getptr(spv_hash);
 	if (cached) {
 		_spv_to_wgsl_cache_hits++;
