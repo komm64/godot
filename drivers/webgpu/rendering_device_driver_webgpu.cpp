@@ -1520,6 +1520,11 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	view_desc.aspect = WGPUTextureAspect_All;
 
 	tex->default_view = wgpuTextureCreateView(tex->handle, &view_desc);
+	if (tex->default_view == nullptr) {
+		wgpuTextureRelease(tex->handle);
+		delete tex;
+		ERR_FAIL_V_MSG(TextureID(), "WebGPU: wgpuTextureCreateView failed for default view.");
+	}
 
 	return TextureID(tex);
 }
@@ -1582,6 +1587,10 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared(TextureID p_or
 		ERR_FAIL_V_MSG(TextureID(), "WebGPU: texture_create_shared: original texture has no GPU handle (view_source is null).");
 	}
 	tex->default_view = wgpuTextureCreateView(tex->view_source, &view_desc);
+	if (tex->default_view == nullptr) {
+		delete tex;
+		ERR_FAIL_V_MSG(TextureID(), "WebGPU: wgpuTextureCreateView failed for shared texture view.");
+	}
 	tex->handle = nullptr; // Shared texture does not own the WGPUTexture.
 
 	return TextureID(tex);
@@ -1637,6 +1646,10 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared_from_slice(Tex
 	}
 
 	tex->default_view = wgpuTextureCreateView(tex->view_source, &view_desc);
+	if (tex->default_view == nullptr) {
+		delete tex;
+		ERR_FAIL_V_MSG(TextureID(), "WebGPU: wgpuTextureCreateView failed for sliced texture view.");
+	}
 	tex->handle = nullptr;
 	tex->layers = p_layers;
 	tex->mipmaps = p_mipmaps;
