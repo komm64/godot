@@ -1320,6 +1320,11 @@ bool RenderingDeviceDriverWebGPU::buffer_get_data_direct(BufferID p_buffer, uint
 		desc.size = (buf->size + 3) & ~3ULL;
 		desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
 		entry->staging = wgpuDeviceCreateBuffer(device, &desc);
+		if (!entry->staging) {
+			memfree(entry->shadow);
+			memdelete(entry);
+			ERR_FAIL_V_MSG(false, "WebGPU: buffer_get_data_direct: failed to create staging buffer.");
+		}
 		entry->map_complete = false;
 		entry->has_data = false;
 
@@ -1872,6 +1877,11 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 		desc.size = (buffer_size + 3) & ~3ULL;
 		desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
 		entry->staging = wgpuDeviceCreateBuffer(device, &desc);
+		if (!entry->staging) {
+			memfree(entry->shadow);
+			memdelete(entry);
+			ERR_FAIL_V_MSG(Vector<uint8_t>(), "WebGPU: texture_get_data: failed to create staging buffer.");
+		}
 		entry->map_complete = false;
 		entry->has_data = false;
 
