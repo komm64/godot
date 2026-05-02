@@ -7008,7 +7008,11 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	}
 
 	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
-	ERR_FAIL_COND_V_MSG(!pipeline, PipelineID(), "WebGPU: Failed to create render pipeline.");
+	if (!pipeline) {
+		if (specialized_vertex) wgpuShaderModuleRelease(specialized_vertex);
+		if (specialized_fragment) wgpuShaderModuleRelease(specialized_fragment);
+		ERR_FAIL_V_MSG(PipelineID(), "WebGPU: Failed to create render pipeline.");
+	}
 
 	WGPipelineWrapper *pw = new WGPipelineWrapper();
 	pw->type = WGPipelineWrapper::RENDER;
