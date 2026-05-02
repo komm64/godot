@@ -2972,6 +2972,8 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 	print_verbose(vformat("WebGPU: shader_create_from_container '%s' (%d stages, push_const_size=%d)", shader->name, (int)p_shader_container->shaders.size(), (int)shader_refl.push_constant_size));
 
+	String error_text;
+
 	// Maps (set_index << 16 | binding) to the WGSL texture view dimension detected from NAGA output.
 	// Used so SAMPLER_WITH_TEXTURE and TEXTURE BGL entries get the correct viewDimension.
 	HashMap<uint32_t, WGPUTextureViewDimension> wgsl_tex_dims;
@@ -3020,8 +3022,14 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 		// The code_compressed_bytes holds raw SPIR-V (no compression — code_decompressed_size == 0).
 		const PackedByteArray &spv_bytes = s.code_compressed_bytes;
-		ERR_FAIL_COND_V_MSG(spv_bytes.is_empty(), ShaderID(), "WebGPU: empty SPIR-V for shader stage.");
-		ERR_FAIL_COND_V_MSG(spv_bytes.size() % 4 != 0, ShaderID(), "WebGPU: SPIR-V size must be a multiple of 4.");
+		if (spv_bytes.is_empty()) {
+			error_text = "WebGPU: empty SPIR-V for shader stage.";
+			break;
+		}
+		if (spv_bytes.size() % 4 != 0) {
+			error_text = "WebGPU: SPIR-V size must be a multiple of 4.";
+			break;
+		}
 
 		// Store raw SPIR-V for potential re-conversion with specialization constants.
 		shader->stage_spirv[(int)s.shader_stage] = spv_bytes;
@@ -3033,7 +3041,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		// process-lifetime cache before invoking naga (see helper definition).
 		char *wgsl_str = _spv_to_wgsl_cached(spv_bytes.ptr(), (int)spv_bytes.size());
 
-		ERR_FAIL_COND_V_MSG(wgsl_str == nullptr, ShaderID(), vformat("WebGPU: SPIR-V→WGSL conversion failed for stage %d.", (int)s.shader_stage));
+		if (wgsl_str == nullptr) {
+			error_text = vformat("WebGPU: SPIR-V→WGSL conversion failed for stage %d.", (int)s.shader_stage);
+			break;
+		}
 
 		// DEPTH_ALIAS parsing removed — depth=2 images are now depth=1 in SPIR-V,
 		// and a single texture_depth_2d variable handles both sampling modes.
@@ -3508,7 +3519,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		}
 
 		free(wgsl_str); // Free the EM_ASM-allocated string.
-		ERR_FAIL_COND_V_MSG(mod == nullptr, ShaderID(), vformat("WebGPU: wgpuDeviceCreateShaderModule failed for stage %d.", (int)s.shader_stage));
+		if (mod == nullptr) {
+			error_text = vformat("WebGPU: wgpuDeviceCreateShaderModule failed for stage %d.", (int)s.shader_stage);
+			break;
+		}
 
 		if (s.shader_stage < 6) {
 			shader->stage_modules[s.shader_stage] = mod;
@@ -3518,6 +3532,13 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			shader->module = mod;
 		}
 	}
+
+	if (!error_text.is_empty()) {
+		goto cleanup;
+	}
+
+	{ // Block scope: variables here (LocalVector, String) have non-trivial
+	  // destructors and must not be jumped over by goto.
 
 	// --- Build WGPUBindGroupLayout for each descriptor set ---
 #ifdef WEB_ENABLED
@@ -3843,7 +3864,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		layout_desc.label = { _bgl_label_cs.get_data(), WGPU_STRLEN };
 
 		shader->bind_group_layouts[set] = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
-		ERR_FAIL_COND_V_MSG(shader->bind_group_layouts[set] == nullptr, ShaderID(), "WebGPU: wgpuDeviceCreateBindGroupLayout failed.");
+		if (shader->bind_group_layouts[set] == nullptr) {
+			error_text = "WebGPU: wgpuDeviceCreateBindGroupLayout failed.";
+			goto cleanup;
+		}
 	}
 
 	// Store depth alias bindings on the shader for use during uniform_set_create.
@@ -3925,8 +3949,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				merged_desc.entryCount = merged_entries.size();
 				merged_desc.entries = merged_entries.ptr();
 				shader->merged_pc_group_layout = wgpuDeviceCreateBindGroupLayout(device, &merged_desc);
-				ERR_FAIL_COND_V_MSG(!shader->merged_pc_group_layout, ShaderID(),
-						"WebGPU: failed to create merged PC+material bind group layout.");
+				if (!shader->merged_pc_group_layout) {
+					error_text = "WebGPU: failed to create merged PC+material bind group layout.";
+					goto cleanup;
+				}
 				all_layouts[i] = shader->merged_pc_group_layout;
 			} else {
 				// No material uniforms at this group — use the universal PC-only layout.
@@ -3960,9 +3986,35 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	pl_desc.label = { _pl_label_cs.get_data(), WGPU_STRLEN };
 
 	shader->pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &pl_desc);
-	ERR_FAIL_COND_V_MSG(shader->pipeline_layout == nullptr, ShaderID(), "WebGPU: wgpuDeviceCreatePipelineLayout failed.");
+	if (shader->pipeline_layout == nullptr) {
+		error_text = "WebGPU: wgpuDeviceCreatePipelineLayout failed.";
+		goto cleanup;
+	}
 
 	return ShaderID(shader);
+
+	} // End block scope.
+
+cleanup:
+	// Clean up partially-constructed shader (mirrors shader_free).
+	for (int i = 0; i < 6; i++) {
+		if (shader->stage_modules[i]) {
+			wgpuShaderModuleRelease(shader->stage_modules[i]);
+		}
+	}
+	if (shader->pipeline_layout) {
+		wgpuPipelineLayoutRelease(shader->pipeline_layout);
+	}
+	for (WGPUBindGroupLayout &layout : shader->bind_group_layouts) {
+		if (layout) {
+			wgpuBindGroupLayoutRelease(layout);
+		}
+	}
+	if (shader->merged_pc_group_layout) {
+		wgpuBindGroupLayoutRelease(shader->merged_pc_group_layout);
+	}
+	delete shader;
+	ERR_FAIL_V_MSG(ShaderID(), error_text);
 }
 
 uint32_t RenderingDeviceDriverWebGPU::shader_get_layout_hash(ShaderID p_shader) {
