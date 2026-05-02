@@ -6827,6 +6827,10 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 			ds.stencilBack.passOp = map_stencil_op(p_depth_stencil_state.back_op.pass);
 			ds.stencilReadMask = p_depth_stencil_state.front_op.compare_mask;
 			ds.stencilWriteMask = p_depth_stencil_state.front_op.write_mask;
+			if (p_depth_stencil_state.front_op.compare_mask != p_depth_stencil_state.back_op.compare_mask ||
+					p_depth_stencil_state.front_op.write_mask != p_depth_stencil_state.back_op.write_mask) {
+				WARN_PRINT_ONCE("WebGPU: Front and back stencil masks differ, but WebGPU only supports a single mask pair. Back-face masks will be ignored (front-face masks used for both).");
+			}
 		} else {
 			ds.stencilFront = { WGPUCompareFunction_Always, WGPUStencilOperation_Keep, WGPUStencilOperation_Keep, WGPUStencilOperation_Keep };
 			ds.stencilBack = { WGPUCompareFunction_Always, WGPUStencilOperation_Keep, WGPUStencilOperation_Keep, WGPUStencilOperation_Keep };
