@@ -1577,7 +1577,10 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared(TextureID p_or
 	}
 
 	// view_source was already inherited from orig via *tex = *orig.
-	ERR_FAIL_COND_V_MSG(tex->view_source == nullptr, TextureID(), "WebGPU: texture_create_shared: original texture has no GPU handle (view_source is null).");
+	if (tex->view_source == nullptr) {
+		delete tex;
+		ERR_FAIL_V_MSG(TextureID(), "WebGPU: texture_create_shared: original texture has no GPU handle (view_source is null).");
+	}
 	tex->default_view = wgpuTextureCreateView(tex->view_source, &view_desc);
 	tex->handle = nullptr; // Shared texture does not own the WGPUTexture.
 
@@ -1621,7 +1624,10 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_shared_from_slice(Tex
 	}
 
 	// view_source was already inherited from orig via *tex = *orig.
-	ERR_FAIL_COND_V_MSG(tex->view_source == nullptr, TextureID(), "WebGPU: texture_create_shared_from_slice: original texture has no GPU handle (view_source is null).");
+	if (tex->view_source == nullptr) {
+		delete tex;
+		ERR_FAIL_V_MSG(TextureID(), "WebGPU: texture_create_shared_from_slice: original texture has no GPU handle (view_source is null).");
+	}
 
 	// sRGB formats are incompatible with StorageBinding in WebGPU.
 	// Fall back to the parent's linear format if sRGB is requested on a storage texture.
