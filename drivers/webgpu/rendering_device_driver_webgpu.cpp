@@ -2857,9 +2857,13 @@ RDD::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acquire_framebuffer(C
 		_st_log++;
 	}
 
+	if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
+		ERR_PRINT_ONCE("WebGPU: surface lost — device or surface is no longer usable.");
+		return FramebufferID();
+	}
+
 	if (surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal ||
-			surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated ||
-			surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Lost) {
+			surface_texture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated) {
 		WARN_PRINT_ONCE(vformat("WebGPU: wgpuSurfaceGetCurrentTexture: resize-needed status=%d", (int)surface_texture.status));
 		r_resize_required = true;
 		return FramebufferID();
