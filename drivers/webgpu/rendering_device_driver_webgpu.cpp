@@ -3930,11 +3930,22 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					if (pu.type == RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE) {
 						WGPUBindGroupLayoutEntry se = {}, te = {};
 						se.binding = pu.binding * 2 + 0; se.visibility = pvis;
-						se.sampler.type = WGPUSamplerBindingType_Filtering;
+						{ uint32_t k = ((uint32_t)i << 16) | (pu.binding * 2 + 0);
+						  se.sampler.type = (wgsl_is_comparison_sampler.has(k) && wgsl_is_comparison_sampler[k])
+							  ? WGPUSamplerBindingType_Comparison : WGPUSamplerBindingType_Filtering; }
 						te.binding = pu.binding * 2 + 1; te.visibility = pvis;
-						te.texture.sampleType = WGPUTextureSampleType_Float;
 						{ uint32_t k = ((uint32_t)i << 16) | (pu.binding * 2 + 1);
-						  te.texture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D; }
+						  bool is_ms = wgsl_is_multisampled_texture.has(k) && wgsl_is_multisampled_texture[k];
+						  bool is_depth = wgsl_is_depth_texture.has(k) && wgsl_is_depth_texture[k];
+						  te.texture.sampleType = is_depth
+							  ? WGPUTextureSampleType_Depth
+							  : (is_ms ? WGPUTextureSampleType_UnfilterableFloat : WGPUTextureSampleType_Float);
+						  te.texture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D;
+						  te.texture.multisampled = is_ms;
+						  if (is_ms && !is_depth) {
+							  se.sampler.type = WGPUSamplerBindingType_NonFiltering;
+						  }
+						}
 						merged_entries.push_back(se);
 						merged_entries.push_back(te);
 					} else {
