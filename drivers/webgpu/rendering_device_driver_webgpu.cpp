@@ -7592,6 +7592,11 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 		// Use mappedAtCreation for buffer creation with initial data —
 		// bypasses staging buffer + wgpuQueueWriteBuffer overhead entirely.
 		case API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION: return 1;
+		// Cap the staging buffer pool to 16 MB. WebGPU staging blocks use
+		// CPU shadow memory (memalloc), so idle blocks waste heap after
+		// the loading spike. 16 MB is generous for per-frame dynamic
+		// updates; overflow stalls briefly and reuses blocks.
+		case API_TRAIT_STAGING_BUFFER_MAX_SIZE_MB: return 16;
 		default: return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
 }

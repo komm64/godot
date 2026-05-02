@@ -7470,6 +7470,14 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	// Convert staging buffer size from MB.
 	upload_staging_buffers.max_size = GLOBAL_GET("rendering/rendering_device/staging_buffer/max_size_mb");
 	upload_staging_buffers.max_size = MAX(1u, upload_staging_buffers.max_size);
+
+	// Allow the driver to cap staging pool size (e.g. WebGPU where shadow
+	// buffers waste CPU heap after the loading spike subsides).
+	uint64_t driver_max_mb = driver->api_trait_get(RDD::API_TRAIT_STAGING_BUFFER_MAX_SIZE_MB);
+	if (driver_max_mb > 0) {
+		upload_staging_buffers.max_size = MIN(upload_staging_buffers.max_size, driver_max_mb);
+	}
+
 	upload_staging_buffers.max_size *= 1024 * 1024;
 	upload_staging_buffers.max_size = MAX(upload_staging_buffers.max_size, upload_staging_buffers.block_size * 4);
 

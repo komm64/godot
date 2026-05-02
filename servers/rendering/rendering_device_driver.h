@@ -909,6 +909,12 @@ public:
 		// path incurs expensive WASM→JS→GPU bridge crossings that can be
 		// avoided by creating the buffer with mappedAtCreation.
 		API_TRAIT_BUFFER_CREATE_MAPPED_AT_CREATION,
+		// If non-zero, caps the staging buffer pool max_size to this value
+		// (in MB), overriding the project setting. On backends where staging
+		// blocks use CPU shadow memory (e.g. WebGPU), keeping the pool small
+		// avoids wasting memory after the loading spike subsides. The pool
+		// handles overflow correctly via stall-and-reuse.
+		API_TRAIT_STAGING_BUFFER_MAX_SIZE_MB,
 	};
 
 	enum ShaderChangeInvalidation {
