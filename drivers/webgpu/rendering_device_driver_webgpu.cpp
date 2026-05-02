@@ -752,7 +752,10 @@ RDD::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitFie
 	desc.mappedAtCreation = false;
 
 	buf->handle = wgpuDeviceCreateBuffer(device, &desc);
-	ERR_FAIL_COND_V(buf->handle == nullptr, BufferID());
+	if (buf->handle == nullptr) {
+		delete buf;
+		ERR_FAIL_V(BufferID());
+	}
 
 	return BufferID(buf);
 }
