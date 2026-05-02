@@ -1496,7 +1496,10 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	desc.label = { _tex_fallback, WGPU_STRLEN };
 
 	tex->handle = wgpuDeviceCreateTexture(device, &desc);
-	ERR_FAIL_COND_V(tex->handle == nullptr, TextureID());
+	if (tex->handle == nullptr) {
+		delete tex;
+		ERR_FAIL_V(TextureID());
+	}
 	tex->view_source = tex->handle; // Always the owning WGPUTexture; inherited by shared/sliced textures.
 	tex->debug_create_id = _tex_id;
 
