@@ -227,6 +227,11 @@ struct WGPipelineWrapper {
 	// via wgpuRenderPassEncoderSetStencilReference(). Stored here at creation time,
 	// applied when the pipeline is bound.
 	uint32_t stencil_reference = 0;
+	// WebGPU bakes stripIndexFormat into the pipeline state, but Godot only knows
+	// the index format at bind time. For strip topologies we create both Uint16 and
+	// Uint32 variants and select the correct one at draw time.
+	WGPURenderPipeline render_handle_u16 = nullptr;
+	bool is_strip = false;
 
 	WGPipelineWrapper() : render_handle(nullptr) {}
 };
@@ -322,6 +327,7 @@ struct WGCommandBuffer {
 		WGFramebuffer *framebuffer = nullptr;
 		uint32_t current_subpass = 0;
 		WGPipelineWrapper *current_pipeline = nullptr;
+		WGPUIndexFormat current_index_format = WGPUIndexFormat_Uint32;
 		uint32_t render_area_width = 0;
 		uint32_t render_area_height = 0;
 		// Textures used as render attachments in the CURRENT pass only.

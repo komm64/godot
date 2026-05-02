@@ -5431,6 +5431,9 @@ void RenderingDeviceDriverWebGPU::pipeline_free(PipelineID p_pipeline) {
 	ERR_FAIL_NULL(pw);
 	if (pw->type == WGPipelineWrapper::RENDER && pw->render_handle) {
 		wgpuRenderPipelineRelease(pw->render_handle);
+		if (pw->render_handle_u16) {
+			wgpuRenderPipelineRelease(pw->render_handle_u16);
+		}
 	} else if (pw->type == WGPipelineWrapper::COMPUTE && pw->compute_handle) {
 		wgpuComputePipelineRelease(pw->compute_handle);
 	}
@@ -6235,8 +6238,16 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_
 	ERR_FAIL_NULL(cmd);
 	ERR_FAIL_COND(!cmd->render_encoder);
 
-	if (cmd->render_state.current_pipeline) {
-		_flush_push_constants(cmd, cmd->render_state.current_pipeline->shader);
+	WGPipelineWrapper *pw = cmd->render_state.current_pipeline;
+	if (pw) {
+		_flush_push_constants(cmd, pw->shader);
+		// For strip topologies, ensure the pipeline variant matches the bound index format.
+		// Always select the correct variant — the format may have changed since pipeline bind.
+		if (pw->is_strip && pw->render_handle_u16) {
+			WGPURenderPipeline needed = (cmd->render_state.current_index_format == WGPUIndexFormat_Uint16)
+					? pw->render_handle_u16 : pw->render_handle;
+			wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, needed);
+		}
 	}
 
 	perf.draw_calls++;
@@ -6250,8 +6261,14 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed_indirect(CommandBu
 	ERR_FAIL_NULL(indirect);
 	ERR_FAIL_COND(!cmd->render_encoder);
 
-	if (cmd->render_state.current_pipeline) {
-		_flush_push_constants(cmd, cmd->render_state.current_pipeline->shader);
+	WGPipelineWrapper *pw = cmd->render_state.current_pipeline;
+	if (pw) {
+		_flush_push_constants(cmd, pw->shader);
+		if (pw->is_strip && pw->render_handle_u16) {
+			WGPURenderPipeline needed = (cmd->render_state.current_index_format == WGPUIndexFormat_Uint16)
+					? pw->render_handle_u16 : pw->render_handle;
+			wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, needed);
+		}
 	}
 
 	// WebGPU has no multi-draw-indirect — must loop.
@@ -6316,6 +6333,7 @@ void RenderingDeviceDriverWebGPU::command_render_bind_index_buffer(CommandBuffer
 
 	WGPUIndexFormat format = (p_format == INDEX_BUFFER_FORMAT_UINT16) ? WGPUIndexFormat_Uint16 : WGPUIndexFormat_Uint32;
 	wgpuRenderPassEncoderSetIndexBuffer(cmd->render_encoder, buf->handle, format, p_offset, WGPU_WHOLE_SIZE);
+	cmd->render_state.current_index_format = format;
 }
 
 void RenderingDeviceDriverWebGPU::command_render_set_blend_constants(CommandBufferID p_cmd_buffer, const Color &p_constants) {
@@ -7014,6 +7032,17 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	pw->specialized_modules[SHADER_STAGE_VERTEX] = specialized_vertex;
 	pw->specialized_modules[SHADER_STAGE_FRAGMENT] = specialized_fragment;
 	pw->stencil_reference = p_depth_stencil_state.front_op.reference;
+	pw->is_strip = is_strip;
+	if (is_strip) {
+		// Create a Uint16 variant — WebGPU bakes stripIndexFormat into the pipeline,
+		// but Godot only knows the index format at bind time.
+		desc.primitive.stripIndexFormat = WGPUIndexFormat_Uint16;
+		pw->render_handle_u16 = wgpuDeviceCreateRenderPipeline(device, &desc);
+		// Non-fatal if this fails — Uint32 variant still works for the common case.
+		if (!pw->render_handle_u16) {
+			WARN_PRINT_ONCE("WebGPU: failed to create Uint16 strip pipeline variant.");
+		}
+	}
 	return PipelineID(pw);
 }
 
