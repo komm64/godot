@@ -6432,6 +6432,63 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 		return nullptr;
 	}
 
+	// Format remapping passes (must match shader_create_from_container).
+
+	// Remap unsupported 8-bit storage texture format names in WGSL.
+	if (!has_texture_formats_tier1 &&
+			(strstr(wgsl_str, "r8unorm") || strstr(wgsl_str, "r8snorm") ||
+			strstr(wgsl_str, "r8uint") || strstr(wgsl_str, "r8sint") ||
+			strstr(wgsl_str, "rg8unorm") || strstr(wgsl_str, "rg8snorm") ||
+			strstr(wgsl_str, "rg8uint") || strstr(wgsl_str, "rg8sint"))) {
+		String ws(wgsl_str);
+		ws = ws.replace("rg8unorm", "rg32float");
+		ws = ws.replace("rg8snorm", "rg32float");
+		ws = ws.replace("rg8uint", "rg32uint");
+		ws = ws.replace("rg8sint", "rg32sint");
+		ws = ws.replace("r8unorm", "r32float");
+		ws = ws.replace("r8snorm", "r32float");
+		ws = ws.replace("r8uint", "r32uint");
+		ws = ws.replace("r8sint", "r32sint");
+		free(wgsl_str);
+		CharString cs = ws.utf8();
+		wgsl_str = (char *)malloc(cs.length() + 1);
+		memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
+	}
+
+	// Remap 16-bit SNORM/UNORM storage texture formats to float equivalents.
+	if (!has_texture_formats_tier1) {
+		char *q = wgsl_str;
+		while (*q) {
+			if (strncmp(q, "rgba16snorm", 11) == 0) { memcpy(q, "rgba16float", 11); q += 11; }
+			else if (strncmp(q, "rgba16unorm", 11) == 0) { memcpy(q, "rgba16float", 11); q += 11; }
+			else if (strncmp(q, "rg16snorm", 9) == 0) { memcpy(q, "rg16float", 9); q += 9; }
+			else if (strncmp(q, "rg16unorm", 9) == 0) { memcpy(q, "rg16float", 9); q += 9; }
+			else if (strncmp(q, "r16snorm", 8) == 0) { memcpy(q, "r16float", 8); q += 8; }
+			else if (strncmp(q, "r16unorm", 8) == 0) { memcpy(q, "r16float", 8); q += 8; }
+			else { q++; }
+		}
+	}
+
+	// Remap 16-bit storage formats to 32-bit equivalents (WebGPU spec §26.1.1).
+	{
+		char *q = wgsl_str;
+		while (*q) {
+			if (strncmp(q, "rgba16snorm", 11) == 0) { memcpy(q, "rgba16float", 11); q += 11; }
+			else if (strncmp(q, "rgba16unorm", 11) == 0) { memcpy(q, "rgba16float", 11); q += 11; }
+			else if (strncmp(q, "rg16float", 9) == 0) { memcpy(q, "rg32float", 9); q += 9; }
+			else if (strncmp(q, "rg16snorm", 9) == 0) { memcpy(q, "rg32float", 9); q += 9; }
+			else if (strncmp(q, "rg16unorm", 9) == 0) { memcpy(q, "rg32float", 9); q += 9; }
+			else if (strncmp(q, "rg16uint", 8) == 0) { memcpy(q, "rg32uint", 8); q += 8; }
+			else if (strncmp(q, "rg16sint", 8) == 0) { memcpy(q, "rg32sint", 8); q += 8; }
+			else if (strncmp(q, "r16float", 8) == 0) { memcpy(q, "r32float", 8); q += 8; }
+			else if (strncmp(q, "r16snorm", 8) == 0) { memcpy(q, "r32float", 8); q += 8; }
+			else if (strncmp(q, "r16unorm", 8) == 0) { memcpy(q, "r32float", 8); q += 8; }
+			else if (strncmp(q, "r16uint", 7) == 0) { memcpy(q, "r32uint", 7); q += 7; }
+			else if (strncmp(q, "r16sint", 7) == 0) { memcpy(q, "r32sint", 7); q += 7; }
+			else { q++; }
+		}
+	}
+
 	// Demote read_write storage to read for vertex/fragment stages.
 	if (p_stage == SHADER_STAGE_VERTEX || p_stage == SHADER_STAGE_FRAGMENT) {
 		char *q = wgsl_str;
