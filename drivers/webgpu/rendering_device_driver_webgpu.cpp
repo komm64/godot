@@ -1777,16 +1777,21 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 		entry = _readback_cache[key];
 	}
 
-	// Format-aware bytes per pixel. Falls back to 4 if rd_format is missing
-	// (e.g. shared / sliced views). Compressed formats aren't exercised by
-	// texture_get_data() in Godot today, so the uncompressed path is sufficient.
-	uint32_t bpp = (tex->rd_format != DATA_FORMAT_MAX) ? get_image_format_pixel_size(tex->rd_format) : 4;
-	if (bpp == 0) {
-		bpp = 4;
+	// Two pixel sizes: the original Godot format (rd_bpp) for the output
+	// Vector, and the actual GPU format (gpu_bpp) for staging buffer sizing
+	// and the CopyTextureToBuffer stride. These diverge when the driver
+	// promotes storage formats (R8→R32Float) or downgrades float32→float16.
+	uint32_t rd_bpp = (tex->rd_format != DATA_FORMAT_MAX) ? get_image_format_pixel_size(tex->rd_format) : 4;
+	if (rd_bpp == 0) {
+		rd_bpp = 4;
+	}
+	uint32_t gpu_bpp = wgpu_format_pixel_size(tex->format);
+	if (gpu_bpp == 0) {
+		gpu_bpp = rd_bpp;
 	}
 	uint32_t mip_w = tex->width;
 	uint32_t mip_h = tex->height;
-	uint32_t row_pitch = ((mip_w * bpp + 255) / 256) * 256; // 256-byte aligned
+	uint32_t row_pitch = ((mip_w * gpu_bpp + 255) / 256) * 256; // 256-byte aligned
 	uint64_t buffer_size = (uint64_t)row_pitch * mip_h;
 
 	// If a readback is in flight, deliver pending callbacks and then probe the
@@ -1813,13 +1818,21 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 	// Return cached data if previous readback completed.
 	if (entry && entry->has_data && entry->map_complete) {
 		Vector<uint8_t> result;
-		result.resize(mip_w * mip_h * bpp);
-
-		// Un-pad: copy from padded staging buffer to tightly packed output.
+		result.resize(mip_w * mip_h * rd_bpp);
 		uint8_t *dst = result.ptrw();
-		uint32_t tight_row = mip_w * bpp;
-		for (uint32_t y = 0; y < mip_h; y++) {
-			memcpy(dst + y * tight_row, entry->shadow + y * row_pitch, tight_row);
+
+		if (gpu_bpp != rd_bpp) {
+			// Format was promoted or downgraded — convert GPU data back to
+			// the original Godot format (e.g. R32Float→R8, Float16→Float32).
+			uint32_t dst_pitch = mip_w * rd_bpp;
+			texture_readback_convert(p_texture, entry->shadow, row_pitch,
+					dst, dst_pitch, mip_w, mip_h);
+		} else {
+			// No format divergence — un-pad from staging to tightly packed output.
+			uint32_t tight_row = mip_w * rd_bpp;
+			for (uint32_t y = 0; y < mip_h; y++) {
+				memcpy(dst + y * tight_row, entry->shadow + y * row_pitch, tight_row);
+			}
 		}
 
 		// Mark consumed; do NOT auto-requeue. Each top-level call (e.g.
