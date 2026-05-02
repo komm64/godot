@@ -137,14 +137,6 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
 		_spv_to_wgsl_cache[spv_hash] = String(wgsl_str);
 	}
 
-	// Log cache stats every 50 calls so we can measure hit-rate during startup.
-	uint32_t total = _spv_to_wgsl_cache_hits + _spv_to_wgsl_cache_misses;
-	if (total > 0 && (total % 50) == 0) {
-		EM_ASM({
-			console.log('[SPV-CACHE] total=' + $0 + ' hits=' + $1 + ' misses=' + $2 + ' size=' + $3);
-		}, (int)total, (int)_spv_to_wgsl_cache_hits, (int)_spv_to_wgsl_cache_misses, (int)_spv_to_wgsl_cache.size());
-	}
-
 	return wgsl_str;
 }
 
@@ -3437,22 +3429,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				}
 				ssbo_count++;
 			}
-#ifdef WEB_ENABLED
-			EM_ASM({
-				console.log('[SSBO-META] godot_stage=' + $0 + ' wgpu_stage=' + $1 + ' ssbo_used_count=' + $2);
-			}, (int)s.shader_stage, (int)current_wgpu_stage, ssbo_count);
-			if (ssbo_count > 0) {
-				for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_buffer_stages) {
-					static int _meta_entry_log = 0;
-					if (_meta_entry_log < 30) {
-						EM_ASM({
-							console.log('  [META-ENTRY] key=0x' + $0.toString(16) + ' vis=' + $1);
-						}, (int)kv.key, (int)kv.value);
-						_meta_entry_log++;
-					}
-				}
-			}
-#endif
 		}
 
 		// Scan WGSL for storage buffer access modes and uniform bindings.
@@ -3595,21 +3571,6 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	  // destructors and must not be jumped over by goto.
 
 	// --- Build WGPUBindGroupLayout for each descriptor set ---
-#ifdef WEB_ENABLED
-	// Dump metadata for shaders with many storage buffers (scene shader has 10+).
-	if (wgsl_buffer_stages.size() > 5) {
-		static int _scene_meta_dump = 0;
-		if (_scene_meta_dump < 3) {
-			EM_ASM({ console.log('[SCENE-META] wgsl_buffer_stages entries=' + $0); }, (int)wgsl_buffer_stages.size());
-			for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_buffer_stages) {
-				EM_ASM({
-					console.log('  [SCENE-META] key=0x' + $0.toString(16) + ' (set=' + ($0 >> 16) + ' bind=' + ($0 & 0xFFFF) + ') vis=' + $1);
-				}, (int)kv.key, (int)kv.value);
-			}
-			_scene_meta_dump++;
-		}
-	}
-#endif
 	const uint32_t set_count = (uint32_t)shader_refl.uniform_sets.size();
 	shader->bind_group_infos.resize(set_count);
 	shader->bind_group_layouts.resize(set_count);
@@ -4735,12 +4696,11 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 	desc.entries = filtered.size() > 0 ? filtered.ptr() : nullptr;
 	WGPUBindGroup bg = wgpuDeviceCreateBindGroup(device, &desc);
 	if (!bg) {
-		EM_ASM({
-			console.error('[REBIND-FAIL] set=' + $0 + ' src=' + UTF8ToString($1) + ' tgt=' + UTF8ToString($2) + ' entries=' + $3);
-		}, (int)p_set_idx,
-			p_us->source_shader ? p_us->source_shader->name.utf8().get_data() : "null",
-			p_target_shader->name.utf8().get_data(),
-			(int)filtered.size());
+		WARN_PRINT(vformat("WebGPU: bind group rebind failed for set=%d src=%s tgt=%s entries=%d",
+				(int)p_set_idx,
+				p_us->source_shader ? p_us->source_shader->name : String("null"),
+				p_target_shader->name,
+				(int)filtered.size()));
 	}
 	p_us->rebind_cache[target_layout] = bg; // Cache even if null.
 	return bg ? bg : p_us->handle;
@@ -7025,49 +6985,6 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	String _pipeline_label_str = "pipe#" + itos(_pid) + ":" + shader->name;
 	CharString _pipeline_label_cs = _pipeline_label_str.utf8();
 	desc.label = { _pipeline_label_cs.get_data(), WGPU_STRLEN };
-
-	// DIAG-3: Count vertex-stage storage buffer slots across all descriptor sets.
-	{
-		int vtx_storage_count = 0;
-		int vtx_uniform_count = 0;
-		for (uint32_t s = 0; s < (uint32_t)shader->bind_group_infos.size(); s++) {
-			for (const auto &e : shader->bind_group_infos[s].entries) {
-				bool has_vtx = (e.layout_entry.visibility & WGPUShaderStage_Vertex) != 0;
-				bool is_storage = (e.layout_entry.buffer.type == WGPUBufferBindingType_ReadOnlyStorage ||
-								  e.layout_entry.buffer.type == WGPUBufferBindingType_Storage);
-				bool is_uniform = (e.layout_entry.buffer.type == WGPUBufferBindingType_Uniform);
-				if (has_vtx && is_storage) vtx_storage_count++;
-				if (has_vtx && is_uniform) vtx_uniform_count++;
-			}
-		}
-		static int _buf_count_log = 0;
-		if (_buf_count_log < 30) {
-			EM_ASM({
-				console.log('[BUF-SLOTS] pipe=' + UTF8ToString($0) + ' vtx_storage=' + $1 +
-					' vtx_uniform=' + $2 + ' specialized=' + ($3 ? 'yes' : 'no'));
-			}, _pipeline_label_cs.get_data(), vtx_storage_count, vtx_uniform_count, specialized_vertex ? 1 : 0);
-			// Log individual vertex storage buffers for the first few pipelines
-			if (_buf_count_log < 5 && vtx_storage_count > 6) {
-				for (uint32_t s = 0; s < (uint32_t)shader->bind_group_infos.size(); s++) {
-					for (uint32_t ei = 0; ei < (uint32_t)shader->bind_group_infos[s].entries.size(); ei++) {
-						const auto &e = shader->bind_group_infos[s].entries[ei];
-						bool has_vtx = (e.layout_entry.visibility & WGPUShaderStage_Vertex) != 0;
-						bool is_storage = (e.layout_entry.buffer.type == WGPUBufferBindingType_ReadOnlyStorage ||
-										  e.layout_entry.buffer.type == WGPUBufferBindingType_Storage);
-						bool is_uniform = (e.layout_entry.buffer.type == WGPUBufferBindingType_Uniform);
-						if (has_vtx && (is_storage || is_uniform)) {
-							EM_ASM({
-								console.log('  [BUF-DETAIL] set=' + $0 + ' binding=' + $1 +
-									' type=' + ($2 ? 'storage' : 'uniform') +
-									' vis=' + $3);
-							}, (int)s, (int)e.layout_entry.binding, is_storage ? 1 : 0, (int)e.layout_entry.visibility);
-						}
-					}
-				}
-			}
-			_buf_count_log++;
-		}
-	}
 
 	WGPURenderPipeline pipeline = wgpuDeviceCreateRenderPipeline(device, &desc);
 	if (!pipeline) {
