@@ -6066,6 +6066,7 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 	ERR_FAIL_COND(!cmd->render_encoder);
 
 	wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, pw->render_handle);
+	wgpuRenderPassEncoderSetStencilReference(cmd->render_encoder, pw->stencil_reference);
 	cmd->render_state.current_pipeline = pw;
 
 	// Pre-bind empty bind groups at pipeline layout gap slots.
@@ -7041,6 +7042,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	pw->shader = shader;
 	pw->specialized_modules[SHADER_STAGE_VERTEX] = specialized_vertex;
 	pw->specialized_modules[SHADER_STAGE_FRAGMENT] = specialized_fragment;
+	pw->stencil_reference = p_depth_stencil_state.front_op.reference;
 	return PipelineID(pw);
 }
 

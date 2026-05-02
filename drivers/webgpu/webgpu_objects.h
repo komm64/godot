@@ -223,6 +223,10 @@ struct WGPipelineWrapper {
 	// Specialized shader modules created with pipeline-specific specialization constants.
 	// If non-null, these are owned by this pipeline and must be released.
 	WGPUShaderModule specialized_modules[6] = {};
+	// WebGPU has no pipeline-level stencil reference — it must be set dynamically
+	// via wgpuRenderPassEncoderSetStencilReference(). Stored here at creation time,
+	// applied when the pipeline is bound.
+	uint32_t stencil_reference = 0;
 
 	WGPipelineWrapper() : render_handle(nullptr) {}
 };
