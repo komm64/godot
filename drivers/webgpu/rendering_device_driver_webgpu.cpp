@@ -4619,12 +4619,14 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 						p_us->bound_textures.has(entry.binding)) {
 					WGTexture *tex = p_us->bound_textures[entry.binding];
 					if (tex && tex->view_dimension != target_dim && tex->view_source) {
+						// Use slice base offsets so slice views don't
+						// silently remap to mip 0 / layer 0 of the parent.
 						WGPUTextureViewDescriptor vd = {};
 						vd.format = tex->format;
 						vd.dimension = target_dim;
-						vd.baseMipLevel = 0;
+						vd.baseMipLevel = tex->base_mipmap;
 						vd.mipLevelCount = tex->mipmaps;
-						vd.baseArrayLayer = 0;
+						vd.baseArrayLayer = tex->base_layer;
 						vd.arrayLayerCount = (target_dim == WGPUTextureViewDimension_2D) ? 1 : tex->layers;
 						vd.aspect = WGPUTextureAspect_All;
 						WGPUTextureView fixed = wgpuTextureCreateView(tex->view_source, &vd);
