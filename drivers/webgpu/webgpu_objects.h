@@ -330,6 +330,13 @@ struct WGCommandBuffer {
 		WGPUIndexFormat current_index_format = WGPUIndexFormat_Uint32;
 		uint32_t render_area_width = 0;
 		uint32_t render_area_height = 0;
+
+		// Redundant state elimination for per-draw calls.
+		WGPUBuffer current_index_buffer = nullptr;
+		uint64_t current_index_offset = 0;
+		static constexpr uint32_t MAX_VERTEX_BINDINGS = 8;
+		WGPUBuffer current_vertex_buffers[MAX_VERTEX_BINDINGS] = {};
+		uint64_t current_vertex_offsets[MAX_VERTEX_BINDINGS] = {};
 		// Textures used as render attachments in the CURRENT pass only.
 		// Used to detect intra-pass sync scope violations when a texture
 		// has both TextureBinding and RenderAttachment usage in the same pass.

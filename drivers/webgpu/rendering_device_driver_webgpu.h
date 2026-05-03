@@ -216,6 +216,8 @@ public:
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
 	/// Flush a buffer's shadow CPU data to the GPU via wgpuQueueWriteBuffer.
 	virtual void buffer_flush(BufferID p_buffer) override final;
+	/// Direct queue write bypassing staging buffers (for skeleton/bone updates).
+	virtual void buffer_write_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, const void *p_data) override final;
 	/// WebGPU: initiate async buffer map so it completes by next frame.
 	virtual void buffer_initiate_async_map(BufferID p_buffer) override final;
 	virtual uint32_t texture_get_gpu_pixel_size(TextureID p_texture) override final;

@@ -778,15 +778,28 @@ void RenderForwardMobile::_pre_opaque_render(RenderDataRD *p_render_data) {
 	if (render_shadows) {
 		RENDER_TIMESTAMP("Render Shadows");
 
+		// When force-DP mode is active (WebGPU), pre-clear the positional shadow
+		// atlas once so individual passes use LOAD (not CLEAR). This enables
+		// merging all same-framebuffer passes into a single render pass encoder,
+		// eliminating per-pass IPC overhead.
+		bool merge_positional_shadows = light_storage->is_force_omni_dual_paraboloid();
+		if (merge_positional_shadows && p_render_data->shadows.size() && p_render_data->shadow_atlas.is_valid()) {
+			RID atlas_fb = light_storage->shadow_atlas_get_fb(p_render_data->shadow_atlas);
+			if (atlas_fb.is_valid()) {
+				RD::get_singleton()->draw_list_begin(atlas_fb, RD::DRAW_CLEAR_DEPTH, Vector<Color>(), 0.0f);
+				RD::get_singleton()->draw_list_end();
+			}
+		}
+
 		_render_shadow_begin();
 
 		//render directional shadows
 		for (uint32_t i = 0; i < p_render_data->directional_shadows.size(); i++) {
 			_render_shadow_pass(p_render_data->render_shadows[p_render_data->directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->directional_shadows[i]].pass, p_render_data->render_shadows[p_render_data->directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, p_render_data->scene_data->cam_transform);
 		}
-		//render positional shadows
+		//render positional shadows (clear_region=false when atlas is pre-cleared)
 		for (uint32_t i = 0; i < p_render_data->shadows.size(); i++) {
-			_render_shadow_pass(p_render_data->render_shadows[p_render_data->shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->shadows[i]].pass, p_render_data->render_shadows[p_render_data->shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, i == 0, i == p_render_data->shadows.size() - 1, true, p_render_data->render_info, p_render_data->scene_data->cam_transform);
+			_render_shadow_pass(p_render_data->render_shadows[p_render_data->shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->shadows[i]].pass, p_render_data->render_shadows[p_render_data->shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, i == 0, i == p_render_data->shadows.size() - 1, !merge_positional_shadows, p_render_data->render_info, p_render_data->scene_data->cam_transform);
 		}
 
 		_render_shadow_process();
@@ -1646,9 +1659,48 @@ void RenderForwardMobile::_render_shadow_process() {
 void RenderForwardMobile::_render_shadow_end() {
 	RD::get_singleton()->draw_command_begin_label("Shadow Render");
 
-	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
-		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, shadow_pass.rp_uniform_set, scene_shader.default_specialization, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
-		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
+	// Merge consecutive shadow passes that share the same framebuffer into a
+	// single render pass with viewport/scissor changes. This eliminates N-1
+	// render pass encoder begin/end cycles per framebuffer group, which is
+	// critical for WebGPU where each encoder cycle crosses the WASM→JS IPC.
+	uint32_t i = 0;
+	while (i < scene_state.shadow_passes.size()) {
+		SceneState::ShadowPass &first_pass = scene_state.shadow_passes[i];
+
+		// Find how many consecutive passes share this framebuffer and don't need clearing.
+		uint32_t batch_end = i + 1;
+		if (!first_pass.clear_depth) {
+			while (batch_end < scene_state.shadow_passes.size() &&
+					scene_state.shadow_passes[batch_end].framebuffer == first_pass.framebuffer &&
+					!scene_state.shadow_passes[batch_end].clear_depth) {
+				batch_end++;
+			}
+		}
+
+		if (batch_end - i > 1) {
+			// Merged path: one render pass, multiple viewport-scoped draws.
+			RD::FramebufferFormatID fb_format = RD::get_singleton()->framebuffer_get_format(first_pass.framebuffer);
+			RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(first_pass.framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, Rect2());
+
+			for (uint32_t j = i; j < batch_end; j++) {
+				SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[j];
+				RD::get_singleton()->draw_list_set_viewport(draw_list, shadow_pass.rect);
+				RD::get_singleton()->draw_list_enable_scissor(draw_list, Rect2(Vector2(), shadow_pass.rect.size));
+
+				RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, shadow_pass.rp_uniform_set, scene_shader.default_specialization, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+				render_list_parameters.framebuffer_format = fb_format;
+				_render_list(draw_list, fb_format, &render_list_parameters, 0, render_list_parameters.element_count);
+			}
+
+			RD::get_singleton()->draw_list_end();
+		} else {
+			// Single pass (or pass that needs clearing): use original path.
+			SceneState::ShadowPass &shadow_pass = scene_state.shadow_passes[i];
+			RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, shadow_pass.rp_uniform_set, scene_shader.default_specialization, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+			_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
+		}
+
+		i = batch_end;
 	}
 
 	RD::get_singleton()->draw_command_end_label();
@@ -2555,16 +2607,68 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 				push_constant_size = sizeof(SceneState::PushConstant) - sizeof(SceneState::PushConstantUbershader);
 			}
 
-			RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, push_constant_size);
-
 			uint32_t instance_count = surf->owner->instance_count > 1 ? surf->owner->instance_count : 1;
-			if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) {
-				instance_count /= surf->owner->trail_steps;
-			}
-
 			bool indirect = bool(surf->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT);
 
-			if (emulate_point_size) {
+			// Instance batching: merge consecutive same-state draws into one
+			// instanced draw to reduce per-draw IPC crossings on WebGPU.
+			uint32_t batch_count = 1;
+			if (batch_instance_draws && shadow_pass && instance_count == 1 &&
+					!emulate_point_size && !indirect) {
+				while (i + batch_count < p_to_element) {
+					uint32_t next_i = i + batch_count;
+					const GeometryInstanceSurfaceDataCache *next_surf = p_params->elements[next_i];
+					const GeometryInstanceForwardMobile *next_inst = next_surf->owner;
+
+					// Must be active, non-multimesh, non-particles.
+					if (next_inst->instance_count == 0 || next_inst->instance_count > 1) {
+						break;
+					}
+					if (next_inst->base_flags & (INSTANCE_DATA_FLAG_MULTIMESH | INSTANCE_DATA_FLAG_PARTICLES)) {
+						break;
+					}
+
+					// Must share the same mesh surface (same vertex/index buffers).
+					void *next_mesh_surface = next_surf->surface_shadow;
+					if (next_mesh_surface != mesh_surface) {
+						break;
+					}
+
+					// Same shadow material uniform set.
+					if (next_surf->material_uniform_set_shadow != material_uniform_set) {
+						break;
+					}
+
+					// Same LOD level (same index array).
+					const RenderElementInfo &next_info = p_params->element_info[next_i];
+					if (next_info.lod_index != element_info.lod_index) {
+						break;
+					}
+
+					// Same cull variant (same pipeline).
+					bool next_double_sided = (next_surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) != 0;
+					bool curr_double_sided = (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) != 0;
+					if (next_double_sided != curr_double_sided) {
+						break;
+					}
+					if (!next_double_sided && next_inst->mirror != inst->mirror) {
+						break;
+					}
+
+					batch_count++;
+				}
+			}
+
+			RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, push_constant_size);
+
+			if (batch_count > 1) {
+				// Batched instanced draw: shader uses base_index + gl_InstanceIndex.
+				RD::get_singleton()->draw_list_draw(draw_list, index_array_rd.is_valid(), batch_count);
+				i += batch_count - 1; // Skip batched elements (loop increments i).
+			} else if (emulate_point_size) {
+				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) {
+					instance_count /= surf->owner->trail_steps;
+				}
 				if (indirect) {
 					WARN_PRINT("Indirect draws are not supported when emulating point size.");
 				}
@@ -2572,6 +2676,9 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 			} else if (indirect) {
 				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
 			} else {
+				if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) {
+					instance_count /= surf->owner->trail_steps;
+				}
 				RD::get_singleton()->draw_list_draw(draw_list, index_array_rd.is_valid(), instance_count);
 			}
 		}
@@ -3420,6 +3527,7 @@ void RenderForwardMobile::_update_shader_quality_settings() {
 
 RenderForwardMobile::RenderForwardMobile() {
 	singleton = this;
+	batch_instance_draws = RD::get_singleton()->supports_batch_instance_draws();
 
 	sky.set_texture_format(_render_buffers_get_preferred_color_format());
 

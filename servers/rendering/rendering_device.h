@@ -251,6 +251,10 @@ public:
 	 * @return				Status result of the operation.
 	 */
 	Error buffer_update(RID p_buffer, uint32_t p_offset, uint32_t p_size, const void *p_data, bool p_skip_check = false);
+	void buffer_update_direct(RID p_buffer, uint32_t p_offset, uint32_t p_size, const void *p_data);
+	bool supports_buffer_direct_write();
+	bool force_omni_dual_paraboloid_shadows();
+	bool supports_batch_instance_draws();
 	Error buffer_clear(RID p_buffer, uint32_t p_offset, uint32_t p_size);
 	Vector<uint8_t> buffer_get_data(RID p_buffer, uint32_t p_offset = 0, uint32_t p_size = 0); // This causes stall, only use to retrieve large buffers for saving.
 	Error buffer_get_data_async(RID p_buffer, const Callable &p_callback, uint32_t p_offset = 0, uint32_t p_size = 0);

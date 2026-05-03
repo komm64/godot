@@ -59,6 +59,10 @@ private:
 	static LightStorage *singleton;
 	uint32_t max_cluster_elements = 512;
 
+	// WebGPU optimization: force dual-paraboloid shadows for omni lights
+	// to avoid expensive cubemap encoder overhead (6 passes + 2 copies per light).
+	bool force_omni_dual_paraboloid = false;
+
 	/* LIGHT */
 	struct Light {
 		RS::LightType type;
@@ -509,6 +513,8 @@ public:
 
 	virtual RS::LightDirectionalShadowMode light_directional_get_shadow_mode(RID p_light) override;
 	virtual RS::LightOmniShadowMode light_omni_get_shadow_mode(RID p_light) override;
+
+	bool is_force_omni_dual_paraboloid() const { return force_omni_dual_paraboloid; }
 
 	virtual RS::LightType light_get_type(RID p_light) const override {
 		const Light *light = light_owner.get_or_null(p_light);

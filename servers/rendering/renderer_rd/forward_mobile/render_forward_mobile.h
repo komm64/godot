@@ -152,6 +152,10 @@ private:
 		}
 	};
 
+	/* Draw call instancing */
+
+	bool batch_instance_draws = false; // Cached API_TRAIT_BATCH_INSTANCE_DRAWS.
+
 	/* Render shadows */
 
 	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingMethod::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D());

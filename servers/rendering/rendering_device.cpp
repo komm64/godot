@@ -553,6 +553,24 @@ Error RenderingDevice::buffer_update(RID p_buffer, uint32_t p_offset, uint32_t p
 	return OK;
 }
 
+void RenderingDevice::buffer_update_direct(RID p_buffer, uint32_t p_offset, uint32_t p_size, const void *p_data) {
+	Buffer *buffer = _get_buffer_from_owner(p_buffer);
+	ERR_FAIL_NULL(buffer);
+	driver->buffer_write_direct(buffer->driver_id, p_offset, p_size, p_data);
+}
+
+bool RenderingDevice::supports_buffer_direct_write() {
+	return driver->api_trait_get(RDD::API_TRAIT_SKELETON_BUFFER_DIRECT_WRITE) != 0;
+}
+
+bool RenderingDevice::force_omni_dual_paraboloid_shadows() {
+	return driver->api_trait_get(RDD::API_TRAIT_FORCE_OMNI_DUAL_PARABOLOID) != 0;
+}
+
+bool RenderingDevice::supports_batch_instance_draws() {
+	return driver->api_trait_get(RDD::API_TRAIT_BATCH_INSTANCE_DRAWS) != 0;
+}
+
 Error RenderingDevice::driver_callback_add(RDD::DriverCallback p_callback, void *p_userdata, VectorView<CallbackResource> p_resources) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 

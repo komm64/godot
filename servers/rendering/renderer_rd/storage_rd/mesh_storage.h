@@ -293,7 +293,7 @@ private:
 			uint32_t blend_shape_count;
 			uint32_t normalized_blend_shapes;
 			uint32_t normal_tangent_stride;
-			uint32_t pad1;
+			uint32_t bone_offset; // vec4 offset into atlas buffer (replaces pad1)
 			float skeleton_transform_x[2];
 			float skeleton_transform_y[2];
 
@@ -327,7 +327,7 @@ private:
 		bool use_2d = false;
 		int size = 0;
 		LocalVector<float> data;
-		RID buffer;
+		RID buffer; // Per-skeleton buffer (used when atlas is disabled)
 
 		bool dirty = false;
 		Skeleton *dirty_list = nullptr;
@@ -335,6 +335,9 @@ private:
 
 		RID uniform_set_3d;
 		RID uniform_set_mi;
+
+		uint32_t atlas_offset = 0; // Offset in vec4s into the atlas buffer
+		uint32_t atlas_alloc_size = 0; // Allocated size in floats in the atlas
 
 		uint64_t version = 1;
 
@@ -346,6 +349,16 @@ private:
 	_FORCE_INLINE_ void _skeleton_make_dirty(Skeleton *skeleton);
 
 	Skeleton *skeleton_dirty_list = nullptr;
+
+	// Skeleton atlas: single GPU buffer holding all bone data (WebGPU optimization)
+	bool use_skeleton_atlas = false;
+	RID skeleton_atlas_buffer;
+	RID skeleton_atlas_uniform_set;
+	LocalVector<float> skeleton_atlas_data; // CPU mirror
+	uint32_t skeleton_atlas_used = 0; // Floats used
+	uint32_t skeleton_atlas_capacity = 0; // Floats allocated
+	void _skeleton_atlas_ensure_capacity(uint32_t p_floats_needed);
+	void _skeleton_atlas_rebuild_uniform_set();
 
 	enum AttributeLocation {
 		ATTRIBUTE_LOCATION_PREV_VERTEX = 12,

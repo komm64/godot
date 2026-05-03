@@ -207,6 +207,9 @@ public:
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) = 0;
 	virtual void buffer_flush(BufferID p_buffer) {}
 	virtual void buffer_initiate_async_map(BufferID p_buffer) {} // WebGPU: start async map so it completes by next frame.
+	// Direct queue write to a buffer, bypassing staging buffers entirely.
+	// Used for skeleton/bone updates that are fully written before any draws.
+	virtual void buffer_write_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, const void *p_data) {}
 
 	// Returns the actual pixel size of texture data on the GPU, when it differs
 	// from the engine's format pixel size (e.g. WebGPU promotes R8→R32Float for
@@ -915,6 +918,24 @@ public:
 		// avoids wasting memory after the loading spike subsides. The pool
 		// handles overflow correctly via stall-and-reuse.
 		API_TRAIT_STAGING_BUFFER_MAX_SIZE_MB,
+		// If non-zero, skeleton bone buffer updates use direct queue writes
+		// (e.g. wgpuQueueWriteBuffer) instead of going through staging buffers
+		// and command encoder copies. This halves bridge crossings on backends
+		// like WebGPU where each API call crosses a WASM→JS boundary. Safe
+		// because skeleton data is fully updated before any draw commands.
+		API_TRAIT_SKELETON_BUFFER_DIRECT_WRITE,
+		// If non-zero, omni light shadows are forced to dual-paraboloid mode
+		// regardless of the configured shadow mode. This avoids expensive
+		// cubemap rendering (6 render pass encoder cycles + 2 copy operations
+		// per light) on backends where per-pass IPC overhead dominates, such
+		// as WebGPU. Dual-paraboloid renders 2 passes directly into the shadow
+		// atlas, which can then be merged into a single render pass.
+		API_TRAIT_FORCE_OMNI_DUAL_PARABOLOID,
+		// If non-zero, the renderer batches consecutive shadow draws of the
+		// same mesh/pipeline into single instanced draw calls. This drastically
+		// reduces per-draw IPC crossings on WebGPU where each SetBindGroup +
+		// DrawIndexed pair costs ~0.4us of bridge overhead.
+		API_TRAIT_BATCH_INSTANCE_DRAWS,
 	};
 
 	enum ShaderChangeInvalidation {

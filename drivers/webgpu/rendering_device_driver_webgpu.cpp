@@ -1017,6 +1017,13 @@ void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
 	}
 }
 
+void RenderingDeviceDriverWebGPU::buffer_write_direct(BufferID p_buffer, uint64_t p_offset, uint64_t p_size, const void *p_data) {
+	WGBuffer *buf = (WGBuffer *)(p_buffer.id);
+	ERR_FAIL_NULL(buf);
+	uint64_t aligned_size = (p_size + 3) & ~3ULL;
+	wgpuQueueWriteBuffer(queue, buf->handle, p_offset, p_data, aligned_size);
+}
+
 uint64_t RenderingDeviceDriverWebGPU::buffer_get_device_address(BufferID p_buffer) {
 	return 0; // No device addresses in WebGPU.
 }
@@ -5853,6 +5860,13 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 
 	cmd->render_encoder = wgpuCommandEncoderBeginRenderPass(cmd->encoder, &pass_desc);
 	cmd->active_encoder = WGCommandBuffer::RENDER;
+
+	// Reset cached state — new render pass requires binding everything fresh.
+	cmd->render_state.current_pipeline = nullptr;
+	cmd->render_state.current_index_buffer = nullptr;
+	cmd->render_state.current_index_offset = 0;
+	memset(cmd->render_state.current_vertex_buffers, 0, sizeof(cmd->render_state.current_vertex_buffers));
+	memset(cmd->render_state.current_vertex_offsets, 0, sizeof(cmd->render_state.current_vertex_offsets));
 }
 
 void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_buffer) {
@@ -6002,6 +6016,10 @@ void RenderingDeviceDriverWebGPU::command_next_render_subpass(CommandBufferID p_
 
 	// Reset pipeline state — new render pass requires re-binding everything.
 	cmd->render_state.current_pipeline = nullptr;
+	cmd->render_state.current_index_buffer = nullptr;
+	cmd->render_state.current_index_offset = 0;
+	memset(cmd->render_state.current_vertex_buffers, 0, sizeof(cmd->render_state.current_vertex_buffers));
+	memset(cmd->render_state.current_vertex_offsets, 0, sizeof(cmd->render_state.current_vertex_offsets));
 }
 
 void RenderingDeviceDriverWebGPU::command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) {
@@ -6077,6 +6095,10 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 	ERR_FAIL_NULL(cmd);
 	ERR_FAIL_NULL(pw);
 	ERR_FAIL_COND(!cmd->render_encoder);
+
+	if (cmd->render_state.current_pipeline == pw) {
+		return; // Pipeline already bound, skip redundant call.
+	}
 
 	wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, pw->render_handle);
 	wgpuRenderPassEncoderSetStencilReference(cmd->render_encoder, pw->stencil_reference);
@@ -6312,14 +6334,21 @@ void RenderingDeviceDriverWebGPU::command_render_bind_vertex_buffers(CommandBuff
 		if (buf) {
 			uint64_t offset = p_offsets[i];
 			if (buf->is_dynamic()) {
-				// Task 7.5: unpack 2-bit frame_idx from mask and offset into the dynamic slice.
-				// Mirrors Vulkan's command_render_bind_vertex_buffers. Uses per_frame_size
-				// (not buf->size) because WebGPU's buf->size is the total physical allocation.
 				uint64_t frame_idx = p_dynamic_offsets & 0x3;
 				p_dynamic_offsets >>= 2;
 				offset += frame_idx * buf->per_frame_size;
 			}
+			// Skip redundant SetVertexBuffer calls.
+			if (i < WGCommandBuffer::RenderState::MAX_VERTEX_BINDINGS &&
+					cmd->render_state.current_vertex_buffers[i] == buf->handle &&
+					cmd->render_state.current_vertex_offsets[i] == offset) {
+				continue;
+			}
 			wgpuRenderPassEncoderSetVertexBuffer(cmd->render_encoder, i, buf->handle, offset, WGPU_WHOLE_SIZE);
+			if (i < WGCommandBuffer::RenderState::MAX_VERTEX_BINDINGS) {
+				cmd->render_state.current_vertex_buffers[i] = buf->handle;
+				cmd->render_state.current_vertex_offsets[i] = offset;
+			}
 		}
 	}
 }
@@ -6332,7 +6361,16 @@ void RenderingDeviceDriverWebGPU::command_render_bind_index_buffer(CommandBuffer
 	ERR_FAIL_COND(!cmd->render_encoder);
 
 	WGPUIndexFormat format = (p_format == INDEX_BUFFER_FORMAT_UINT16) ? WGPUIndexFormat_Uint16 : WGPUIndexFormat_Uint32;
+
+	if (cmd->render_state.current_index_buffer == buf->handle &&
+			cmd->render_state.current_index_offset == p_offset &&
+			cmd->render_state.current_index_format == format) {
+		return; // Index buffer already bound, skip redundant call.
+	}
+
 	wgpuRenderPassEncoderSetIndexBuffer(cmd->render_encoder, buf->handle, format, p_offset, WGPU_WHOLE_SIZE);
+	cmd->render_state.current_index_buffer = buf->handle;
+	cmd->render_state.current_index_offset = p_offset;
 	cmd->render_state.current_index_format = format;
 }
 
@@ -7597,6 +7635,15 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 		// the loading spike. 16 MB is generous for per-frame dynamic
 		// updates; overflow stalls briefly and reuses blocks.
 		case API_TRAIT_STAGING_BUFFER_MAX_SIZE_MB: return 16;
+		case API_TRAIT_SKELETON_BUFFER_DIRECT_WRITE: return 1;
+		// Force dual-paraboloid shadows for omni lights. Cubemap shadows
+		// require 6 render pass encoder cycles + 2 copy-to-atlas ops per
+		// light; dual-paraboloid uses 2 passes directly into the atlas,
+		// saving ~80% of shadow encoder overhead for typical scenes.
+		case API_TRAIT_FORCE_OMNI_DUAL_PARABOLOID: return 1;
+		// Batch consecutive same-mesh shadow draws into instanced draws.
+		// Reduces per-draw IPC from 2 crossings/draw to 2 crossings/batch.
+		case API_TRAIT_BATCH_INSTANCE_DRAWS: return 1;
 		default: return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
 }

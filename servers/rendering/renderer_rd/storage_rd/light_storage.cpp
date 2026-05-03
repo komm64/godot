@@ -44,6 +44,8 @@ LightStorage *LightStorage::get_singleton() {
 LightStorage::LightStorage() {
 	singleton = this;
 
+	force_omni_dual_paraboloid = RD::get_singleton()->force_omni_dual_paraboloid_shadows();
+
 	TextureStorage *texture_storage = TextureStorage::get_singleton();
 
 	directional_shadow.size = GLOBAL_GET("rendering/lights_and_shadows/directional_shadow/size");
@@ -348,6 +350,9 @@ RS::LightOmniShadowMode LightStorage::light_omni_get_shadow_mode(RID p_light) {
 	const Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL_V(light, RS::LIGHT_OMNI_SHADOW_CUBE);
 
+	if (force_omni_dual_paraboloid) {
+		return RS::LIGHT_OMNI_SHADOW_DUAL_PARABOLOID;
+	}
 	return light->omni_shadow_mode;
 }
 
