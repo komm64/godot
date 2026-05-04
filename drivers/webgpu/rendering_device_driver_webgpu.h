@@ -60,6 +60,10 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 		uint32_t push_constant_skipped = 0;
 		uint32_t render_passes = 0;
 		uint32_t bind_group_cache_misses = 0;
+		uint32_t set_pipeline_calls = 0;
+		uint32_t set_vertex_buffer_calls = 0;
+		uint32_t gap_bind_group_calls = 0;
+		uint32_t first_instance_draws = 0;
 		double last_log_time = 0;
 		uint32_t frames_since_log = 0;
 		void reset() {
@@ -70,6 +74,10 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 			push_constant_skipped = 0;
 			render_passes = 0;
 			bind_group_cache_misses = 0;
+			set_pipeline_calls = 0;
+			set_vertex_buffer_calls = 0;
+			gap_bind_group_calls = 0;
+			first_instance_draws = 0;
 		}
 	} perf;
 

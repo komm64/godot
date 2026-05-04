@@ -936,6 +936,11 @@ public:
 		// reduces per-draw IPC crossings on WebGPU where each SetBindGroup +
 		// DrawIndexed pair costs ~0.4us of bridge overhead.
 		API_TRAIT_BATCH_INSTANCE_DRAWS,
+		// If non-zero, the renderer passes the instance base index via the
+		// firstInstance parameter of drawIndexed instead of through push constants.
+		// This eliminates the per-draw SetBindGroup call for push constant rebinding.
+		// On WebGPU, each SetBindGroup IPC crossing costs ~0.3us; this saves one per draw.
+		API_TRAIT_FIRST_INSTANCE_INDEX,
 	};
 
 	enum ShaderChangeInvalidation {

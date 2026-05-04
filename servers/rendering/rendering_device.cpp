@@ -571,6 +571,10 @@ bool RenderingDevice::supports_batch_instance_draws() {
 	return driver->api_trait_get(RDD::API_TRAIT_BATCH_INSTANCE_DRAWS) != 0;
 }
 
+bool RenderingDevice::supports_first_instance_index() {
+	return driver->api_trait_get(RDD::API_TRAIT_FIRST_INSTANCE_INDEX) != 0;
+}
+
 Error RenderingDevice::driver_callback_add(RDD::DriverCallback p_callback, void *p_userdata, VectorView<CallbackResource> p_resources) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
@@ -5283,7 +5287,7 @@ void RenderingDevice::draw_list_set_push_constant(DrawListID p_list, const void 
 #endif
 }
 
-void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint32_t p_instances, uint32_t p_procedural_vertices) {
+void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint32_t p_instances, uint32_t p_procedural_vertices, uint32_t p_first_instance) {
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -5418,7 +5422,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				"Index amount (" + itos(to_draw) + ") must be a multiple of the amount of indices required by the render primitive (" + itos(draw_list.validation.pipeline_primitive_divisor) + ").");
 #endif
 
-		draw_graph.add_draw_list_draw_indexed(to_draw, p_instances, 0);
+		draw_graph.add_draw_list_draw_indexed(to_draw, p_instances, 0, p_first_instance);
 	} else {
 		uint32_t to_draw;
 
@@ -5440,7 +5444,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				"Vertex amount (" + itos(to_draw) + ") must be a multiple of the amount of vertices required by the render primitive (" + itos(draw_list.validation.pipeline_primitive_divisor) + ").");
 #endif
 
-		draw_graph.add_draw_list_draw(to_draw, p_instances);
+		draw_graph.add_draw_list_draw(to_draw, p_instances, p_first_instance);
 	}
 
 	draw_list.state.draw_count++;

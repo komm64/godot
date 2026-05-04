@@ -6103,12 +6103,14 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 	wgpuRenderPassEncoderSetPipeline(cmd->render_encoder, pw->render_handle);
 	wgpuRenderPassEncoderSetStencilReference(cmd->render_encoder, pw->stencil_reference);
 	cmd->render_state.current_pipeline = pw;
+	perf.set_pipeline_calls++;
 
 	// Pre-bind empty bind groups at pipeline layout gap slots.
 	// Firefox/wgpu requires all bind group indices to be set before draw calls.
 	if (pw->shader) {
 		for (uint32_t gap_idx : pw->shader->gap_bind_group_indices) {
 			wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, gap_idx, empty_bind_group, 0, nullptr);
+			perf.gap_bind_group_calls++;
 		}
 	}
 }
@@ -6252,6 +6254,9 @@ void RenderingDeviceDriverWebGPU::command_render_draw(CommandBufferID p_cmd_buff
 	}
 
 	perf.draw_calls++;
+	if (p_first_instance > 0) {
+		perf.first_instance_draws++;
+	}
 	wgpuRenderPassEncoderDraw(cmd->render_encoder, p_vertex_count, p_instance_count, p_base_vertex, p_first_instance);
 }
 
@@ -6273,6 +6278,9 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_
 	}
 
 	perf.draw_calls++;
+	if (p_first_instance > 0) {
+		perf.first_instance_draws++;
+	}
 	wgpuRenderPassEncoderDrawIndexed(cmd->render_encoder, p_index_count, p_instance_count, p_first_index, p_vertex_offset, p_first_instance);
 }
 
@@ -6345,6 +6353,7 @@ void RenderingDeviceDriverWebGPU::command_render_bind_vertex_buffers(CommandBuff
 				continue;
 			}
 			wgpuRenderPassEncoderSetVertexBuffer(cmd->render_encoder, i, buf->handle, offset, WGPU_WHOLE_SIZE);
+			perf.set_vertex_buffer_calls++;
 			if (i < WGCommandBuffer::RenderState::MAX_VERTEX_BINDINGS) {
 				cmd->render_state.current_vertex_buffers[i] = buf->handle;
 				cmd->render_state.current_vertex_offsets[i] = offset;
@@ -7463,24 +7472,34 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 	frame_index = p_frame_index;
 	frames_drawn = p_frames_drawn;
 
-	// Performance counter tracking.
+	// Performance counter tracking (always-on, 1 log/sec is negligible overhead).
 	perf.frames_since_log++;
-#ifdef WEBGPU_VERBOSE
 	double now = EM_ASM_DOUBLE({ return performance.now(); });
 	if (perf.last_log_time == 0) {
 		perf.last_log_time = now;
 	} else if (now - perf.last_log_time >= 1000.0) {
 		double elapsed = (now - perf.last_log_time) / 1000.0;
 		uint32_t fps = (uint32_t)(perf.frames_since_log / elapsed);
+		uint32_t f = perf.frames_since_log > 0 ? perf.frames_since_log : 1;
 		EM_ASM({
-			console.log('[PERF] fps=' + $0 + ' draws=' + $1 + ' SetBG=' + $2 + ' SetBG_skip=' + $3 + ' PC_write=' + $4 + ' PC_skip=' + $5 + ' RP=' + $6 + ' BG_miss=' + $7);
-		}, fps, perf.draw_calls, perf.set_bind_group_calls, perf.set_bind_group_skipped,
-				perf.push_constant_writes, perf.push_constant_skipped, perf.render_passes, perf.bind_group_cache_misses);
+			console.log('[PERF] fps=' + $0 +
+				' draws/f=' + $1 +
+				' SetBG/f=' + $2 +
+				' SetBG_skip/f=' + $3 +
+				' PC/f=' + $4 +
+				' SetPipeline/f=' + $5 +
+				' SetVB/f=' + $6 +
+				' GapBG/f=' + $7 +
+				' RP/f=' + $8 +
+				' FI/f=' + $9);
+		}, fps, perf.draw_calls / f, perf.set_bind_group_calls / f, perf.set_bind_group_skipped / f,
+				perf.push_constant_writes / f, perf.set_pipeline_calls / f,
+				perf.set_vertex_buffer_calls / f, perf.gap_bind_group_calls / f,
+				perf.render_passes / f, perf.first_instance_draws / f);
 		perf.reset();
 		perf.frames_since_log = 0;
 		perf.last_log_time = now;
 	}
-#endif // WEBGPU_VERBOSE
 
 	// Reset push constant ring buffer offset and shadow buffer tracking at the start of each frame.
 	push_constant_ring_offset = 0;
@@ -7644,6 +7663,9 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 		// Batch consecutive same-mesh shadow draws into instanced draws.
 		// Reduces per-draw IPC from 2 crossings/draw to 2 crossings/batch.
 		case API_TRAIT_BATCH_INSTANCE_DRAWS: return 1;
+		// Pass instance index via firstInstance instead of push constants.
+		// Eliminates per-draw SetBindGroup for push constant ring buffer.
+		case API_TRAIT_FIRST_INSTANCE_INDEX: return 1;
 		default: return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
 }
