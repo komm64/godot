@@ -1,0 +1,145 @@
+name: 🧪 WebGPU Tests
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [webgpu-4.6.2]
+    paths:
+      - 'drivers/webgpu/**'
+      - 'webgpu_tests/**'
+  pull_request:
+    paths:
+      - 'drivers/webgpu/**'
+      - 'webgpu_tests/**'
+
+jobs:
+  # ─── Shader Corpus: SPIR-V → WGSL validation ──────────────────────────────
+  shader-corpus:
+    runs-on: ubuntu-24.04
+    name: Shader Corpus (SPIR-V → WGSL)
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install glslangValidator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools
+
+      - name: Compile GLSL fixtures to SPIR-V
+        working-directory: webgpu_tests/shader_corpus
+        run: ./compile_fixtures.sh
+
+      - name: Run SPIR-V → WGSL validation
+        working-directory: webgpu_tests/shader_corpus
+        run: node run_tests.mjs
+
+      - name: Upload WGSL results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shader-corpus-results
+          path: webgpu_tests/shader_corpus/results/
+          retention-days: 7
+
+  # ─── Resource Lifecycle: Browser-based stress test ─────────────────────────
+  resource-lifecycle:
+    runs-on: ubuntu-24.04
+    name: Resource Lifecycle (Chrome WebGPU)
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        working-directory: webgpu_tests/resource_lifecycle
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install chromium --with-deps
+
+      - name: Run resource lifecycle stress tests
+        working-directory: webgpu_tests/resource_lifecycle
+        run: node run_tests.mjs
+        env:
+          # Chrome flags for headless WebGPU (requires --headless=new)
+          PLAYWRIGHT_CHROMIUM_ARGS: '--enable-unsafe-webgpu --enable-features=Vulkan'
+
+  # ─── Screenshot Comparison: Multi-browser visual regression ────────────────
+  screenshot-comparison:
+    runs-on: ubuntu-24.04
+    name: Screenshot Comparison (Chrome + Firefox)
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright and browsers
+        working-directory: webgpu_tests/screenshot_comparison
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install chromium firefox --with-deps
+
+      - name: Run screenshot tests
+        working-directory: webgpu_tests/screenshot_comparison
+        run: node screenshot_tests.mjs --update-baselines
+        # First run creates baselines. On subsequent runs after baselines are committed,
+        # change to: node screenshot_tests.mjs
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-comparison
+          path: webgpu_tests/screenshot_comparison/screenshots/
+          retention-days: 14
+
+  # ─── Summary ───────────────────────────────────────────────────────────────
+  test-summary:
+    runs-on: ubuntu-24.04
+    name: Test Summary
+    needs: [shader-corpus, resource-lifecycle, screenshot-comparison]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          echo "╔══════════════════════════════════════════════════════════╗"
+          echo "║           WebGPU Test Suite Results                      ║"
+          echo "╚══════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "  Shader Corpus:        ${{ needs.shader-corpus.result }}"
+          echo "  Resource Lifecycle:   ${{ needs.resource-lifecycle.result }}"
+          echo "  Screenshot Compare:   ${{ needs.screenshot-comparison.result }}"
+          echo ""
+
+          if [ "${{ needs.shader-corpus.result }}" = "failure" ]; then
+            echo "::error::Shader corpus tests failed"
+            exit 1
+          fi
+          if [ "${{ needs.resource-lifecycle.result }}" = "failure" ]; then
+            echo "::error::Resource lifecycle tests failed"
+            exit 1
+          fi
+          # Screenshot comparison failures are warnings, not blockers
+          if [ "${{ needs.screenshot-comparison.result }}" = "failure" ]; then
+            echo "::warning::Screenshot comparison detected differences"
+          fi
