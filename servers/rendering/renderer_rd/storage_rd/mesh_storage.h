@@ -353,7 +353,8 @@ private:
 	// Skeleton atlas: single GPU buffer holding all bone data (WebGPU optimization)
 	bool use_skeleton_atlas = false;
 	RID skeleton_atlas_buffer;
-	RID skeleton_atlas_uniform_set;
+	RID skeleton_atlas_uniform_set; // For compute skinning shader.
+	mutable RID skeleton_atlas_uniform_set_3d; // For scene draw shader (lazily created).
 	LocalVector<float> skeleton_atlas_data; // CPU mirror
 	uint32_t skeleton_atlas_used = 0; // Floats used
 	uint32_t skeleton_atlas_capacity = 0; // Floats allocated
@@ -815,6 +816,19 @@ public:
 		}
 		if (skeleton->use_2d) {
 			return RID();
+		}
+		if (use_skeleton_atlas) {
+			// Atlas mode: all bone data lives in the shared atlas buffer.
+			if (!skeleton_atlas_uniform_set_3d.is_valid() && skeleton_atlas_buffer.is_valid()) {
+				Vector<RD::Uniform> uniforms;
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.binding = 0;
+				u.append_id(skeleton_atlas_buffer);
+				uniforms.push_back(u);
+				skeleton_atlas_uniform_set_3d = RD::get_singleton()->uniform_set_create(uniforms, p_shader, p_set);
+			}
+			return skeleton_atlas_uniform_set_3d;
 		}
 		if (!skeleton->uniform_set_3d.is_valid()) {
 			Vector<RD::Uniform> uniforms;

@@ -219,7 +219,9 @@ void MeshStorage::_skeleton_atlas_ensure_capacity(uint32_t p_floats_needed) {
 	skeleton_atlas_buffer = RD::get_singleton()->storage_buffer_create(new_capacity * sizeof(float));
 	skeleton_atlas_capacity = new_capacity;
 	skeleton_atlas_data.resize(new_capacity);
-	skeleton_atlas_uniform_set = RID(); // Invalidate, will be rebuilt.
+	skeleton_atlas_uniform_set = RID(); // Invalidate.
+	skeleton_atlas_uniform_set_3d = RID(); // Invalidate draw-time set too.
+	_skeleton_atlas_rebuild_uniform_set(); // Rebuild immediately so it's always available.
 }
 
 void MeshStorage::_skeleton_atlas_rebuild_uniform_set() {
