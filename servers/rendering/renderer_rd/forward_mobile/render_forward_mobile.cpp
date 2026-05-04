@@ -2620,9 +2620,12 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 
 			// Instance batching: merge consecutive same-state draws into one
 			// instanced draw to reduce per-draw IPC crossings on WebGPU.
+			// Works for shadow and opaque color passes (not transparent — order matters).
 			uint32_t batch_count = 1;
-			if (batch_instance_draws && shadow_pass && instance_count == 1 &&
-					!emulate_point_size && !indirect) {
+			if (batch_instance_draws && instance_count == 1 &&
+					!emulate_point_size && !indirect &&
+					!surf->owner->mesh_instance.is_valid() &&
+					p_pass_mode != PASS_MODE_COLOR_TRANSPARENT) {
 				while (i + batch_count < p_to_element) {
 					uint32_t next_i = i + batch_count;
 					const GeometryInstanceSurfaceDataCache *next_surf = p_params->elements[next_i];
@@ -2636,14 +2639,8 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 						break;
 					}
 
-					// Must share the same mesh surface (same vertex/index buffers).
-					void *next_mesh_surface = next_surf->surface_shadow;
-					if (next_mesh_surface != mesh_surface) {
-						break;
-					}
-
-					// Same shadow material uniform set.
-					if (next_surf->material_uniform_set_shadow != material_uniform_set) {
+					// Cannot batch instances with per-instance vertex data (blend shapes/skeleton).
+					if (next_surf->owner->mesh_instance.is_valid()) {
 						break;
 					}
 
@@ -2653,14 +2650,62 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 						break;
 					}
 
-					// Same cull variant (same pipeline).
-					bool next_double_sided = (next_surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) != 0;
-					bool curr_double_sided = (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) != 0;
-					if (next_double_sided != curr_double_sided) {
-						break;
-					}
-					if (!next_double_sided && next_inst->mirror != inst->mirror) {
-						break;
+					if (shadow_pass) {
+						// Shadow pass: same mesh surface, material, cull variant.
+						if (next_surf->surface_shadow != mesh_surface) {
+							break;
+						}
+						if (next_surf->material_uniform_set_shadow != material_uniform_set) {
+							break;
+						}
+						bool next_double_sided = (next_surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) != 0;
+						bool curr_double_sided = (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) != 0;
+						if (next_double_sided != curr_double_sided) {
+							break;
+						}
+						if (!next_double_sided && next_inst->mirror != inst->mirror) {
+							break;
+						}
+					} else {
+						// Color pass: same mesh surface, material, cull, pipeline specialization.
+						if (next_surf->surface != mesh_surface) {
+							break;
+						}
+						if (next_surf->material_uniform_set != material_uniform_set) {
+							break;
+						}
+						// Same cull mode (ubershader push constant carries actual cull).
+						if (next_inst->mirror != inst->mirror) {
+							break;
+						}
+						// Same lightmap usage (affects pipeline version).
+						if (next_info.uses_lightmap != element_info.uses_lightmap) {
+							break;
+						}
+						// Same pipeline specialization (ubershader push constant must match).
+						if (next_inst->use_projector != inst->use_projector ||
+								next_inst->use_soft_shadow != inst->use_soft_shadow) {
+							break;
+						}
+						if (SceneShaderForwardMobile::shader_count_for(next_inst->omni_light_count) !=
+								SceneShaderForwardMobile::shader_count_for(inst->omni_light_count)) {
+							break;
+						}
+						if (SceneShaderForwardMobile::shader_count_for(next_inst->spot_light_count) !=
+								SceneShaderForwardMobile::shader_count_for(inst->spot_light_count)) {
+							break;
+						}
+						if (SceneShaderForwardMobile::shader_count_for(next_inst->reflection_probe_count) !=
+								SceneShaderForwardMobile::shader_count_for(inst->reflection_probe_count)) {
+							break;
+						}
+						if ((next_inst->decals_count > 0) != (inst->decals_count > 0)) {
+							break;
+						}
+						// Same transforms uniform set (null for static instances).
+						if (next_surf->owner->transforms_uniform_set != surf->owner->transforms_uniform_set) {
+							break;
+						}
 					}
 
 					batch_count++;

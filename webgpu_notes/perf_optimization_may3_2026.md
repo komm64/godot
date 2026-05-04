@@ -609,6 +609,75 @@ This makes batches smaller in practice (objects near different lights can't merg
 - Godot's own Canvas 2D renderer: already does automatic draw call merging for 2D
 - The shadow pass batching we implemented in Optimization #4 is the same technique, just extended to the color pass
 
+### Implementation (May 4, 2026)
+
+**Change:** Extended the existing shadow pass instance batching lookahead to also work in color passes. Single condition change: removed `shadow_pass` gate, added color-pass-specific state checks.
+
+**File:** `servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp` (in `_render_list_template`)
+
+**Color pass lookahead checks (in addition to shadow pass checks):**
+- Same mesh surface (color variant)
+- Same material uniform set (color variant)
+- Same cull mode (`mirror` flag — ubershader push constant carries actual cull)
+- Same lightmap usage (affects pipeline version)
+- Same pipeline specialization: `use_projector`, `use_soft_shadow`, quantized light counts (`omni_lights`, `spot_lights`, `reflection_probes`), `decals`
+- Same transforms uniform set (null for static instances, varies for multimesh/skeleton)
+- No per-instance vertex data (`mesh_instance` must be invalid — excludes blend shapes/skeleton)
+
+**Safety exclusions:**
+- `PASS_MODE_COLOR_TRANSPARENT` — alpha-sorted draws must preserve back-to-front order for correct blending. Exclusion uses compile-time template parameter `p_pass_mode`, so zero runtime cost.
+- Skinned/blend-shape meshes (`mesh_instance.is_valid()`) — per-instance vertex buffers can't batch. Also fixes a latent bug in the existing shadow pass batching which didn't check this (never triggered in practice because skinned meshes rarely sort adjacent).
+- Multimesh/particles — handled by their own instancing (`instance_count > 1`)
+- Indirect draws — separate draw path
+
+**Why each color pass lookahead check is necessary:**
+- `surface` — same vertex/index buffers (set from `surf->surface` at line 2453)
+- `material_uniform_set` — same material bindings (set from `surf->material_uniform_set` at line 2447)
+- `mirror` — cull_mode goes in `push_constant.ubershader.constants.cull_mode` (line 2613), derived from mirror (line 2471-2476)
+- `uses_lightmap` — changes `pipeline_key.version` (LIGHTMAP_COLOR_PASS vs COLOR_PASS, line 2484-2488)
+- Specialization fields — go in `push_constant.ubershader.specialization` (line 2611), shader reads these for light loop bounds
+- `transforms_uniform_set` — belt-and-suspenders; null for static instances (excluded by mesh_instance check anyway)
+
+**Debug draw modes:** In overdraw/lighting/PSSM debug modes, `material_uniform_set` is overridden to a global debug material (lines 2436-2444). All draws share the same uniform set → MORE batching occurs, which is correct.
+
+**Other pass modes:** DEPTH_MATERIAL (`uv_offset` is uniform across the pass) and MOTION_VECTORS (`multimesh_motion_vectors_*` is 0 for non-multimesh) both work correctly with color pass batching.
+
+**Benchmark scene: scene_h_batching** (`tmp/benchmarks/scene_h_batching/`) — 60,000 instances, 10 shared materials, 1 directional light, rotating each frame
+
+### Results (scene_h, 60,000 shared-material instances, bench_frametimes.mjs)
+
+| Metric | Baseline (shadow-only batch) | Color Pass Batching | Change |
+|--------|------------------------------|---------------------|--------|
+| Mean FPS | 20.5 | 27.6 | **+34.6%** |
+| Steady FPS | 20.2 | 27.9 | **+38.1%** |
+| Mean frame time | 48.66 ms | 36.29 ms | **-12.4 ms** |
+| Draw calls/frame | 32,190 | 14 | **-99.96%** |
+| PC writes/frame | 5 | 14 | +9 (negligible) |
+| SetBG/frame | 19 | 19 | unchanged |
+
+**Regression checks (0 errors, no FPS regression):**
+- scene_c (20k unique materials): 31 fps — batching not triggered (unique materials), no regression
+- 3d_platformer (real game scene): 42-47 fps, 0 GPU errors
+
+**Why the improvement is "only" +35% with 99.96% draw reduction:**
+- GDScript `rotate_y()` on 60k nodes: ~15-20ms per frame (CPU overhead, not IPC)
+- GPU vertex/fragment processing: ~10-15ms (60k box meshes)
+- IPC savings: ~12ms (32k draw calls at ~0.38µs IPC cost each)
+- On static content or lighter scenes (20k instances), this hits 60fps trivially
+
+**Interaction with firstInstance (Optimization A):**
+- When `batch_count > 1`, firstInstance is NOT used (batching gives bigger win)
+- When `batch_count == 1`, firstInstance dedup kicks in (push constant skip)
+- The two optimizations are complementary: batching reduces draw count, firstInstance reduces push constant writes for unbatchable draws
+
+**Non-WebGPU impact:** None. Entire batching block is gated by `batch_instance_draws`, which is only true when `API_TRAIT_BATCH_INSTANCE_DRAWS` returns 1. Only the WebGPU driver returns 1; Vulkan/Metal/D3D12 return 0.
+
+**Testing coverage:**
+- scene_h (60k shared materials) — batching active, 0 GPU errors, +34.6% FPS
+- scene_c (20k unique materials) — batching not triggered, 0 GPU errors, no regression
+- 3d_platformer (real game scene, mixed content) — 0 GPU errors, no regression
+- Untested but expected safe: lightmapped scenes (uses_lightmap check), scenes with omni/spot lights (specialization mismatch breaks batch correctly), debug draw modes (global material override)
+
 ---
 
 ## Optimization #3: Shadow Pass Encoder Overhead (scene_g_shadows)
@@ -999,19 +1068,19 @@ Every `wgpu*` function call from C++/WASM crosses the browser's IPC boundary. On
 - **Complexity:** Moderate — plumb firstInstance through RD graph, shader reads gl_InstanceIndex
 - **Details:** See "Next Optimization" section above
 
-**B. Color Pass Instance Batching**
+**B. Color Pass Instance Batching** ✅ DONE (May 4, 2026)
 - **What:** Merge consecutive draws sharing mesh+material+pipeline into single instanced draw
 - **Eliminates:** (N-1) × (all per-draw calls) per batch of N
-- **Impact:** Proportional to batch sizes — real scenes with shared materials: 30-70% draw count reduction
+- **Impact:** +34.6% FPS on 60k shared-material benchmark (32k draws → 14)
 - **Scope:** Same-mesh/material/pipeline runs after sort
-- **Complexity:** Low — same technique as shadow pass (already proven)
-- **Constraint:** Light/probe assignments must also match (limits batch sizes in complex lighting)
+- **Complexity:** Low — same technique as shadow pass, extended with color-pass state checks
+- **Constraint:** Light/probe assignments must also match (quantized via shader_count_for)
 
-**C. Combined A+B (Multiplicative)**
+**C. Combined A+B (Multiplicative)** ✅ DONE (May 3-4, 2026)
 - **What:** firstInstance elimination + instance batching together
-- **Example:** 300 draws, batchable to 50 groups → 50 × 1 IPC (just Draw) = **50 total** vs 600 today
-- **Impact:** Up to 92% reduction in color pass IPC
-- **Priority:** Do A first (simpler, benefits ALL draws), then layer B on top
+- **Result:** Batchable draws merge into single instanced call; unbatchable draws skip push constant via firstInstance
+- **Impact:** scene_h 60k benchmark: 20.5 → 27.6 fps (+35%); scene_c 20k unique: 30→31 fps (+3.6% from A alone)
+- **Combined effect:** Per-draw IPC reduced from 2 calls (PC+Draw) to effectively 0.001 calls for batchable content
 
 **D. Gap Bind Group Caching**
 - **What:** Track which gap slots are already bound; skip re-binding empty groups on pipeline switch
