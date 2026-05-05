@@ -9,10 +9,16 @@ use naga::{
     valid::{Validator, ValidationFlags, Capabilities},
 };
 
+#[cfg(not(test))]
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
+}
+
+#[cfg(test)]
+fn log(_s: &str) {
+    // No-op in tests; avoids wasm_bindgen extern dependency.
 }
 
 // SPIR-V opcodes relevant to specialization constants.
@@ -1791,4 +1797,2285 @@ fn fix_fmax_literals(wgsl: &str) -> String {
         result = result.replace(bad, good);
     }
     result
+}
+
+// ==================== Tests ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Helper: build a minimal SPIR-V header ---
+    fn spirv_header(bound: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_word(&mut out, 0x07230203); // Magic
+        push_word(&mut out, 0x00010300); // Version 1.3
+        push_word(&mut out, 0);          // Generator
+        push_word(&mut out, bound);      // Bound (max ID + 1)
+        push_word(&mut out, 0);          // Schema
+        out
+    }
+
+    /// Encode a SPIR-V instruction: first word = (word_count << 16) | opcode,
+    /// followed by the given operand words.
+    fn encode_inst(opcode: u16, operands: &[u32]) -> Vec<u8> {
+        let wc = (operands.len() as u32) + 1;
+        let mut out = Vec::new();
+        push_word(&mut out, (wc << 16) | opcode as u32);
+        for &w in operands {
+            push_word(&mut out, w);
+        }
+        out
+    }
+
+    // ==================== freeze_spec_constant_ops tests ====================
+
+    #[test]
+    fn test_freeze_spec_constant_ops_no_ops() {
+        // A module with no OpSpecConstantOp should be returned as-is.
+        let mut spv = spirv_header(10);
+        // Add a plain OpConstant: OpConstant %type=1 %result=2 %value=42
+        spv.extend(encode_inst(OP_CONSTANT, &[1, 2, 42]));
+        let result = freeze_spec_constant_ops(&spv);
+        assert_eq!(result, spv);
+    }
+
+    #[test]
+    fn test_freeze_spec_constant_ops_rewrites_spec_constant() {
+        // OpSpecConstant should be rewritten to OpConstant.
+        let mut spv = spirv_header(10);
+        // OpTypeInt %1 32 0 (unsigned int)
+        spv.extend(encode_inst(OP_TYPE_INT, &[1, 32, 0]));
+        // OpSpecConstant %1 %2 99
+        spv.extend(encode_inst(OP_SPEC_CONSTANT, &[1, 2, 99]));
+
+        let result = freeze_spec_constant_ops(&spv);
+
+        // Parse output to verify OpSpecConstant became OpConstant.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found_constant = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == OP_CONSTANT && read_word(&result, pos + 2) == 2 {
+                found_constant = true;
+                assert_eq!(read_word(&result, pos + 1), 1); // type
+                assert_eq!(read_word(&result, pos + 3), 99); // value
+            }
+            // Should NOT find OpSpecConstant
+            assert_ne!(op, OP_SPEC_CONSTANT, "OpSpecConstant should have been rewritten");
+            pos += wc;
+        }
+        assert!(found_constant, "Expected OpConstant for id 2");
+    }
+
+    #[test]
+    fn test_freeze_spec_constant_ops_evaluates_iadd() {
+        // OpSpecConstantOp with IAdd should be evaluated.
+        let mut spv = spirv_header(10);
+        // OpTypeInt %1 32 0
+        spv.extend(encode_inst(OP_TYPE_INT, &[1, 32, 0]));
+        // OpConstant %1 %2 10
+        spv.extend(encode_inst(OP_CONSTANT, &[1, 2, 10]));
+        // OpConstant %1 %3 20
+        spv.extend(encode_inst(OP_CONSTANT, &[1, 3, 20]));
+        // OpSpecConstantOp %1 %4 IAdd(128) %2 %3
+        spv.extend(encode_inst(OP_SPEC_CONSTANT_OP, &[1, 4, 128, 2, 3]));
+
+        let result = freeze_spec_constant_ops(&spv);
+
+        // Find OpConstant for id 4.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == OP_CONSTANT && read_word(&result, pos + 2) == 4 {
+                found = true;
+                assert_eq!(read_word(&result, pos + 3), 30); // 10 + 20
+            }
+            assert_ne!(op, OP_SPEC_CONSTANT_OP, "OpSpecConstantOp should be gone");
+            pos += wc;
+        }
+        assert!(found, "Expected OpConstant for id 4 with value 30");
+    }
+
+    #[test]
+    fn test_freeze_spec_constant_ops_bool_true() {
+        // OpSpecConstantOp yielding a bool true should emit OpConstantTrue.
+        let mut spv = spirv_header(10);
+        // OpTypeBool %1
+        spv.extend(encode_inst(OP_TYPE_BOOL, &[1]));
+        // OpTypeInt %5 32 0
+        spv.extend(encode_inst(OP_TYPE_INT, &[5, 32, 0]));
+        // OpConstant %5 %2 7  (value 7)
+        spv.extend(encode_inst(OP_CONSTANT, &[5, 2, 7]));
+        // OpConstant %5 %3 7  (value 7)
+        spv.extend(encode_inst(OP_CONSTANT, &[5, 3, 7]));
+        // OpSpecConstantOp %1 %4 IEqual(170) %2 %3  -> true (7==7)
+        spv.extend(encode_inst(OP_SPEC_CONSTANT_OP, &[1, 4, 170, 2, 3]));
+
+        let result = freeze_spec_constant_ops(&spv);
+
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == OP_CONSTANT_TRUE && read_word(&result, pos + 2) == 4 {
+                found = true;
+            }
+            pos += wc;
+        }
+        assert!(found, "Expected OpConstantTrue for id 4");
+    }
+
+    #[test]
+    fn test_freeze_strips_spec_id_decorations() {
+        // OpDecorate with SpecId (decoration=1) should be stripped.
+        let mut spv = spirv_header(10);
+        // OpTypeInt %1 32 0
+        spv.extend(encode_inst(OP_TYPE_INT, &[1, 32, 0]));
+        // OpDecorate %2 SpecId 0  (decoration=1, specId=0)
+        spv.extend(encode_inst(OP_DECORATE, &[2, 1, 0]));
+        // OpSpecConstant %1 %2 42
+        spv.extend(encode_inst(OP_SPEC_CONSTANT, &[1, 2, 42]));
+
+        let result = freeze_spec_constant_ops(&spv);
+
+        // Verify no OpDecorate with decoration==1 remains.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == OP_DECORATE {
+                let deco = read_word(&result, pos + 2);
+                assert_ne!(deco, 1, "SpecId decoration should be stripped");
+            }
+            pos += wc;
+        }
+    }
+
+    #[test]
+    fn test_freeze_spec_constant_true_false() {
+        // OpSpecConstantTrue and OpSpecConstantFalse should become OpConstantTrue/False.
+        let mut spv = spirv_header(10);
+        // OpTypeBool %1
+        spv.extend(encode_inst(OP_TYPE_BOOL, &[1]));
+        // OpSpecConstantTrue %1 %2
+        spv.extend(encode_inst(OP_SPEC_CONSTANT_TRUE, &[1, 2]));
+        // OpSpecConstantFalse %1 %3
+        spv.extend(encode_inst(OP_SPEC_CONSTANT_FALSE, &[1, 3]));
+
+        let result = freeze_spec_constant_ops(&spv);
+
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found_true = false;
+        let mut found_false = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == OP_CONSTANT_TRUE && read_word(&result, pos + 2) == 2 {
+                found_true = true;
+            }
+            if op == OP_CONSTANT_FALSE && read_word(&result, pos + 2) == 3 {
+                found_false = true;
+            }
+            assert_ne!(op, OP_SPEC_CONSTANT_TRUE);
+            assert_ne!(op, OP_SPEC_CONSTANT_FALSE);
+            pos += wc;
+        }
+        assert!(found_true, "Expected OpConstantTrue for id 2");
+        assert!(found_false, "Expected OpConstantFalse for id 3");
+    }
+
+    #[test]
+    fn test_freeze_spec_constant_composite() {
+        // OpSpecConstantComposite should be rewritten to OpConstantComposite.
+        let mut spv = spirv_header(10);
+        // OpTypeInt %1 32 0
+        spv.extend(encode_inst(OP_TYPE_INT, &[1, 32, 0]));
+        // OpConstant %1 %2 1
+        spv.extend(encode_inst(OP_CONSTANT, &[1, 2, 1]));
+        // OpConstant %1 %3 2
+        spv.extend(encode_inst(OP_CONSTANT, &[1, 3, 2]));
+        // OpSpecConstantComposite %type=4 %result=5 %2 %3
+        spv.extend(encode_inst(OP_SPEC_CONSTANT_COMPOSITE, &[4, 5, 2, 3]));
+
+        let result = freeze_spec_constant_ops(&spv);
+
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == OP_CONSTANT_COMPOSITE && read_word(&result, pos + 2) == 5 {
+                found = true;
+                // Verify constituents are preserved.
+                assert_eq!(read_word(&result, pos + 3), 2);
+                assert_eq!(read_word(&result, pos + 4), 3);
+            }
+            assert_ne!(op, OP_SPEC_CONSTANT_COMPOSITE);
+            pos += wc;
+        }
+        assert!(found, "Expected OpConstantComposite for id 5");
+    }
+
+    // ==================== rewrite_copy_logical tests ====================
+
+    #[test]
+    fn test_rewrite_copy_logical_no_ops() {
+        // No OpCopyLogical in input, output should be identical.
+        let mut spv = spirv_header(10);
+        // Some random instruction (OpNop = 0, wc=1).
+        spv.extend(encode_inst(0, &[])); // OpNop
+        let result = rewrite_copy_logical(&spv);
+        assert_eq!(result, spv);
+    }
+
+    #[test]
+    fn test_rewrite_copy_logical_replaces_opcode() {
+        // OpCopyLogical (op=400) should become OpCopyObject (op=83).
+        let mut spv = spirv_header(10);
+        // OpCopyLogical: wc=4, op=400, type=1, result=2, operand=3
+        spv.extend(encode_inst(400, &[1, 2, 3]));
+
+        let result = rewrite_copy_logical(&spv);
+
+        // Parse and verify.
+        let w0 = read_word(&result, 5);
+        let wc = (w0 >> 16) as usize;
+        let op = (w0 & 0xFFFF) as u16;
+        assert_eq!(op, 83, "OpCopyLogical should become OpCopyObject");
+        assert_eq!(wc, 4);
+        assert_eq!(read_word(&result, 6), 1); // type
+        assert_eq!(read_word(&result, 7), 2); // result
+        assert_eq!(read_word(&result, 8), 3); // operand
+    }
+
+    #[test]
+    fn test_rewrite_copy_logical_multiple() {
+        // Multiple OpCopyLogical should all be rewritten.
+        let mut spv = spirv_header(10);
+        spv.extend(encode_inst(400, &[1, 2, 3])); // First CopyLogical
+        spv.extend(encode_inst(400, &[1, 4, 5])); // Second CopyLogical
+
+        let result = rewrite_copy_logical(&spv);
+
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut count = 0;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == 83 { count += 1; }
+            assert_ne!(op, 400, "No OpCopyLogical should remain");
+            pos += wc;
+        }
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_rewrite_copy_logical_preserves_other_instructions() {
+        // Other instructions should be untouched.
+        let mut spv = spirv_header(10);
+        // OpNop
+        spv.extend(encode_inst(0, &[]));
+        // OpCopyLogical
+        spv.extend(encode_inst(400, &[1, 2, 3]));
+        // Another OpNop
+        spv.extend(encode_inst(0, &[]));
+
+        let result = rewrite_copy_logical(&spv);
+
+        // Same byte length.
+        assert_eq!(result.len(), spv.len());
+        // First instruction is still OpNop.
+        let w0 = read_word(&result, 5);
+        assert_eq!((w0 & 0xFFFF) as u16, 0);
+    }
+
+    // ==================== rewrite_terminate_invocation tests ====================
+
+    #[test]
+    fn test_rewrite_terminate_invocation_no_ops() {
+        let mut spv = spirv_header(10);
+        spv.extend(encode_inst(0, &[])); // OpNop
+        let result = rewrite_terminate_invocation(&spv);
+        assert_eq!(result, spv);
+    }
+
+    #[test]
+    fn test_rewrite_terminate_invocation_replaces_opcode() {
+        // OpTerminateInvocation (4416) should become OpKill (252).
+        let mut spv = spirv_header(10);
+        // OpTerminateInvocation is wc=1, no operands.
+        spv.extend(encode_inst(4416, &[]));
+
+        let result = rewrite_terminate_invocation(&spv);
+
+        let w0 = read_word(&result, 5);
+        let op = (w0 & 0xFFFF) as u16;
+        let wc = (w0 >> 16) as usize;
+        assert_eq!(op, 252, "OpTerminateInvocation should become OpKill");
+        assert_eq!(wc, 1);
+    }
+
+    #[test]
+    fn test_rewrite_terminate_invocation_multiple() {
+        let mut spv = spirv_header(10);
+        spv.extend(encode_inst(4416, &[]));
+        // Some other instruction in between
+        spv.extend(encode_inst(0, &[])); // OpNop
+        spv.extend(encode_inst(4416, &[]));
+
+        let result = rewrite_terminate_invocation(&spv);
+
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut kill_count = 0;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == 252 { kill_count += 1; }
+            assert_ne!(op, 4416, "No OpTerminateInvocation should remain");
+            pos += wc;
+        }
+        assert_eq!(kill_count, 2);
+    }
+
+    // ==================== infer_readonly_storage tests ====================
+
+    #[test]
+    fn test_infer_readonly_no_storage_buffers() {
+        // No storage buffer variables => output unchanged.
+        let mut spv = spirv_header(10);
+        spv.extend(encode_inst(0, &[])); // OpNop
+        let result = infer_readonly_storage(&spv);
+        assert_eq!(result, spv);
+    }
+
+    #[test]
+    fn test_infer_readonly_adds_nonwritable() {
+        // A StorageBuffer variable that is never stored to should get NonWritable.
+        let mut spv = spirv_header(10);
+        // Need a decoration instruction so the injection point exists.
+        // OpDecorate %1 Block (decoration=2)
+        spv.extend(encode_inst(71, &[1, 2]));
+        // OpVariable: type=2, result=3, StorageClass=StorageBuffer(12)
+        spv.extend(encode_inst(OP_VARIABLE, &[2, 3, SC_STORAGE_BUFFER]));
+
+        let result = infer_readonly_storage(&spv);
+
+        // Should have NonWritable decoration added for var 3.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found_nonwritable = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == 71 && wc >= 3 {
+                let target = read_word(&result, pos + 1);
+                let deco = read_word(&result, pos + 2);
+                if target == 3 && deco == DECO_NON_WRITABLE {
+                    found_nonwritable = true;
+                }
+            }
+            pos += wc;
+        }
+        assert!(found_nonwritable, "Expected NonWritable decoration for var 3");
+    }
+
+    #[test]
+    fn test_infer_readonly_written_var_not_decorated() {
+        // A StorageBuffer variable that IS stored to should NOT get NonWritable.
+        let mut spv = spirv_header(10);
+        // OpDecorate %1 Block
+        spv.extend(encode_inst(71, &[1, 2]));
+        // OpVariable: type=2, result=3, StorageClass=StorageBuffer(12)
+        spv.extend(encode_inst(OP_VARIABLE, &[2, 3, SC_STORAGE_BUFFER]));
+        // OpStore(62): pointer=3, value=99
+        spv.extend(encode_inst(62, &[3, 99]));
+
+        let result = infer_readonly_storage(&spv);
+
+        // Should NOT add NonWritable for var 3 (it's written to).
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == 71 && wc >= 3 {
+                let target = read_word(&result, pos + 1);
+                let deco = read_word(&result, pos + 2);
+                assert!(
+                    !(target == 3 && deco == DECO_NON_WRITABLE),
+                    "Written var should NOT get NonWritable"
+                );
+            }
+            pos += wc;
+        }
+    }
+
+    #[test]
+    fn test_infer_readonly_access_chain_write() {
+        // Writing through an OpAccessChain derived from a storage buffer should mark it writable.
+        let mut spv = spirv_header(10);
+        // OpDecorate %1 Block
+        spv.extend(encode_inst(71, &[1, 2]));
+        // OpVariable: type=2, result=3, StorageClass=StorageBuffer(12)
+        spv.extend(encode_inst(OP_VARIABLE, &[2, 3, SC_STORAGE_BUFFER]));
+        // OpAccessChain(65): type=5, result=4, base=3, index=6
+        spv.extend(encode_inst(65, &[5, 4, 3, 6]));
+        // OpStore(62): pointer=4, value=99
+        spv.extend(encode_inst(62, &[4, 99]));
+
+        let result = infer_readonly_storage(&spv);
+
+        // Var 3 is written to through access chain -> should NOT get NonWritable.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == 71 && wc >= 3 {
+                let target = read_word(&result, pos + 1);
+                let deco = read_word(&result, pos + 2);
+                assert!(
+                    !(target == 3 && deco == DECO_NON_WRITABLE),
+                    "Var written via access chain should NOT get NonWritable"
+                );
+            }
+            pos += wc;
+        }
+    }
+
+    #[test]
+    fn test_infer_readonly_already_has_nonwritable() {
+        // If a var already has NonWritable, don't add a duplicate.
+        let mut spv = spirv_header(10);
+        // OpDecorate %3 NonWritable
+        spv.extend(encode_inst(71, &[3, DECO_NON_WRITABLE]));
+        // OpVariable: type=2, result=3, StorageClass=StorageBuffer(12)
+        spv.extend(encode_inst(OP_VARIABLE, &[2, 3, SC_STORAGE_BUFFER]));
+
+        let result = infer_readonly_storage(&spv);
+
+        // Count NonWritable decorations for var 3 — should be exactly 1.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut nw_count = 0;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == 71 && wc >= 3 {
+                let target = read_word(&result, pos + 1);
+                let deco = read_word(&result, pos + 2);
+                if target == 3 && deco == DECO_NON_WRITABLE {
+                    nw_count += 1;
+                }
+            }
+            pos += wc;
+        }
+        assert_eq!(nw_count, 1, "Should not duplicate NonWritable");
+    }
+
+    #[test]
+    fn test_infer_readonly_mixed_vars() {
+        // Two storage buffer vars: one written, one not. Only the unwritten one gets NonWritable.
+        let mut spv = spirv_header(10);
+        // OpDecorate %1 Block
+        spv.extend(encode_inst(71, &[1, 2]));
+        // OpVariable: type=2, result=3, StorageClass=StorageBuffer (read-only)
+        spv.extend(encode_inst(OP_VARIABLE, &[2, 3, SC_STORAGE_BUFFER]));
+        // OpVariable: type=2, result=4, StorageClass=StorageBuffer (written)
+        spv.extend(encode_inst(OP_VARIABLE, &[2, 4, SC_STORAGE_BUFFER]));
+        // OpStore to var 4
+        spv.extend(encode_inst(62, &[4, 99]));
+
+        let result = infer_readonly_storage(&spv);
+
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut nw_for_3 = false;
+        let mut nw_for_4 = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == 71 && wc >= 3 {
+                let target = read_word(&result, pos + 1);
+                let deco = read_word(&result, pos + 2);
+                if deco == DECO_NON_WRITABLE {
+                    if target == 3 { nw_for_3 = true; }
+                    if target == 4 { nw_for_4 = true; }
+                }
+            }
+            pos += wc;
+        }
+        assert!(nw_for_3, "Read-only var 3 should get NonWritable");
+        assert!(!nw_for_4, "Written var 4 should NOT get NonWritable");
+    }
+
+    // ==================== convert_push_constants_to_uniforms tests ====================
+
+    #[test]
+    fn test_convert_pc_no_push_constants() {
+        // No push-constant variables => output unchanged.
+        let mut spv = spirv_header(10);
+        // OpVariable with Uniform storage class (not PushConstant)
+        spv.extend(encode_inst(OP_VARIABLE, &[2, 3, SC_UNIFORM]));
+        let result = convert_push_constants_to_uniforms(&spv);
+        assert_eq!(result, spv);
+    }
+
+    #[test]
+    fn test_convert_pc_rewrites_storage_class() {
+        // A PushConstant variable should have its storage class changed to StorageBuffer.
+        let mut spv = spirv_header(10);
+        // OpTypePointer(32): id=1, StorageClass=PushConstant(9), pointee=5
+        spv.extend(encode_inst(32, &[1, SC_PUSH_CONSTANT, 5]));
+        // OpVariable: type=1, result=2, StorageClass=PushConstant(9)
+        spv.extend(encode_inst(OP_VARIABLE, &[1, 2, SC_PUSH_CONSTANT]));
+
+        let result = convert_push_constants_to_uniforms(&spv);
+
+        // Find OpVariable for id=2 and check storage class.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found_var = false;
+        let mut found_ptr = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == OP_VARIABLE && wc >= 4 && read_word(&result, pos + 2) == 2 {
+                found_var = true;
+                let sc = read_word(&result, pos + 3);
+                assert_eq!(sc, SC_STORAGE_BUFFER, "PushConstant should become StorageBuffer");
+            }
+            if op == 32 && wc >= 4 && read_word(&result, pos + 1) == 1 {
+                found_ptr = true;
+                let sc = read_word(&result, pos + 2);
+                assert_eq!(sc, SC_STORAGE_BUFFER, "Pointer type should become StorageBuffer");
+            }
+            pos += wc;
+        }
+        assert!(found_var, "Should find OpVariable for id 2");
+        assert!(found_ptr, "Should find OpTypePointer for id 1");
+    }
+
+    #[test]
+    fn test_convert_pc_injects_binding_decorations() {
+        // Should inject DescriptorSet=3 and Binding=120 decorations.
+        let mut spv = spirv_header(10);
+        // Need a type instruction to trigger injection (opcode 19-32).
+        // OpTypePointer(32): id=1, StorageClass=PushConstant(9), pointee=5
+        spv.extend(encode_inst(32, &[1, SC_PUSH_CONSTANT, 5]));
+        // OpVariable: type=1, result=2, StorageClass=PushConstant(9)
+        spv.extend(encode_inst(OP_VARIABLE, &[1, 2, SC_PUSH_CONSTANT]));
+
+        let result = convert_push_constants_to_uniforms(&spv);
+
+        // Look for DescriptorSet=3 and Binding=120 decorations for var 2.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut has_set_3 = false;
+        let mut has_binding_120 = false;
+        let mut has_nonwritable = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 { break; }
+            if op == 71 && wc >= 4 {
+                let target = read_word(&result, pos + 1);
+                let deco = read_word(&result, pos + 2);
+                let val = read_word(&result, pos + 3);
+                if target == 2 {
+                    if deco == DECO_DESCRIPTOR_SET && val == 3 { has_set_3 = true; }
+                    if deco == DECO_BINDING && val == PC_RING_BUFFER_BINDING { has_binding_120 = true; }
+                }
+            }
+            if op == 71 && wc >= 3 {
+                let target = read_word(&result, pos + 1);
+                let deco = read_word(&result, pos + 2);
+                if target == 2 && deco == DECO_NON_WRITABLE { has_nonwritable = true; }
+            }
+            pos += wc;
+        }
+        assert!(has_set_3, "Expected DescriptorSet=3 for push constant var");
+        assert!(has_binding_120, "Expected Binding=120 for push constant var");
+        assert!(has_nonwritable, "Expected NonWritable for push constant var");
+    }
+
+    // ==================== rewrite_copy_logical edge case ====================
+
+    #[test]
+    fn test_rewrite_copy_logical_too_small() {
+        // Input smaller than header: should return as-is.
+        let spv = vec![0u8; 12]; // Less than 5 words
+        let result = rewrite_copy_logical(&spv);
+        assert_eq!(result, spv);
+    }
+
+    #[test]
+    fn test_rewrite_terminate_invocation_too_small() {
+        let spv = vec![0u8; 8];
+        let result = rewrite_terminate_invocation(&spv);
+        assert_eq!(result, spv);
+    }
+
+    // ==================== fix_depth2_images tests ====================
+
+    #[test]
+    fn test_fix_depth2_images_no_depth2() {
+        // OpTypeImage with depth=0 should be unchanged.
+        let mut spv = spirv_header(10);
+        // OpTypeImage: id=1, sampled_type=2, dim=1(2D), depth=0, arrayed=0, ms=0, sampled=1, format=0
+        spv.extend(encode_inst(25, &[1, 2, 1, 0, 0, 0, 1, 0]));
+
+        let (result, aliases) = fix_depth2_images(&spv);
+        assert_eq!(result, spv, "No changes expected for depth=0");
+        assert!(aliases.is_empty());
+    }
+
+    #[test]
+    fn test_fix_depth2_images_rewrites_depth2_to_1() {
+        // OpTypeImage with depth=2 should become depth=1.
+        let mut spv = spirv_header(10);
+        // OpTypeImage: id=1, sampled_type=2, dim=1(2D), depth=2, arrayed=0, ms=0, sampled=1, format=0
+        spv.extend(encode_inst(25, &[1, 2, 1, 2, 0, 0, 1, 0]));
+
+        let (result, _) = fix_depth2_images(&spv);
+
+        // Check depth field (word at pos+4 in instruction, which is header(5)+1(wc|op)+1+2+1+depth_pos=5+4=9)
+        // Instruction starts at word 5 (after header).
+        // depth is the 5th word of the instruction (0-indexed: wc|op, id, sampled_type, dim, depth)
+        let depth = read_word(&result, 5 + 4);
+        assert_eq!(depth, 1, "depth=2 should become depth=1");
+    }
+
+    #[test]
+    fn test_fix_depth2_images_preserves_depth1() {
+        // OpTypeImage with depth=1 should remain depth=1 (already correct).
+        let mut spv = spirv_header(10);
+        spv.extend(encode_inst(25, &[1, 2, 1, 1, 0, 0, 1, 0]));
+
+        let (result, _) = fix_depth2_images(&spv);
+        let depth = read_word(&result, 5 + 4);
+        assert_eq!(depth, 1);
+    }
+
+    // ==================== eval_spec_op tests ====================
+
+    #[test]
+    fn test_eval_spec_op_iadd() {
+        assert_eq!(eval_spec_op(128, &[5, 3]), 8);
+    }
+
+    #[test]
+    fn test_eval_spec_op_isub() {
+        assert_eq!(eval_spec_op(130, &[10, 3]), 7);
+    }
+
+    #[test]
+    fn test_eval_spec_op_imul() {
+        assert_eq!(eval_spec_op(132, &[6, 7]), 42);
+    }
+
+    #[test]
+    fn test_eval_spec_op_udiv() {
+        assert_eq!(eval_spec_op(134, &[20, 4]), 5);
+        // Division by zero => 0
+        assert_eq!(eval_spec_op(134, &[20, 0]), 0);
+    }
+
+    #[test]
+    fn test_eval_spec_op_sdiv() {
+        // -10 / 3 = -3 (integer division)
+        let neg10 = (-10i32) as u64;
+        assert_eq!(eval_spec_op(135, &[neg10, 3]) as i32, -3);
+        // Division by zero => 0
+        assert_eq!(eval_spec_op(135, &[10, 0]), 0);
+    }
+
+    #[test]
+    fn test_eval_spec_op_umod() {
+        assert_eq!(eval_spec_op(137, &[17, 5]), 2);
+        assert_eq!(eval_spec_op(137, &[17, 0]), 0); // mod by zero => 0
+    }
+
+    #[test]
+    fn test_eval_spec_op_snegate() {
+        let five = 5u64;
+        let result = eval_spec_op(126, &[five]);
+        assert_eq!(result as i32, -5);
+    }
+
+    #[test]
+    fn test_eval_spec_op_logical_ops() {
+        // LogicalEqual (164)
+        assert_eq!(eval_spec_op(164, &[1, 1]), 1);
+        assert_eq!(eval_spec_op(164, &[1, 0]), 0);
+        // LogicalNotEqual (165)
+        assert_eq!(eval_spec_op(165, &[1, 0]), 1);
+        assert_eq!(eval_spec_op(165, &[1, 1]), 0);
+        // LogicalOr (166)
+        assert_eq!(eval_spec_op(166, &[0, 0]), 0);
+        assert_eq!(eval_spec_op(166, &[1, 0]), 1);
+        assert_eq!(eval_spec_op(166, &[0, 1]), 1);
+        // LogicalAnd (167)
+        assert_eq!(eval_spec_op(167, &[1, 1]), 1);
+        assert_eq!(eval_spec_op(167, &[1, 0]), 0);
+        // LogicalNot (168)
+        assert_eq!(eval_spec_op(168, &[0]), 1);
+        assert_eq!(eval_spec_op(168, &[1]), 0);
+    }
+
+    #[test]
+    fn test_eval_spec_op_select() {
+        // Select (169): condition, true_val, false_val
+        assert_eq!(eval_spec_op(169, &[1, 42, 99]), 42);
+        assert_eq!(eval_spec_op(169, &[0, 42, 99]), 99);
+    }
+
+    #[test]
+    fn test_eval_spec_op_integer_comparison() {
+        // IEqual (170)
+        assert_eq!(eval_spec_op(170, &[5, 5]), 1);
+        assert_eq!(eval_spec_op(170, &[5, 6]), 0);
+        // INotEqual (171)
+        assert_eq!(eval_spec_op(171, &[5, 6]), 1);
+        assert_eq!(eval_spec_op(171, &[5, 5]), 0);
+        // UGreaterThan (172)
+        assert_eq!(eval_spec_op(172, &[10, 5]), 1);
+        assert_eq!(eval_spec_op(172, &[5, 10]), 0);
+        // ULessThan (176)
+        assert_eq!(eval_spec_op(176, &[3, 7]), 1);
+        assert_eq!(eval_spec_op(176, &[7, 3]), 0);
+    }
+
+    #[test]
+    fn test_eval_spec_op_bitwise() {
+        // BitwiseOr (197)
+        assert_eq!(eval_spec_op(197, &[0b1010, 0b0101]), 0b1111);
+        // BitwiseAnd (199)
+        assert_eq!(eval_spec_op(199, &[0b1010, 0b1100]), 0b1000);
+        // BitwiseXor (198)
+        assert_eq!(eval_spec_op(198, &[0b1010, 0b1100]), 0b0110);
+        // Not (200)
+        assert_eq!(eval_spec_op(200, &[0]) as u32, 0xFFFFFFFF);
+        // ShiftLeftLogical (196)
+        assert_eq!(eval_spec_op(196, &[1, 4]), 16);
+        // ShiftRightLogical (194)
+        assert_eq!(eval_spec_op(194, &[16, 2]), 4);
+    }
+
+    #[test]
+    fn test_eval_spec_op_unknown_opcode() {
+        // Unknown opcode returns 0.
+        assert_eq!(eval_spec_op(9999, &[42, 13]), 0);
+    }
+
+    // ==================== fix_fmax_literals tests ====================
+
+    #[test]
+    fn test_fix_fmax_literals_positive() {
+        let input = "let x = 340282350000000000000000000000000000000f;";
+        let result = fix_fmax_literals(input);
+        assert!(result.contains("0x1.fffffep+127f"));
+        assert!(!result.contains("340282350000000000000000000000000000000f"));
+    }
+
+    #[test]
+    fn test_fix_fmax_literals_negative() {
+        let input = "let x = -340282350000000000000000000000000000000f;";
+        let result = fix_fmax_literals(input);
+        assert!(result.contains("-0x1.fffffep+127f"));
+    }
+
+    #[test]
+    fn test_fix_fmax_literals_no_match() {
+        let input = "let x = 1.0f;";
+        let result = fix_fmax_literals(input);
+        assert_eq!(result, input);
+    }
+
+    // ==================== split_combined_samplers tests ====================
+
+    #[test]
+    fn test_split_combined_samplers_no_combined() {
+        // No combined image sampler variables => output unchanged.
+        let mut spv = spirv_header(10);
+        spv.extend(encode_inst(0, &[])); // OpNop
+        let result = split_combined_samplers(&spv);
+        assert_eq!(result, spv);
+    }
+
+    #[test]
+    fn test_split_combined_samplers_basic() {
+        // Build a minimal module with a combined image sampler.
+        let mut spv = spirv_header(20);
+
+        // OpEntryPoint Fragment %10 "main" %7  (the combined var is %7)
+        // Encoding: op=15, exec_model=4(Fragment), entry_id=10, name="main\0", interface_vars...
+        // "main" = 0x6E69616D, null-terminated needs: 0x006E6961 after 'm'
+        // Actually for SPIR-V string encoding: "main" fits in 2 words: [0x6E69616D, 0x00000000] wait no.
+        // "main" in little-endian: bytes m=0x6D, a=0x61, i=0x69, n=0x6E -> word = 0x6E69616D
+        // Then null terminator: 0x00000000
+        // Actually strings are null-terminated and padded to 4 bytes.
+        // "main\0" = 5 bytes -> padded to 8 bytes (2 words): [0x6E69616D, 0x00000000]
+        // Wait: "main" = [m,a,i,n] = [0x6D, 0x61, 0x69, 0x6E] in LE word = 0x6E69616D
+        // then null = [0x00, ...] next word = 0x00000000
+        // But actually "main\0" = 5 chars, fits in 2 words of 4 bytes each = 8 bytes.
+        // word1 = bytes [m,a,i,n] = 0x6E69616D, word2 = bytes [\0,pad,pad,pad] = 0x00000000
+        // OpEntryPoint: wc = 3 (fixed) + 2 (name) + 1 (interface var) = 6
+        // But that's not how encode_inst works... let me just manually build it.
+        let ep_wc: u32 = 6;
+        let mut ep = Vec::new();
+        push_word(&mut ep, (ep_wc << 16) | 15); // OpEntryPoint
+        push_word(&mut ep, 4); // Fragment
+        push_word(&mut ep, 10); // entry function id
+        push_word(&mut ep, 0x6E69616D); // "main" (m,a,i,n)
+        push_word(&mut ep, 0x00000000); // null terminator padded
+        push_word(&mut ep, 7); // interface variable (the combined sampler)
+        spv.extend(ep);
+
+        // OpDecorate %7 DescriptorSet 0
+        spv.extend(encode_inst(71, &[7, 34, 0]));
+        // OpDecorate %7 Binding 0
+        spv.extend(encode_inst(71, &[7, 33, 0]));
+
+        // OpTypeFloat %1 32
+        spv.extend(encode_inst(22, &[1, 32]));
+        // OpTypeImage %2 %1 Dim=2D(1) Depth=0 Arrayed=0 MS=0 Sampled=1 Format=0
+        spv.extend(encode_inst(25, &[2, 1, 1, 0, 0, 0, 1, 0]));
+        // OpTypeSampledImage %3 %2
+        spv.extend(encode_inst(27, &[3, 2]));
+        // OpTypePointer %4 UniformConstant(0) %3
+        spv.extend(encode_inst(32, &[4, 0, 3]));
+        // OpTypeVoid %8
+        spv.extend(encode_inst(19, &[8]));
+        // OpTypeFunction %9 %8
+        spv.extend(encode_inst(33, &[9, 8]));
+        // OpVariable %4 %7 UniformConstant(0)
+        spv.extend(encode_inst(59, &[4, 7, 0]));
+
+        // OpFunction %8 %10 None %9  (void main())
+        spv.extend(encode_inst(54, &[8, 10, 0, 9]));
+        // OpLabel %11
+        spv.extend(encode_inst(248, &[11]));
+        // OpLoad %3 %12 %7 (load the combined sampler)
+        spv.extend(encode_inst(61, &[3, 12, 7]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        let result = split_combined_samplers(&spv);
+
+        // Verify: output should be different (split happened).
+        assert_ne!(result.len(), spv.len(), "Output should differ after splitting");
+
+        // Verify: the original OpLoad of the combined var should be gone,
+        // replaced by two separate loads + OpSampledImage.
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found_sampled_image = false;
+        let mut found_sampler_var = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 || pos + wc > total_words { break; }
+            if op == 86 { // OpSampledImage
+                found_sampled_image = true;
+            }
+            // Look for new sampler variable (OpVariable with sampler_type ptr)
+            if op == 59 && wc >= 4 {
+                let sc = read_word(&result, pos + 3);
+                let var_id = read_word(&result, pos + 2);
+                if sc == 0 && var_id != 7 { // A new UniformConstant var (not the original)
+                    found_sampler_var = true;
+                }
+            }
+            pos += wc;
+        }
+        assert!(found_sampled_image, "Expected OpSampledImage after split");
+        assert!(found_sampler_var, "Expected a new sampler variable");
+    }
+
+    // ==================== End-to-end test ====================
+
+    #[test]
+    fn test_end_to_end_minimal_vertex_shader() {
+        // Build a minimal but VALID SPIR-V vertex shader and convert to WGSL.
+        // This exercises the full pipeline: all preprocessing passes + naga parse + wgsl write.
+        //
+        // Equivalent GLSL:
+        //   #version 450
+        //   void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }
+        //
+        // We'll use a pre-assembled SPIR-V binary (manually constructed).
+        let spirv: &[u8] = &assemble_minimal_vertex_shader();
+
+        // Run through the full pipeline (minus wasm_bindgen wrapper).
+        // We replicate the same pass order as spirv_to_wgsl but call the functions directly.
+        let spirv_bytes = freeze_spec_constant_ops(spirv);
+        let spirv_bytes = rewrite_copy_logical(&spirv_bytes);
+        let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
+        let spirv_bytes = infer_readonly_storage(&spirv_bytes);
+        let spirv_bytes = convert_push_constants_to_uniforms(&spirv_bytes);
+        let spirv_bytes = split_combined_samplers(&spirv_bytes);
+        let (spirv_bytes, _) = fix_depth2_images(&spirv_bytes);
+
+        // Parse with naga.
+        let opts = spv::Options {
+            adjust_coordinate_space: true,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+        let module = spv::parse_u8_slice(&spirv_bytes, &opts);
+        assert!(module.is_ok(), "SPIR-V parse failed: {:?}", module.err());
+        let mut module = module.unwrap();
+
+        // Post-parse fixes.
+        fix_writeonly_storage(&mut module);
+        fix_nonfinite_literals(&mut module);
+        strip_point_size(&mut module);
+        flatten_binding_arrays(&mut module);
+
+        // Validate.
+        use naga::valid::{Validator, ValidationFlags, Capabilities};
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module);
+        assert!(info.is_ok(), "Validation failed: {:?}", info.err());
+        let info = info.unwrap();
+
+        // Process overrides.
+        use naga::back::PipelineConstants;
+        use naga::back::pipeline_constants::process_overrides;
+        let pipeline_constants = PipelineConstants::default();
+        let (module, info) = process_overrides(&module, &info, None, &pipeline_constants)
+            .expect("process_overrides failed");
+
+        // Clear overrides arena.
+        let mut module = module.into_owned();
+        module.overrides = naga::Arena::new();
+
+        // Write WGSL.
+        use naga::back::wgsl;
+        let wgsl_result = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty());
+        assert!(wgsl_result.is_ok(), "WGSL write failed: {:?}", wgsl_result.err());
+        let wgsl = wgsl_result.unwrap();
+
+        // Basic checks on the WGSL output.
+        assert!(wgsl.contains("@vertex"), "Expected @vertex in WGSL output");
+        assert!(wgsl.contains("@builtin(position)"), "Expected @builtin(position) in WGSL output");
+    }
+
+    /// Assemble a minimal valid SPIR-V vertex shader that outputs gl_Position = vec4(0,0,0,1).
+    fn assemble_minimal_vertex_shader() -> Vec<u8> {
+        let mut spv = Vec::new();
+
+        // Header
+        push_word(&mut spv, 0x07230203); // Magic
+        push_word(&mut spv, 0x00010300); // Version 1.3
+        push_word(&mut spv, 0);          // Generator
+        push_word(&mut spv, 20);         // Bound
+        push_word(&mut spv, 0);          // Schema
+
+        // IDs:
+        // 1 = void
+        // 2 = function type (void -> void)
+        // 3 = float (f32)
+        // 4 = vec4
+        // 5 = ptr Output vec4
+        // 6 = gl_Position variable
+        // 7 = constant 0.0
+        // 8 = constant 1.0
+        // 9 = composite constant vec4(0,0,0,1)
+        // 10 = main function
+        // 11 = label
+        // 12 = ptr Input (not used, just for coverage)
+
+        // OpCapability Shader (op=17, capability=1)
+        spv.extend(encode_inst(17, &[1]));
+        // OpMemoryModel Logical GLSL450 (op=14, addressing=0, memory=1)
+        spv.extend(encode_inst(14, &[0, 1]));
+        // OpEntryPoint Vertex %10 "main" %6
+        // "main" = 2 words: 0x6E69616D, 0x00000000
+        let ep_wc: u32 = 7;
+        push_word(&mut spv, (ep_wc << 16) | 15);
+        push_word(&mut spv, 0); // Vertex
+        push_word(&mut spv, 10); // function id
+        push_word(&mut spv, 0x6E69616D); // "main"
+        push_word(&mut spv, 0x00000000); // null terminator
+        push_word(&mut spv, 6); // gl_Position interface var
+        push_word(&mut spv, 0); // padding? No - the last one is already the interface.
+        // Actually wc=7 means 7 words total. Let me recount:
+        // word0: wc|op, word1: exec_model, word2: func_id, word3-4: name, word5: var1
+        // That's 6 words. Let me fix.
+        // Oops I already pushed 7 words. Let me redo this properly.
+
+        // Actually let me restart the assembly more carefully.
+        spv.clear();
+
+        // Header
+        push_word(&mut spv, 0x07230203);
+        push_word(&mut spv, 0x00010300);
+        push_word(&mut spv, 0);
+        push_word(&mut spv, 20);
+        push_word(&mut spv, 0);
+
+        // OpCapability Shader: op=17, wc=2
+        spv.extend(encode_inst(17, &[1]));
+
+        // OpMemoryModel Logical GLSL450: op=14, wc=3
+        spv.extend(encode_inst(14, &[0, 1]));
+
+        // OpEntryPoint Vertex %10 "main" %6
+        // wc = 1 + 1 + 1 + 2(name) + 1(interface) = 6
+        {
+            let wc: u32 = 6;
+            push_word(&mut spv, (wc << 16) | 15);
+            push_word(&mut spv, 0); // Vertex execution model
+            push_word(&mut spv, 10); // main function
+            push_word(&mut spv, 0x6E69616D); // "main"
+            push_word(&mut spv, 0x00000000); // null + padding
+            push_word(&mut spv, 6); // interface: gl_Position
+        }
+
+        // OpDecorate %6 BuiltIn Position: op=71, wc=4, target=6, decoration=11(BuiltIn), value=0(Position)
+        spv.extend(encode_inst(71, &[6, 11, 0]));
+
+        // OpTypeVoid %1: op=19, wc=2
+        spv.extend(encode_inst(19, &[1]));
+
+        // OpTypeFunction %2 %1: op=33, wc=3 (function returning void, no params)
+        spv.extend(encode_inst(33, &[2, 1]));
+
+        // OpTypeFloat %3 32: op=22, wc=3
+        spv.extend(encode_inst(22, &[3, 32]));
+
+        // OpTypeVector %4 %3 4: op=23, wc=4
+        spv.extend(encode_inst(23, &[4, 3, 4]));
+
+        // OpTypePointer %5 Output %4: op=32, wc=4
+        spv.extend(encode_inst(32, &[5, 3, 4])); // StorageClass 3 = Output
+
+        // OpVariable %5 %6 Output: op=59, wc=4
+        spv.extend(encode_inst(59, &[5, 6, 3])); // StorageClass 3 = Output
+
+        // OpConstant %3 %7 0.0f: op=43, wc=4
+        spv.extend(encode_inst(43, &[3, 7, 0x00000000])); // 0.0f
+
+        // OpConstant %3 %8 1.0f: op=43, wc=4
+        spv.extend(encode_inst(43, &[3, 8, 0x3F800000])); // 1.0f
+
+        // OpConstantComposite %4 %9 %7 %7 %7 %8: op=44, wc=7
+        spv.extend(encode_inst(44, &[4, 9, 7, 7, 7, 8]));
+
+        // OpFunction %1 %10 None %2: op=54, wc=5
+        spv.extend(encode_inst(54, &[1, 10, 0, 2]));
+
+        // OpLabel %11: op=248, wc=2
+        spv.extend(encode_inst(248, &[11]));
+
+        // OpStore %6 %9: op=62, wc=3
+        spv.extend(encode_inst(62, &[6, 9]));
+
+        // OpReturn: op=253, wc=1
+        spv.extend(encode_inst(253, &[]));
+
+        // OpFunctionEnd: op=56, wc=1
+        spv.extend(encode_inst(56, &[]));
+
+        spv
+    }
+
+    #[test]
+    fn test_end_to_end_fragment_shader_with_terminate_invocation() {
+        // Build a fragment shader that uses OpTerminateInvocation.
+        // After preprocessing, it should become OpKill and parse correctly.
+        let spirv = assemble_fragment_shader_with_terminate();
+
+        let spirv_bytes = freeze_spec_constant_ops(&spirv);
+        let spirv_bytes = rewrite_copy_logical(&spirv_bytes);
+        let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
+        let spirv_bytes = infer_readonly_storage(&spirv_bytes);
+        let spirv_bytes = convert_push_constants_to_uniforms(&spirv_bytes);
+        let spirv_bytes = split_combined_samplers(&spirv_bytes);
+        let (spirv_bytes, _) = fix_depth2_images(&spirv_bytes);
+
+        let opts = spv::Options {
+            adjust_coordinate_space: true,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+        let module = spv::parse_u8_slice(&spirv_bytes, &opts);
+        assert!(module.is_ok(), "SPIR-V parse failed: {:?}", module.err());
+        let mut module = module.unwrap();
+
+        fix_writeonly_storage(&mut module);
+        fix_nonfinite_literals(&mut module);
+        strip_point_size(&mut module);
+        flatten_binding_arrays(&mut module);
+
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module);
+        assert!(info.is_ok(), "Validation failed: {:?}", info.err());
+        let info = info.unwrap();
+
+        use naga::back::PipelineConstants;
+        use naga::back::pipeline_constants::process_overrides;
+        let pipeline_constants = PipelineConstants::default();
+        let (module, info) = process_overrides(&module, &info, None, &pipeline_constants)
+            .expect("process_overrides failed");
+        let mut module = module.into_owned();
+        module.overrides = naga::Arena::new();
+
+        use naga::back::wgsl;
+        let wgsl_result = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty());
+        assert!(wgsl_result.is_ok(), "WGSL write failed: {:?}", wgsl_result.err());
+        let wgsl = wgsl_result.unwrap();
+
+        assert!(wgsl.contains("@fragment"), "Expected @fragment in output");
+        // OpKill in WGSL is emitted as "discard;"
+        assert!(wgsl.contains("discard"), "Expected 'discard' in WGSL output");
+    }
+
+    /// Assemble a minimal fragment shader with OpTerminateInvocation.
+    fn assemble_fragment_shader_with_terminate() -> Vec<u8> {
+        let mut spv = Vec::new();
+
+        // Header
+        push_word(&mut spv, 0x07230203);
+        push_word(&mut spv, 0x00010500); // Version 1.5
+        push_word(&mut spv, 0);
+        push_word(&mut spv, 20);
+        push_word(&mut spv, 0);
+
+        // OpCapability Shader
+        spv.extend(encode_inst(17, &[1]));
+
+        // OpExtension "SPV_KHR_terminate_invocation"
+        // String encoding: "SPV_KHR_terminate_invocation\0" -> 8 words (29 chars + null = 30 bytes -> 8 words)
+        // Actually let's just use OpCapability and skip the extension declaration —
+        // naga doesn't validate extensions strictly.
+
+        // OpMemoryModel Logical GLSL450
+        spv.extend(encode_inst(14, &[0, 1]));
+
+        // OpEntryPoint Fragment %10 "main" %6
+        {
+            let wc: u32 = 6;
+            push_word(&mut spv, (wc << 16) | 15);
+            push_word(&mut spv, 4); // Fragment execution model
+            push_word(&mut spv, 10); // main function
+            push_word(&mut spv, 0x6E69616D); // "main"
+            push_word(&mut spv, 0x00000000);
+            push_word(&mut spv, 6); // interface: frag_color output
+        }
+
+        // OpExecutionMode %10 OriginUpperLeft: op=16, wc=3
+        spv.extend(encode_inst(16, &[10, 7])); // 7 = OriginUpperLeft
+
+        // OpDecorate %6 Location 0: op=71
+        spv.extend(encode_inst(71, &[6, 30, 0])); // 30 = Location
+
+        // OpTypeVoid %1
+        spv.extend(encode_inst(19, &[1]));
+        // OpTypeFunction %2 %1
+        spv.extend(encode_inst(33, &[2, 1]));
+        // OpTypeFloat %3 32
+        spv.extend(encode_inst(22, &[3, 32]));
+        // OpTypeVector %4 %3 4
+        spv.extend(encode_inst(23, &[4, 3, 4]));
+        // OpTypePointer %5 Output %4
+        spv.extend(encode_inst(32, &[5, 3, 4])); // 3 = Output
+        // OpVariable %5 %6 Output
+        spv.extend(encode_inst(59, &[5, 6, 3]));
+        // OpConstant %3 %7 0.0f
+        spv.extend(encode_inst(43, &[3, 7, 0x00000000]));
+        // OpConstantComposite %4 %9 %7 %7 %7 %7
+        spv.extend(encode_inst(44, &[4, 9, 7, 7, 7, 7]));
+
+        // OpTypeBool %13
+        spv.extend(encode_inst(20, &[13]));
+        // OpConstantTrue %13 %14
+        spv.extend(encode_inst(41, &[13, 14]));
+
+        // OpFunction %1 %10 None %2
+        spv.extend(encode_inst(54, &[1, 10, 0, 2]));
+        // OpLabel %11
+        spv.extend(encode_inst(248, &[11]));
+
+        // OpSelectionMerge %15 None: op=247, wc=3
+        spv.extend(encode_inst(247, &[15, 0]));
+        // OpBranchConditional %14 %16 %15: op=250, wc=4
+        spv.extend(encode_inst(250, &[14, 16, 15]));
+
+        // OpLabel %16
+        spv.extend(encode_inst(248, &[16]));
+        // OpTerminateInvocation (4416, wc=1)
+        spv.extend(encode_inst(4416, &[]));
+
+        // OpLabel %15 (merge block)
+        spv.extend(encode_inst(248, &[15]));
+        // OpStore %6 %9
+        spv.extend(encode_inst(62, &[6, 9]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        spv
+    }
+
+    // ==================== Pipeline pass ordering / integration ====================
+
+    #[test]
+    fn test_passes_are_idempotent_on_clean_input() {
+        // Running passes on already-clean SPIR-V should not corrupt it.
+        let spv = assemble_minimal_vertex_shader();
+        let pass1 = freeze_spec_constant_ops(&spv);
+        let pass2 = freeze_spec_constant_ops(&pass1);
+        assert_eq!(pass1, pass2, "freeze_spec_constant_ops should be idempotent");
+
+        let pass1 = rewrite_copy_logical(&spv);
+        let pass2 = rewrite_copy_logical(&pass1);
+        assert_eq!(pass1, pass2, "rewrite_copy_logical should be idempotent");
+
+        let pass1 = rewrite_terminate_invocation(&spv);
+        let pass2 = rewrite_terminate_invocation(&pass1);
+        assert_eq!(pass1, pass2, "rewrite_terminate_invocation should be idempotent");
+
+        let pass1 = infer_readonly_storage(&spv);
+        let pass2 = infer_readonly_storage(&pass1);
+        assert_eq!(pass1, pass2, "infer_readonly_storage should be idempotent");
+    }
+
+    #[test]
+    fn test_empty_input() {
+        // All passes should handle empty/tiny input gracefully.
+        let empty: &[u8] = &[];
+        assert_eq!(freeze_spec_constant_ops(empty), empty);
+        assert_eq!(rewrite_copy_logical(empty), empty);
+        assert_eq!(rewrite_terminate_invocation(empty), empty);
+        assert_eq!(infer_readonly_storage(empty), empty);
+        assert_eq!(convert_push_constants_to_uniforms(empty), empty);
+        assert_eq!(split_combined_samplers(empty), empty);
+        let (result, _) = fix_depth2_images(empty);
+        assert_eq!(result, empty);
+    }
+
+    #[test]
+    fn test_header_only_input() {
+        // Just a SPIR-V header (5 words, 20 bytes) with no instructions.
+        let spv = spirv_header(1);
+        assert_eq!(freeze_spec_constant_ops(&spv), spv);
+        assert_eq!(rewrite_copy_logical(&spv), spv);
+        assert_eq!(rewrite_terminate_invocation(&spv), spv);
+        assert_eq!(infer_readonly_storage(&spv), spv);
+        assert_eq!(convert_push_constants_to_uniforms(&spv), spv);
+        assert_eq!(split_combined_samplers(&spv), spv);
+        let (result, _) = fix_depth2_images(&spv);
+        assert_eq!(result, spv);
+    }
+
+    // ==================== split_combined_samplers (additional tests) ====================
+
+    #[test]
+    fn test_split_combined_samplers_multiple_combined_vars() {
+        // Two combined image sampler variables at different bindings.
+        // Both should be split into separate image + sampler pairs.
+        let mut spv = spirv_header(30);
+
+        // OpEntryPoint Fragment %20 "main" %7 %17
+        {
+            let wc: u32 = 7;
+            push_word(&mut spv, (wc << 16) | 15);
+            push_word(&mut spv, 4); // Fragment
+            push_word(&mut spv, 20);
+            push_word(&mut spv, 0x6E69616D); // "main"
+            push_word(&mut spv, 0x00000000);
+            push_word(&mut spv, 7);  // combined sampler 1
+            push_word(&mut spv, 17); // combined sampler 2
+        }
+
+        // Decorations for var 7: set=0, binding=0
+        spv.extend(encode_inst(71, &[7, 34, 0]));
+        spv.extend(encode_inst(71, &[7, 33, 0]));
+        // Decorations for var 17: set=0, binding=1
+        spv.extend(encode_inst(71, &[17, 34, 0]));
+        spv.extend(encode_inst(71, &[17, 33, 1]));
+
+        // Types
+        // OpTypeFloat %1 32
+        spv.extend(encode_inst(22, &[1, 32]));
+        // OpTypeImage %2 %1 Dim=2D Depth=0 Arrayed=0 MS=0 Sampled=1 Format=0
+        spv.extend(encode_inst(25, &[2, 1, 1, 0, 0, 0, 1, 0]));
+        // OpTypeSampledImage %3 %2
+        spv.extend(encode_inst(27, &[3, 2]));
+        // OpTypePointer %4 UniformConstant %3
+        spv.extend(encode_inst(32, &[4, 0, 3]));
+        // OpTypeVoid %8
+        spv.extend(encode_inst(19, &[8]));
+        // OpTypeFunction %9 %8
+        spv.extend(encode_inst(33, &[9, 8]));
+
+        // Variables
+        // OpVariable %4 %7 UniformConstant
+        spv.extend(encode_inst(59, &[4, 7, 0]));
+        // OpVariable %4 %17 UniformConstant (second combined sampler)
+        spv.extend(encode_inst(59, &[4, 17, 0]));
+
+        // OpFunction %8 %20 None %9
+        spv.extend(encode_inst(54, &[8, 20, 0, 9]));
+        // OpLabel %21
+        spv.extend(encode_inst(248, &[21]));
+        // OpLoad %3 %12 %7
+        spv.extend(encode_inst(61, &[3, 12, 7]));
+        // OpLoad %3 %22 %17
+        spv.extend(encode_inst(61, &[3, 22, 17]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        let result = split_combined_samplers(&spv);
+
+        // Count OpSampledImage instructions - should be 2 (one per combined var)
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut sampled_image_count = 0;
+        let mut new_sampler_vars = 0;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 || pos + wc > total_words { break; }
+            if op == 86 { sampled_image_count += 1; } // OpSampledImage
+            if op == 59 && wc >= 4 { // OpVariable
+                let var_id = read_word(&result, pos + 2);
+                let sc = read_word(&result, pos + 3);
+                if sc == 0 && var_id != 7 && var_id != 17 {
+                    new_sampler_vars += 1;
+                }
+            }
+            pos += wc;
+        }
+        assert_eq!(sampled_image_count, 2, "Expected 2 OpSampledImage (one per combined var)");
+        assert_eq!(new_sampler_vars, 2, "Expected 2 new sampler variables");
+    }
+
+    #[test]
+    fn test_split_combined_samplers_2d_array_texture() {
+        // Combined sampler with 2D array texture (Dim=1, Arrayed=1).
+        let mut spv = spirv_header(20);
+
+        // OpEntryPoint Fragment %10 "main" %7
+        {
+            let wc: u32 = 6;
+            push_word(&mut spv, (wc << 16) | 15);
+            push_word(&mut spv, 4); // Fragment
+            push_word(&mut spv, 10);
+            push_word(&mut spv, 0x6E69616D);
+            push_word(&mut spv, 0x00000000);
+            push_word(&mut spv, 7);
+        }
+        spv.extend(encode_inst(71, &[7, 34, 0])); // DescriptorSet 0
+        spv.extend(encode_inst(71, &[7, 33, 0])); // Binding 0
+
+        // OpTypeFloat %1 32
+        spv.extend(encode_inst(22, &[1, 32]));
+        // OpTypeImage %2 %1 Dim=2D(1) Depth=0 Arrayed=1 MS=0 Sampled=1 Format=0
+        spv.extend(encode_inst(25, &[2, 1, 1, 0, 1, 0, 1, 0]));
+        // OpTypeSampledImage %3 %2
+        spv.extend(encode_inst(27, &[3, 2]));
+        // OpTypePointer %4 UniformConstant %3
+        spv.extend(encode_inst(32, &[4, 0, 3]));
+        // OpTypeVoid %8
+        spv.extend(encode_inst(19, &[8]));
+        // OpTypeFunction %9 %8
+        spv.extend(encode_inst(33, &[9, 8]));
+        // OpVariable %4 %7 UniformConstant
+        spv.extend(encode_inst(59, &[4, 7, 0]));
+        // Function
+        spv.extend(encode_inst(54, &[8, 10, 0, 9]));
+        spv.extend(encode_inst(248, &[11]));
+        spv.extend(encode_inst(61, &[3, 12, 7])); // OpLoad
+        spv.extend(encode_inst(253, &[]));
+        spv.extend(encode_inst(56, &[]));
+
+        let result = split_combined_samplers(&spv);
+        assert_ne!(result.len(), spv.len(), "Output should differ after splitting 2D array texture");
+
+        // Verify OpSampledImage was generated
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found_sampled_image = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 || pos + wc > total_words { break; }
+            if op == 86 { found_sampled_image = true; }
+            pos += wc;
+        }
+        assert!(found_sampled_image, "Expected OpSampledImage for 2D array texture split");
+    }
+
+    #[test]
+    fn test_split_combined_samplers_cube_texture() {
+        // Combined sampler with Cube texture (Dim=3).
+        let mut spv = spirv_header(20);
+
+        // OpEntryPoint Fragment %10 "main" %7
+        {
+            let wc: u32 = 6;
+            push_word(&mut spv, (wc << 16) | 15);
+            push_word(&mut spv, 4); // Fragment
+            push_word(&mut spv, 10);
+            push_word(&mut spv, 0x6E69616D);
+            push_word(&mut spv, 0x00000000);
+            push_word(&mut spv, 7);
+        }
+        spv.extend(encode_inst(71, &[7, 34, 0])); // DescriptorSet 0
+        spv.extend(encode_inst(71, &[7, 33, 0])); // Binding 0
+
+        // OpTypeFloat %1 32
+        spv.extend(encode_inst(22, &[1, 32]));
+        // OpTypeImage %2 %1 Dim=Cube(3) Depth=0 Arrayed=0 MS=0 Sampled=1 Format=0
+        spv.extend(encode_inst(25, &[2, 1, 3, 0, 0, 0, 1, 0]));
+        // OpTypeSampledImage %3 %2
+        spv.extend(encode_inst(27, &[3, 2]));
+        // OpTypePointer %4 UniformConstant %3
+        spv.extend(encode_inst(32, &[4, 0, 3]));
+        // OpTypeVoid %8
+        spv.extend(encode_inst(19, &[8]));
+        // OpTypeFunction %9 %8
+        spv.extend(encode_inst(33, &[9, 8]));
+        // OpVariable %4 %7 UniformConstant
+        spv.extend(encode_inst(59, &[4, 7, 0]));
+        // Function
+        spv.extend(encode_inst(54, &[8, 10, 0, 9]));
+        spv.extend(encode_inst(248, &[11]));
+        spv.extend(encode_inst(61, &[3, 12, 7])); // OpLoad
+        spv.extend(encode_inst(253, &[]));
+        spv.extend(encode_inst(56, &[]));
+
+        let result = split_combined_samplers(&spv);
+        assert_ne!(result.len(), spv.len(), "Output should differ after splitting Cube texture");
+
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut found_sampled_image = false;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 || pos + wc > total_words { break; }
+            if op == 86 { found_sampled_image = true; }
+            pos += wc;
+        }
+        assert!(found_sampled_image, "Expected OpSampledImage for Cube texture split");
+    }
+
+    #[test]
+    fn test_split_combined_samplers_binding_doubling() {
+        // Non-combined-sampler bindings should get their Binding value doubled,
+        // except PC_RING_BUFFER_BINDING which stays unchanged.
+        let mut spv = spirv_header(30);
+
+        // OpEntryPoint Fragment %20 "main" %7 %15
+        {
+            let wc: u32 = 7;
+            push_word(&mut spv, (wc << 16) | 15);
+            push_word(&mut spv, 4); // Fragment
+            push_word(&mut spv, 20);
+            push_word(&mut spv, 0x6E69616D);
+            push_word(&mut spv, 0x00000000);
+            push_word(&mut spv, 7);  // combined sampler
+            push_word(&mut spv, 15); // non-combined var (e.g. a UBO)
+        }
+
+        // Combined sampler at set=0, binding=2
+        spv.extend(encode_inst(71, &[7, 34, 0]));
+        spv.extend(encode_inst(71, &[7, 33, 2]));
+        // Non-combined var at set=0, binding=5
+        spv.extend(encode_inst(71, &[15, 34, 0]));
+        spv.extend(encode_inst(71, &[15, 33, 5]));
+        // PC ring buffer var at set=3, binding=120
+        spv.extend(encode_inst(71, &[16, 34, 3]));
+        spv.extend(encode_inst(71, &[16, 33, PC_RING_BUFFER_BINDING]));
+
+        // Types for combined sampler
+        spv.extend(encode_inst(22, &[1, 32])); // OpTypeFloat
+        spv.extend(encode_inst(25, &[2, 1, 1, 0, 0, 0, 1, 0])); // OpTypeImage 2D
+        spv.extend(encode_inst(27, &[3, 2])); // OpTypeSampledImage
+        spv.extend(encode_inst(32, &[4, 0, 3])); // OpTypePointer UC SampledImage
+        spv.extend(encode_inst(19, &[8])); // OpTypeVoid
+        spv.extend(encode_inst(33, &[9, 8])); // OpTypeFunction
+        // Non-combined var types
+        spv.extend(encode_inst(32, &[14, 2, 8])); // OpTypePointer Uniform void (dummy)
+
+        // Variables
+        spv.extend(encode_inst(59, &[4, 7, 0]));  // combined sampler
+        spv.extend(encode_inst(59, &[14, 15, 2])); // non-combined (Uniform)
+        spv.extend(encode_inst(59, &[14, 16, 2])); // PC ring buffer (Uniform)
+
+        // Function
+        spv.extend(encode_inst(54, &[8, 20, 0, 9]));
+        spv.extend(encode_inst(248, &[21]));
+        spv.extend(encode_inst(61, &[3, 12, 7])); // OpLoad combined
+        spv.extend(encode_inst(253, &[]));
+        spv.extend(encode_inst(56, &[]));
+
+        let result = split_combined_samplers(&spv);
+
+        // Check bindings in the output:
+        // combined sampler (var 7): image binding = 2*2+1 = 5, sampler binding = 2*2 = 4
+        // non-combined (var 15): binding = 5*2 = 10
+        // PC ring buffer (var 16): binding = 120 (unchanged)
+        let total_words = result.len() / 4;
+        let mut pos = 5;
+        let mut binding_15 = None;
+        let mut binding_16 = None;
+        let mut binding_7 = None;
+        while pos < total_words {
+            let w0 = read_word(&result, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 || pos + wc > total_words { break; }
+            if op == 71 && wc >= 4 {
+                let target = read_word(&result, pos + 1);
+                let deco = read_word(&result, pos + 2);
+                let val = read_word(&result, pos + 3);
+                if deco == 33 { // Binding
+                    if target == 15 { binding_15 = Some(val); }
+                    if target == 16 { binding_16 = Some(val); }
+                    if target == 7 { binding_7 = Some(val); }
+                }
+            }
+            pos += wc;
+        }
+        assert_eq!(binding_15, Some(10), "Non-combined binding 5 should become 10 (doubled)");
+        assert_eq!(binding_16, Some(PC_RING_BUFFER_BINDING),
+            "PC ring buffer binding should remain unchanged");
+        assert_eq!(binding_7, Some(5), "Combined sampler binding 2: image should get 2*2+1=5");
+    }
+
+    // ==================== fix_nonfinite_literals tests ====================
+
+    #[test]
+    fn test_fix_nonfinite_literals_infinity() {
+        let mut module = Module::default();
+        // Add an f32 infinity literal to global_expressions.
+        module.global_expressions.append(
+            Expression::Literal(Literal::F32(f32::INFINITY)),
+            naga::Span::UNDEFINED,
+        );
+        fix_nonfinite_literals(&mut module);
+        // Should be clamped to f32::MAX.
+        for (_, expr) in module.global_expressions.iter() {
+            if let Expression::Literal(Literal::F32(v)) = *expr {
+                assert_eq!(v, f32::MAX, "Infinity should be clamped to f32::MAX");
+            }
+        }
+    }
+
+    #[test]
+    fn test_fix_nonfinite_literals_neg_infinity() {
+        let mut module = Module::default();
+        module.global_expressions.append(
+            Expression::Literal(Literal::F32(f32::NEG_INFINITY)),
+            naga::Span::UNDEFINED,
+        );
+        fix_nonfinite_literals(&mut module);
+        for (_, expr) in module.global_expressions.iter() {
+            if let Expression::Literal(Literal::F32(v)) = *expr {
+                assert_eq!(v, f32::MIN, "Negative infinity should be clamped to f32::MIN");
+            }
+        }
+    }
+
+    #[test]
+    fn test_fix_nonfinite_literals_nan() {
+        let mut module = Module::default();
+        module.global_expressions.append(
+            Expression::Literal(Literal::F32(f32::NAN)),
+            naga::Span::UNDEFINED,
+        );
+        fix_nonfinite_literals(&mut module);
+        for (_, expr) in module.global_expressions.iter() {
+            if let Expression::Literal(Literal::F32(v)) = *expr {
+                assert_eq!(v, f32::MAX, "NaN should be clamped to f32::MAX");
+            }
+        }
+    }
+
+    #[test]
+    fn test_fix_nonfinite_literals_normal_unchanged() {
+        let mut module = Module::default();
+        module.global_expressions.append(
+            Expression::Literal(Literal::F32(42.0)),
+            naga::Span::UNDEFINED,
+        );
+        module.global_expressions.append(
+            Expression::Literal(Literal::F32(-1.5)),
+            naga::Span::UNDEFINED,
+        );
+        fix_nonfinite_literals(&mut module);
+        let vals: Vec<f32> = module.global_expressions.iter()
+            .filter_map(|(_, expr)| match *expr {
+                Expression::Literal(Literal::F32(v)) => Some(v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vals, vec![42.0, -1.5], "Normal values should be unchanged");
+    }
+
+    #[test]
+    fn test_fix_nonfinite_literals_f64_infinity() {
+        let mut module = Module::default();
+        module.global_expressions.append(
+            Expression::Literal(Literal::F64(f64::INFINITY)),
+            naga::Span::UNDEFINED,
+        );
+        module.global_expressions.append(
+            Expression::Literal(Literal::F64(f64::NAN)),
+            naga::Span::UNDEFINED,
+        );
+        fix_nonfinite_literals(&mut module);
+        let vals: Vec<f64> = module.global_expressions.iter()
+            .filter_map(|(_, expr)| match *expr {
+                Expression::Literal(Literal::F64(v)) => Some(v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vals, vec![f64::MAX, f64::MAX],
+            "f64 infinity/NaN should be clamped to f64::MAX");
+    }
+
+    #[test]
+    fn test_fix_nonfinite_literals_in_function() {
+        // Verify that literals inside functions (not just global_expressions) are fixed.
+        let mut module = Module::default();
+        let mut func = naga::Function::default();
+        func.expressions.append(
+            Expression::Literal(Literal::F32(f32::INFINITY)),
+            naga::Span::UNDEFINED,
+        );
+        module.functions.append(func, naga::Span::UNDEFINED);
+        fix_nonfinite_literals(&mut module);
+        for (_, func) in module.functions.iter() {
+            for (_, expr) in func.expressions.iter() {
+                if let Expression::Literal(Literal::F32(v)) = *expr {
+                    assert_eq!(v, f32::MAX, "Infinity in function should be clamped");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_fix_nonfinite_literals_in_entry_point() {
+        // Verify that literals inside entry point functions are fixed.
+        let mut module = Module::default();
+        let mut ep = naga::EntryPoint {
+            name: "main".to_string(),
+            stage: naga::ShaderStage::Vertex,
+            early_depth_test: None,
+            workgroup_size: [0, 0, 0],
+            workgroup_size_overrides: None,
+            function: naga::Function::default(),
+            mesh_info: None,
+            task_payload: None,
+        };
+        ep.function.expressions.append(
+            Expression::Literal(Literal::F32(f32::NEG_INFINITY)),
+            naga::Span::UNDEFINED,
+        );
+        module.entry_points.push(ep);
+        fix_nonfinite_literals(&mut module);
+        for ep in &module.entry_points {
+            for (_, expr) in ep.function.expressions.iter() {
+                if let Expression::Literal(Literal::F32(v)) = *expr {
+                    assert_eq!(v, f32::MIN, "Neg infinity in entry point should be clamped");
+                }
+            }
+        }
+    }
+
+    // ==================== flatten_binding_arrays tests ====================
+
+    #[test]
+    fn test_flatten_binding_arrays_known_size() {
+        use std::num::NonZeroU32;
+        let mut module = Module::default();
+
+        // First insert a base type for the binding array to reference.
+        let base_ty = module.types.insert(
+            Type {
+                name: Some("sampler".to_string()),
+                inner: TypeInner::Sampler { comparison: false },
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        // Insert a BindingArray type with size > 1.
+        let _ba_handle = module.types.insert(
+            Type {
+                name: Some("binding_array".to_string()),
+                inner: TypeInner::BindingArray {
+                    base: base_ty,
+                    size: naga::ArraySize::Constant(NonZeroU32::new(8).unwrap()),
+                },
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        flatten_binding_arrays(&mut module);
+
+        // Verify the binding array was flattened to size 1.
+        let mut found = false;
+        for (_, ty) in module.types.iter() {
+            if let TypeInner::BindingArray { size, .. } = ty.inner {
+                found = true;
+                match size {
+                    naga::ArraySize::Constant(n) => {
+                        assert_eq!(n.get(), 1, "BindingArray should be flattened to size 1");
+                    }
+                    _ => panic!("Expected Constant size after flattening"),
+                }
+            }
+        }
+        assert!(found, "Should still have a BindingArray type");
+    }
+
+    #[test]
+    fn test_flatten_binding_arrays_dynamic_size() {
+        let mut module = Module::default();
+
+        let base_ty = module.types.insert(
+            Type {
+                name: Some("sampler".to_string()),
+                inner: TypeInner::Sampler { comparison: false },
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        let _ba_handle = module.types.insert(
+            Type {
+                name: Some("dyn_array".to_string()),
+                inner: TypeInner::BindingArray {
+                    base: base_ty,
+                    size: naga::ArraySize::Dynamic,
+                },
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        flatten_binding_arrays(&mut module);
+
+        let mut found = false;
+        for (_, ty) in module.types.iter() {
+            if let TypeInner::BindingArray { size, .. } = ty.inner {
+                found = true;
+                match size {
+                    naga::ArraySize::Constant(n) => {
+                        assert_eq!(n.get(), 1, "Dynamic BindingArray should be flattened to size 1");
+                    }
+                    _ => panic!("Expected Constant size after flattening dynamic array"),
+                }
+            }
+        }
+        assert!(found, "Should still have a BindingArray type");
+    }
+
+    #[test]
+    fn test_flatten_binding_arrays_size_one_unchanged() {
+        use std::num::NonZeroU32;
+        let mut module = Module::default();
+
+        let base_ty = module.types.insert(
+            Type {
+                name: Some("sampler".to_string()),
+                inner: TypeInner::Sampler { comparison: false },
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        let _ba_handle = module.types.insert(
+            Type {
+                name: Some("already_one".to_string()),
+                inner: TypeInner::BindingArray {
+                    base: base_ty,
+                    size: naga::ArraySize::Constant(NonZeroU32::new(1).unwrap()),
+                },
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        flatten_binding_arrays(&mut module);
+
+        for (_, ty) in module.types.iter() {
+            if let TypeInner::BindingArray { size, .. } = ty.inner {
+                match size {
+                    naga::ArraySize::Constant(n) => {
+                        assert_eq!(n.get(), 1, "Size-1 array should remain at 1");
+                    }
+                    _ => panic!("Size should remain Constant(1)"),
+                }
+            }
+        }
+    }
+
+    // ==================== fix_writeonly_storage tests ====================
+
+    #[test]
+    fn test_fix_writeonly_storage_store_only() {
+        let mut module = Module::default();
+
+        // We need a type to reference.
+        let ty = module.types.insert(
+            Type {
+                name: Some("buf".to_string()),
+                inner: TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Uint, width: 4 }),
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        // Storage var with STORE only (no LOAD).
+        module.global_variables.append(
+            naga::GlobalVariable {
+                name: Some("write_buf".to_string()),
+                space: AddressSpace::Storage {
+                    access: StorageAccess::STORE,
+                },
+                binding: Some(naga::ResourceBinding { group: 0, binding: 0 }),
+                ty,
+                init: None,
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        fix_writeonly_storage(&mut module);
+
+        for (_, var) in module.global_variables.iter() {
+            if let AddressSpace::Storage { access } = var.space {
+                assert!(
+                    access.contains(StorageAccess::LOAD),
+                    "STORE-only var should get LOAD added"
+                );
+                assert!(
+                    access.contains(StorageAccess::STORE),
+                    "STORE should still be present"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_fix_writeonly_storage_load_store_unchanged() {
+        let mut module = Module::default();
+
+        let ty = module.types.insert(
+            Type {
+                name: Some("buf".to_string()),
+                inner: TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Uint, width: 4 }),
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        // Storage var with both LOAD and STORE.
+        module.global_variables.append(
+            naga::GlobalVariable {
+                name: Some("rw_buf".to_string()),
+                space: AddressSpace::Storage {
+                    access: StorageAccess::LOAD | StorageAccess::STORE,
+                },
+                binding: Some(naga::ResourceBinding { group: 0, binding: 0 }),
+                ty,
+                init: None,
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        fix_writeonly_storage(&mut module);
+
+        for (_, var) in module.global_variables.iter() {
+            if let AddressSpace::Storage { access } = var.space {
+                assert_eq!(
+                    access,
+                    StorageAccess::LOAD | StorageAccess::STORE,
+                    "LOAD|STORE should be unchanged"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_fix_writeonly_storage_non_storage_unchanged() {
+        let mut module = Module::default();
+
+        let ty = module.types.insert(
+            Type {
+                name: Some("buf".to_string()),
+                inner: TypeInner::Scalar(naga::Scalar { kind: naga::ScalarKind::Uint, width: 4 }),
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        // Uniform var (not Storage) - should not be affected.
+        module.global_variables.append(
+            naga::GlobalVariable {
+                name: Some("ubo".to_string()),
+                space: AddressSpace::Uniform,
+                binding: Some(naga::ResourceBinding { group: 0, binding: 0 }),
+                ty,
+                init: None,
+            },
+            naga::Span::UNDEFINED,
+        );
+
+        fix_writeonly_storage(&mut module);
+
+        for (_, var) in module.global_variables.iter() {
+            assert_eq!(var.space, AddressSpace::Uniform, "Uniform should be unchanged");
+        }
+    }
+
+    // ==================== Additional end-to-end spirv_to_wgsl tests ====================
+
+    /// Assemble a minimal valid SPIR-V compute shader.
+    fn assemble_minimal_compute_shader() -> Vec<u8> {
+        let mut spv = Vec::new();
+
+        // Header
+        push_word(&mut spv, 0x07230203);
+        push_word(&mut spv, 0x00010300);
+        push_word(&mut spv, 0);
+        push_word(&mut spv, 10);
+        push_word(&mut spv, 0);
+
+        // OpCapability Shader
+        spv.extend(encode_inst(17, &[1]));
+
+        // OpMemoryModel Logical GLSL450
+        spv.extend(encode_inst(14, &[0, 1]));
+
+        // OpEntryPoint GLCompute %5 "main"
+        {
+            let wc: u32 = 5;
+            push_word(&mut spv, (wc << 16) | 15);
+            push_word(&mut spv, 5); // GLCompute execution model
+            push_word(&mut spv, 5); // main function
+            push_word(&mut spv, 0x6E69616D); // "main"
+            push_word(&mut spv, 0x00000000);
+        }
+
+        // OpExecutionMode %5 LocalSize 1 1 1
+        spv.extend(encode_inst(16, &[5, 17, 1, 1, 1])); // 17 = LocalSize
+
+        // OpTypeVoid %1
+        spv.extend(encode_inst(19, &[1]));
+        // OpTypeFunction %2 %1
+        spv.extend(encode_inst(33, &[2, 1]));
+
+        // OpFunction %1 %5 None %2
+        spv.extend(encode_inst(54, &[1, 5, 0, 2]));
+        // OpLabel %6
+        spv.extend(encode_inst(248, &[6]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        spv
+    }
+
+    #[test]
+    fn test_end_to_end_compute_shader() {
+        let spirv = assemble_minimal_compute_shader();
+
+        // Run through the full pipeline.
+        let spirv_bytes = freeze_spec_constant_ops(&spirv);
+        let spirv_bytes = rewrite_copy_logical(&spirv_bytes);
+        let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
+        let spirv_bytes = infer_readonly_storage(&spirv_bytes);
+        let spirv_bytes = convert_push_constants_to_uniforms(&spirv_bytes);
+        let spirv_bytes = split_combined_samplers(&spirv_bytes);
+        let (spirv_bytes, _) = fix_depth2_images(&spirv_bytes);
+
+        let opts = spv::Options {
+            adjust_coordinate_space: true,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+        let module = spv::parse_u8_slice(&spirv_bytes, &opts);
+        assert!(module.is_ok(), "Compute SPIR-V parse failed: {:?}", module.err());
+        let mut module = module.unwrap();
+
+        fix_writeonly_storage(&mut module);
+        fix_nonfinite_literals(&mut module);
+        strip_point_size(&mut module);
+        flatten_binding_arrays(&mut module);
+
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module);
+        assert!(info.is_ok(), "Compute validation failed: {:?}", info.err());
+        let info = info.unwrap();
+
+        use naga::back::PipelineConstants;
+        use naga::back::pipeline_constants::process_overrides;
+        let pipeline_constants = PipelineConstants::default();
+        let (module, info) = process_overrides(&module, &info, None, &pipeline_constants)
+            .expect("process_overrides failed");
+        let mut module = module.into_owned();
+        module.overrides = naga::Arena::new();
+
+        use naga::back::wgsl;
+        let wgsl_result = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty());
+        assert!(wgsl_result.is_ok(), "Compute WGSL write failed: {:?}", wgsl_result.err());
+        let wgsl = wgsl_result.unwrap();
+
+        assert!(wgsl.contains("@compute"), "Expected @compute in WGSL output");
+        assert!(wgsl.contains("@workgroup_size"), "Expected @workgroup_size in WGSL output");
+    }
+
+    /// Assemble a minimal compute shader with a storage buffer (tests infer_readonly).
+    fn assemble_compute_with_storage_buffer() -> Vec<u8> {
+        let mut spv = Vec::new();
+
+        // Header
+        push_word(&mut spv, 0x07230203);
+        push_word(&mut spv, 0x00010300);
+        push_word(&mut spv, 0);
+        push_word(&mut spv, 30);
+        push_word(&mut spv, 0);
+
+        // === Section 1: Capabilities ===
+        // OpCapability Shader
+        spv.extend(encode_inst(17, &[1]));
+
+        // === Section 2: Memory model ===
+        // OpMemoryModel Logical GLSL450
+        spv.extend(encode_inst(14, &[0, 1]));
+
+        // === Section 3: Entry points ===
+        // OpEntryPoint GLCompute %10 "main" %7
+        {
+            let wc: u32 = 6;
+            push_word(&mut spv, (wc << 16) | 15);
+            push_word(&mut spv, 5); // GLCompute
+            push_word(&mut spv, 10);
+            push_word(&mut spv, 0x6E69616D); // "main"
+            push_word(&mut spv, 0x00000000);
+            push_word(&mut spv, 7); // interface var (storage buffer)
+        }
+
+        // === Section 4: Execution modes ===
+        // OpExecutionMode %10 LocalSize 1 1 1
+        spv.extend(encode_inst(16, &[10, 17, 1, 1, 1]));
+
+        // === Section 5: Annotations (all decorations) ===
+        // OpDecorate %7 DescriptorSet 0
+        spv.extend(encode_inst(71, &[7, 34, 0]));
+        // OpDecorate %7 Binding 0
+        spv.extend(encode_inst(71, &[7, 33, 0]));
+        // OpDecorate %6 Block
+        spv.extend(encode_inst(71, &[6, 2]));
+        // OpDecorate %5 ArrayStride 4
+        spv.extend(encode_inst(71, &[5, 6, 4])); // decoration 6 = ArrayStride
+        // OpMemberDecorate %6 0 Offset 0
+        spv.extend(encode_inst(72, &[6, 0, 35, 0])); // 72=OpMemberDecorate, 35=Offset
+
+        // === Section 6: Type declarations ===
+        // OpTypeVoid %1
+        spv.extend(encode_inst(19, &[1]));
+        // OpTypeFloat %3 32
+        spv.extend(encode_inst(22, &[3, 32]));
+        // OpTypeInt %11 32 0
+        spv.extend(encode_inst(21, &[11, 32, 0]));
+        // OpTypeRuntimeArray %5 %3  (op=29)
+        spv.extend(encode_inst(29, &[5, 3]));
+        // OpTypeStruct %6 %5
+        spv.extend(encode_inst(30, &[6, 5]));
+        // OpTypeFunction %2 %1
+        spv.extend(encode_inst(33, &[2, 1]));
+        // OpTypePointer %4 StorageBuffer %6  (StorageBuffer=12)
+        spv.extend(encode_inst(32, &[4, 12, 6]));
+        // OpTypePointer %13 StorageBuffer %3
+        spv.extend(encode_inst(32, &[13, 12, 3]));
+
+        // === Section 7: Global variables and constants ===
+        // OpVariable %4 %7 StorageBuffer
+        spv.extend(encode_inst(59, &[4, 7, 12]));
+        // OpConstant %3 %8 1.0f
+        spv.extend(encode_inst(43, &[3, 8, 0x3F800000]));
+        // OpConstant %11 %12 0
+        spv.extend(encode_inst(43, &[11, 12, 0]));
+
+        // === Section 8: Functions ===
+        // OpFunction %1 %10 None %2
+        spv.extend(encode_inst(54, &[1, 10, 0, 2]));
+        // OpLabel %14
+        spv.extend(encode_inst(248, &[14]));
+        // OpAccessChain %13 %15 %7 %12 %12  (get pointer to buf.data[0])
+        spv.extend(encode_inst(65, &[13, 15, 7, 12, 12]));
+        // OpLoad %3 %16 %15  (read from storage buffer - so it's read-only!)
+        spv.extend(encode_inst(61, &[3, 16, 15]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        spv
+    }
+
+    #[test]
+    fn test_end_to_end_storage_buffer_infer_readonly() {
+        let spirv = assemble_compute_with_storage_buffer();
+
+        // Run through the full pipeline.
+        let spirv_bytes = freeze_spec_constant_ops(&spirv);
+        let spirv_bytes = rewrite_copy_logical(&spirv_bytes);
+        let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
+        let spirv_bytes = infer_readonly_storage(&spirv_bytes);
+
+        // Verify NonWritable was added (the buffer is only read, never stored)
+        let total_words = spirv_bytes.len() / 4;
+        let mut pos = 5;
+        let mut found_nonwritable = false;
+        while pos < total_words {
+            let w0 = read_word(&spirv_bytes, pos);
+            let wc = (w0 >> 16) as usize;
+            let op = (w0 & 0xFFFF) as u16;
+            if wc == 0 || pos + wc > total_words { break; }
+            if op == 71 && wc >= 3 {
+                let target = read_word(&spirv_bytes, pos + 1);
+                let deco = read_word(&spirv_bytes, pos + 2);
+                if target == 7 && deco == DECO_NON_WRITABLE {
+                    found_nonwritable = true;
+                }
+            }
+            pos += wc;
+        }
+        assert!(found_nonwritable, "Storage buffer var 7 (read-only) should get NonWritable");
+
+        // Continue the pipeline to full WGSL generation.
+        let spirv_bytes = convert_push_constants_to_uniforms(&spirv_bytes);
+        let spirv_bytes = split_combined_samplers(&spirv_bytes);
+        let (spirv_bytes, _) = fix_depth2_images(&spirv_bytes);
+
+        let opts = spv::Options {
+            adjust_coordinate_space: true,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+        let module = spv::parse_u8_slice(&spirv_bytes, &opts);
+        assert!(module.is_ok(), "Storage buffer SPIR-V parse failed: {:?}", module.err());
+        let mut module = module.unwrap();
+
+        fix_writeonly_storage(&mut module);
+        fix_nonfinite_literals(&mut module);
+        strip_point_size(&mut module);
+        flatten_binding_arrays(&mut module);
+
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module);
+        assert!(info.is_ok(), "Storage buffer validation failed: {:?}", info.err());
+        let info = info.unwrap();
+
+        use naga::back::PipelineConstants;
+        use naga::back::pipeline_constants::process_overrides;
+        let pipeline_constants = PipelineConstants::default();
+        let (module, info) = process_overrides(&module, &info, None, &pipeline_constants)
+            .expect("process_overrides failed");
+        let mut module = module.into_owned();
+        module.overrides = naga::Arena::new();
+
+        use naga::back::wgsl;
+        let wgsl_result = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty());
+        assert!(wgsl_result.is_ok(), "Storage buffer WGSL write failed: {:?}", wgsl_result.err());
+        let wgsl = wgsl_result.unwrap();
+
+        // The buffer should be read-only since NonWritable was inferred.
+        assert!(wgsl.contains("var<storage"), "Expected var<storage> in WGSL output");
+        assert!(wgsl.contains("@compute"), "Expected @compute in WGSL output");
+    }
+
+    #[test]
+    fn test_end_to_end_invalid_spirv_returns_error() {
+        // Completely invalid SPIR-V (wrong magic, garbage data) should return
+        // an error, not panic.
+        let garbage: &[u8] = &[0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+        // spirv_to_wgsl expects JsError, but we can test the pipeline directly.
+        // The pipeline starts with freeze_spec_constant_ops, which won't crash.
+        // The actual error should come from naga's parse_u8_slice.
+        let spirv_bytes = freeze_spec_constant_ops(garbage);
+        let spirv_bytes = rewrite_copy_logical(&spirv_bytes);
+        let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
+        let spirv_bytes = infer_readonly_storage(&spirv_bytes);
+        let spirv_bytes = convert_push_constants_to_uniforms(&spirv_bytes);
+        let spirv_bytes = split_combined_samplers(&spirv_bytes);
+        let (spirv_bytes, _) = fix_depth2_images(&spirv_bytes);
+
+        let opts = spv::Options {
+            adjust_coordinate_space: true,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+        let result = spv::parse_u8_slice(&spirv_bytes, &opts);
+        assert!(result.is_err(), "Invalid SPIR-V should fail parsing");
+    }
+
+    #[test]
+    fn test_end_to_end_empty_spirv_returns_error() {
+        // Empty byte slice should fail at parsing.
+        let empty: &[u8] = &[];
+        let opts = spv::Options {
+            adjust_coordinate_space: true,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+        let result = spv::parse_u8_slice(empty, &opts);
+        assert!(result.is_err(), "Empty SPIR-V should fail parsing");
+    }
 }

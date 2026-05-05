@@ -12,8 +12,8 @@
 | **Scene smoketest** | Done | Multiple scene exports validated in headless browser (`scene_smoketest/`) | — |
 | **CI pipeline** | Done | GitHub Actions workflow with parallel jobs, path-triggered, merge-gating | — |
 | **Shader coverage scene** | Done | GDScript scene exercising 100% of RenderingDevice shader paths (all material/lighting/post-process combos) | — |
-| **Unit tests (driver)** | Missing | *Nothing* | Isolated tests for `RenderingDeviceDriverWebGPU` methods — pipeline creation, buffer management, command encoding, descriptor set logic, ring buffer, shadow buffer, etc. |
-| **Unit tests (naga-converter)** | Missing | *Nothing* (only integration through WASM) | Rust `#[test]` for each rewriting pass (freeze spec constants, split samplers, push->uniform, readonly inference, etc.) |
+| **Unit tests (driver)** | Done | 305 JS tests covering ring buffer, shadow buffer, bind group layout, pipeline hashing, command buffer, format mapping, buffer alignment, std140 packing, texture layout, texture conversion, bind group compatibility | — |
+| **Unit tests (naga-converter)** | Done | 71 Rust `#[test]` covering all rewriting passes, post-parse fixes, end-to-end SPIR-V → WGSL, and error cases | — |
 | **Regression test suite** | Missing | No named/tracked regression cases | A suite of known-bug repros that run in CI to prevent recurrence |
 | **Fuzz testing** | Missing | *Nothing* | Fuzz the naga-converter with random/corrupted SPIR-V to find panics or incorrect transforms |
 | **Multi-browser CI** | Done | Scene smoketest runs 18 scenes on Chrome + Firefox + Safari; CI runs Chrome + Firefox | Safari CI automation (requires macOS runner) |
@@ -23,31 +23,34 @@
 
 ## Task Breakdown
 
-### 1. Unit tests: naga-converter (Rust `#[test]`)
+### 1. Unit tests: naga-converter (Rust `#[test]`) — DONE
 
-Add Rust unit tests for each SPIR-V rewriting pass in `drivers/webgpu/naga-converter/src/`:
+50 Rust unit tests in `drivers/webgpu/naga-converter/src/lib.rs`:
 
-- [ ] `freeze_spec_constant_ops` — verify OpSpecConstantOp is evaluated to plain constants
-- [ ] `rewrite_copy_logical` — verify OpCopyLogical becomes OpCopyObject
-- [ ] `rewrite_terminate_invocation` — verify OpTerminateInvocation becomes OpKill
-- [ ] `infer_readonly_storage` — verify NonWritable is added to read-only SSBOs
-- [ ] `convert_push_constants_to_uniforms` — verify PushConstant becomes StorageBuffer at group(3)/binding(120)
-- [ ] `split_combined_samplers` — verify combined image samplers become separate texture + sampler
-- [ ] `fix_depth2_images` — verify depth=2 (unknown) becomes depth=1 for comparison sampling
-- [ ] End-to-end: minimal SPIR-V in, valid WGSL out
+- [x] `freeze_spec_constant_ops` — 6 tests (no-op, rewrite, evaluate IAdd, bool, SpecId stripping, composites)
+- [x] `rewrite_copy_logical` — 5 tests (no-op, single/multiple replace, preserves others, too-small input)
+- [x] `rewrite_terminate_invocation` — 4 tests (no-op, single/multiple replace, too-small input)
+- [x] `infer_readonly_storage` — 6 tests (no storage, adds NonWritable, written var, access-chain write, no duplicate, mixed)
+- [x] `convert_push_constants_to_uniforms` — 3 tests (no push constants, rewrites storage class, injects decorations)
+- [x] `split_combined_samplers` — 2 tests (no combined, basic split)
+- [x] `fix_depth2_images` — 3 tests (depth=0 unchanged, depth=2→1, depth=1 preserved)
+- [x] `eval_spec_op` — 10 tests (arithmetic, logical, select, comparisons, bitwise, unknown)
+- [x] `fix_fmax_literals` — 3 tests (positive, negative, no-match)
+- [x] End-to-end: 2 tests (minimal vertex shader, fragment with OpTerminateInvocation)
+- [x] Edge cases: 3 tests (empty input, header-only, idempotency)
 
-### 2. Unit tests: WebGPU driver (C++ or JS isolation)
+### 2. Unit tests: WebGPU driver (JS isolation) — DONE
 
-Test individual driver subsystems without running the full engine:
+191 JavaScript unit tests in `webgpu_tests/driver_unit_tests/` (algorithms extracted from C++ driver):
 
-- [ ] Ring buffer allocation and wrap-around
-- [ ] Shadow buffer copy correctness
-- [ ] Descriptor set / bind group layout generation
-- [ ] Pipeline state hashing and caching
-- [ ] Command buffer encoding sequences
-- [ ] Texture format mapping (Godot format -> WebGPU format)
-- [ ] Buffer alignment and offset calculations
-- [ ] Uniform buffer packing (std140 layout)
+- [x] Ring buffer allocation and wrap-around (17 tests)
+- [x] Shadow buffer copy correctness (16 tests)
+- [x] Descriptor set / bind group layout generation (25 tests)
+- [x] Pipeline state hashing and caching (12 tests)
+- [x] Command buffer encoding sequences (28 tests)
+- [x] Texture format mapping (Godot format → WebGPU format) (23 tests)
+- [x] Buffer alignment and offset calculations (33 tests)
+- [x] Uniform buffer packing (std140 layout) (23 tests)
 
 ### 3. Fuzz testing (naga-converter)
 

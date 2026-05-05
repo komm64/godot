@@ -118,10 +118,28 @@ run_test "SPIR-V → WGSL validation" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Scene Smoketest (multi-browser)
+# 2. Unit Tests (naga-converter + driver)
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 2: Scene Smoketest (18 scenes × browsers)"
+echo "  Stage 2: Unit Tests"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+run_test "Naga-converter Rust unit tests (71)" \
+    "$SCRIPT_DIR/../drivers/webgpu/naga-converter" \
+    cargo test --lib
+
+run_test "Driver unit tests (305)" \
+    "$SCRIPT_DIR/driver_unit_tests" \
+    node run_tests.mjs
+
+echo ""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. Scene Smoketest (multi-browser)
+# ──────────────────────────────────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Stage 3: Scene Smoketest (18 scenes × browsers)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -152,10 +170,10 @@ if [[ "$QUICK" == true ]]; then
 else
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. Resource Lifecycle
+# 4. Resource Lifecycle
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 3: Resource Lifecycle Stress Test"
+echo "  Stage 4: Resource Lifecycle Stress Test"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -168,10 +186,10 @@ run_test "Resource lifecycle stress tests" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Screenshot Comparison
+# 5. Screenshot Comparison
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 4: Screenshot Comparison (Chrome + Firefox)"
+echo "  Stage 5: Screenshot Comparison (Chrome + Firefox)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -184,10 +202,10 @@ run_test "Screenshot comparison" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Smoke Test (requires pre-exported test project)
+# 6. Smoke Test (requires pre-exported test project)
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 5: Engine Smoke Test (test_project)"
+echo "  Stage 6: Engine Smoke Test (test_project)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 

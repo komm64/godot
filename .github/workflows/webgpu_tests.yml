@@ -63,6 +63,46 @@ jobs:
           retention-days: 7
 
   # ═══════════════════════════════════════════════════════════════════════════════
+  # Naga-Converter Unit Tests: Rust #[test] for each SPIR-V rewriting pass
+  # ═══════════════════════════════════════════════════════════════════════════════
+  naga-unit-tests:
+    runs-on: ubuntu-24.04
+    name: Naga-Converter Unit Tests (Rust)
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cargo test
+        working-directory: drivers/webgpu/naga-converter
+        run: cargo test --lib
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # Driver Unit Tests: Algorithmic correctness of WebGPU driver subsystems
+  # ═══════════════════════════════════════════════════════════════════════════════
+  driver-unit-tests:
+    runs-on: ubuntu-24.04
+    name: Driver Unit Tests (JS)
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run driver unit tests
+        working-directory: webgpu_tests/driver_unit_tests
+        run: node run_tests.mjs
+
+  # ═══════════════════════════════════════════════════════════════════════════════
   # Engine Build: Compile WebGPU export template + dump all SPIR-V
   # ═══════════════════════════════════════════════════════════════════════════════
   build-webgpu:
@@ -309,7 +349,7 @@ jobs:
   test-summary:
     runs-on: ubuntu-24.04
     name: Test Summary
-    needs: [shader-corpus, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
+    needs: [shader-corpus, naga-unit-tests, driver-unit-tests, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
     if: always()
     steps:
       - name: Check results
@@ -319,6 +359,8 @@ jobs:
           echo "╚══════════════════════════════════════════════════════════╝"
           echo ""
           echo "  Shader Corpus:        ${{ needs.shader-corpus.result }}"
+          echo "  Naga Unit Tests:      ${{ needs.naga-unit-tests.result }}"
+          echo "  Driver Unit Tests:    ${{ needs.driver-unit-tests.result }}"
           echo "  SPIR-V Validation:    ${{ needs.validate-spirv.result }}"
           echo "  Smoke Test:           ${{ needs.smoke-test.result }}"
           echo "  Scene Smoketest:      ${{ needs.scene-smoketest.result }}"
@@ -330,6 +372,14 @@ jobs:
 
           if [ "${{ needs.shader-corpus.result }}" = "failure" ]; then
             echo "::error::Shader corpus tests failed"
+            FAILED=1
+          fi
+          if [ "${{ needs.naga-unit-tests.result }}" = "failure" ]; then
+            echo "::error::Naga-converter unit tests failed"
+            FAILED=1
+          fi
+          if [ "${{ needs.driver-unit-tests.result }}" = "failure" ]; then
+            echo "::error::Driver unit tests failed"
             FAILED=1
           fi
           if [ "${{ needs.validate-spirv.result }}" = "failure" ]; then
