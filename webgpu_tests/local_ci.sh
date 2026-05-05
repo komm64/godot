@@ -167,26 +167,26 @@ echo ""
 # 4. Scene Smoketest (multi-browser)
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 4: Scene Smoketest (18 scenes x browsers)"
+echo "  Stage 4: Scene Smoketest (19 scenes x browsers)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-run_test "Scene smoketest — Chrome (18 scenes)" \
+run_test "Scene smoketest — Chrome (19 scenes)" \
     "$SCRIPT_DIR/scene_smoketest" \
     node run_scenes.mjs --browser chrome --timeout 30000
 
-run_test "Scene smoketest — Firefox (18 scenes)" \
+run_test "Scene smoketest — Firefox (19 scenes)" \
     "$SCRIPT_DIR/scene_smoketest" \
     node run_scenes.mjs --browser firefox --timeout 30000
 
 if [[ "$NO_SAFARI" == false && "$(uname)" == "Darwin" ]]; then
-    run_test "Scene smoketest — Safari (18 scenes)" \
+    run_test "Scene smoketest — Safari (19 scenes)" \
         "$SCRIPT_DIR/scene_smoketest" \
         node run_scenes.mjs --browser safari --timeout 30000
 else
-    printf "${BOLD}▶ %-40s${NC}${YELLOW}SKIP${NC} (--no-safari or not macOS)\n" "Scene smoketest — Safari (18 scenes)"
+    printf "${BOLD}▶ %-40s${NC}${YELLOW}SKIP${NC} (--no-safari or not macOS)\n" "Scene smoketest — Safari (19 scenes)"
     SKIPPED=$((SKIPPED + 1))
-    RESULTS+=("SKIP  Scene smoketest — Safari (18 scenes)")
+    RESULTS+=("SKIP  Scene smoketest — Safari (19 scenes)")
 fi
 
 echo ""

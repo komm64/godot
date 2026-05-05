@@ -83,7 +83,7 @@ const ERROR_CAPTURE_SCRIPT = `
 
 // ─── HTTP Server ─────────────────────────────────────────────────────────────
 
-function startServer(dir, { injectScript = false } = {}) {
+function startServer(dir, { injectScript = false, sceneInjectScript = null } = {}) {
     return new Promise((resolve) => {
         const server = createServer((req, res) => {
             const url = req.url.split('?')[0];
@@ -104,10 +104,14 @@ function startServer(dir, { injectScript = false } = {}) {
 
             let content = readFileSync(filePath);
 
-            // Inject error-capture script into HTML pages
+            // Inject error-capture script and per-scene config into HTML pages
             if (injectScript && ext === '.html') {
                 let html = content.toString('utf8');
-                html = html.replace('<head>', '<head>' + ERROR_CAPTURE_SCRIPT);
+                let injected = ERROR_CAPTURE_SCRIPT;
+                if (sceneInjectScript) {
+                    injected += `\n<script>${sceneInjectScript}</script>\n`;
+                }
+                html = html.replace('<head>', '<head>' + injected);
                 content = Buffer.from(html, 'utf8');
             }
 
@@ -124,7 +128,7 @@ function startServer(dir, { injectScript = false } = {}) {
 // ─── Export ──────────────────────────────────────────────────────────────────
 
 function exportScene(scene, editorBin, templateZip) {
-    const exportDir = join(EXPORTS_DIR, scene.id);
+    const exportDir = join(EXPORTS_DIR, scene.export_id || scene.id);
     mkdirSync(exportDir, { recursive: true });
 
     const projectPath = resolve(__dirname, scene.path);
@@ -164,12 +168,12 @@ function exportScene(scene, editorBin, templateZip) {
 // ─── Run Scene (Chrome / Firefox via Playwright) ─────────────────────────────
 
 async function runScenePlaywright(scene, browser, timeout) {
-    const exportDir = join(EXPORTS_DIR, scene.id);
+    const exportDir = join(EXPORTS_DIR, scene.export_id || scene.id);
     if (!existsSync(join(exportDir, 'index.html'))) {
         return { status: 'SKIP', reason: 'not exported' };
     }
 
-    const { server, url } = await startServer(exportDir, { injectScript: true });
+    const { server, url } = await startServer(exportDir, { injectScript: true, sceneInjectScript: scene.inject_script || null });
 
     const page = await browser.newPage();
 
@@ -280,12 +284,12 @@ function safariEval(js) {
 }
 
 async function runSceneSafari(scene, timeout) {
-    const exportDir = join(EXPORTS_DIR, scene.id);
+    const exportDir = join(EXPORTS_DIR, scene.export_id || scene.id);
     if (!existsSync(join(exportDir, 'index.html'))) {
         return { status: 'SKIP', reason: 'not exported' };
     }
 
-    const { server, port, url } = await startServer(exportDir, { injectScript: true });
+    const { server, port, url } = await startServer(exportDir, { injectScript: true, sceneInjectScript: scene.inject_script || null });
     const pageUrl = `${url}/index.html`;
 
     // Open URL in Safari
@@ -512,12 +516,19 @@ async function main() {
         console.log(`Using template: ${templateZip}\n`);
         mkdirSync(EXPORTS_DIR, { recursive: true });
 
+        const exported = new Set();
         for (const scene of scenes) {
+            const eid = scene.export_id || scene.id;
+            if (exported.has(eid)) {
+                console.log(`    SHARED:   ${scene.id} (uses ${eid} export)`);
+                continue;
+            }
             const result = exportScene(scene, editorBin, templateZip);
             if (!result.success) {
                 console.log(`    EXPORT FAILED: ${scene.id} — ${result.error}`);
             } else {
                 console.log(`    EXPORTED: ${scene.id}`);
+                exported.add(eid);
             }
         }
         console.log('');
