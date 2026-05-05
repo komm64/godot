@@ -136,10 +136,38 @@ run_test "Driver unit tests (305)" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. Scene Smoketest (multi-browser)
+# 3. Fuzz Tests (naga-converter, requires Rust nightly + cargo-fuzz)
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 3: Scene Smoketest (18 scenes × browsers)"
+echo "  Stage 3: Fuzz Tests (3 targets × 60s each)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+NAGA_DIR="$SCRIPT_DIR/../drivers/webgpu/naga-converter"
+if command -v cargo >/dev/null 2>&1 && rustup toolchain list 2>/dev/null | grep -q nightly; then
+    if ! command -v cargo-fuzz >/dev/null 2>&1; then
+        echo "  [setup] Installing cargo-fuzz..."
+        cargo install cargo-fuzz > /dev/null 2>&1
+    fi
+
+    for target in spirv_to_wgsl preprocess_passes split_samplers; do
+        run_test "Fuzz $target (60s)" \
+            "$NAGA_DIR" \
+            cargo +nightly fuzz run "$target" -- -max_total_time=60 -max_len=4096
+    done
+else
+    printf "${BOLD}▶ %-40s${NC}${YELLOW}SKIP${NC} (Rust nightly not installed)\n" "Fuzz tests (3 targets)"
+    SKIPPED=$((SKIPPED + 1))
+    RESULTS+=("SKIP  Fuzz tests (Rust nightly not installed)")
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. Scene Smoketest (multi-browser)
+# ──────────────────────────────────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Stage 4: Scene Smoketest (18 scenes x browsers)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -170,10 +198,10 @@ if [[ "$QUICK" == true ]]; then
 else
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Resource Lifecycle
+# 5. Resource Lifecycle
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 4: Resource Lifecycle Stress Test"
+echo "  Stage 5: Resource Lifecycle Stress Test"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -186,10 +214,10 @@ run_test "Resource lifecycle stress tests" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Screenshot Comparison
+# 6. Screenshot Comparison
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 5: Screenshot Comparison (Chrome + Firefox)"
+echo "  Stage 6: Screenshot Comparison (Chrome + Firefox)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -202,10 +230,10 @@ run_test "Screenshot comparison" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. Smoke Test (requires pre-exported test project)
+# 7. Smoke Test (requires pre-exported test project)
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 6: Engine Smoke Test (test_project)"
+echo "  Stage 7: Engine Smoke Test (test_project)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 

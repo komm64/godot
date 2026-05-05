@@ -1,0 +1,38 @@
+[package]
+name = "naga-converter-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.naga-converter]
+path = ".."
+
+# Full pipeline: SPIR-V bytes → all passes → naga parse → WGSL
+[[bin]]
+name = "spirv_to_wgsl"
+path = "fuzz_targets/spirv_to_wgsl.rs"
+test = false
+doc = false
+bench = false
+
+# All 7 preprocessing passes chained (no naga parsing)
+[[bin]]
+name = "preprocess_passes"
+path = "fuzz_targets/preprocess_passes.rs"
+test = false
+doc = false
+bench = false
+
+# split_combined_samplers in isolation (most complex pass)
+[[bin]]
+name = "split_samplers"
+path = "fuzz_targets/split_samplers.rs"
+test = false
+doc = false
+bench = false

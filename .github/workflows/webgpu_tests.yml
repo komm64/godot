@@ -83,6 +83,37 @@ jobs:
         run: cargo test --lib
 
   # ═══════════════════════════════════════════════════════════════════════════════
+  # Naga-Converter Fuzz Tests: cargo-fuzz with 3 targets (60s each)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  naga-fuzz-tests:
+    runs-on: ubuntu-24.04
+    name: Naga-Converter Fuzz Tests
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Fuzz spirv_to_wgsl (60s)
+        working-directory: drivers/webgpu/naga-converter
+        run: cargo +nightly fuzz run spirv_to_wgsl -- -max_total_time=60 -max_len=4096
+
+      - name: Fuzz preprocess_passes (60s)
+        working-directory: drivers/webgpu/naga-converter
+        run: cargo +nightly fuzz run preprocess_passes -- -max_total_time=60 -max_len=4096
+
+      - name: Fuzz split_samplers (60s)
+        working-directory: drivers/webgpu/naga-converter
+        run: cargo +nightly fuzz run split_samplers -- -max_total_time=60 -max_len=4096
+
+  # ═══════════════════════════════════════════════════════════════════════════════
   # Driver Unit Tests: Algorithmic correctness of WebGPU driver subsystems
   # ═══════════════════════════════════════════════════════════════════════════════
   driver-unit-tests:
@@ -349,7 +380,7 @@ jobs:
   test-summary:
     runs-on: ubuntu-24.04
     name: Test Summary
-    needs: [shader-corpus, naga-unit-tests, driver-unit-tests, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
+    needs: [shader-corpus, naga-unit-tests, naga-fuzz-tests, driver-unit-tests, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
     if: always()
     steps:
       - name: Check results
@@ -360,6 +391,7 @@ jobs:
           echo ""
           echo "  Shader Corpus:        ${{ needs.shader-corpus.result }}"
           echo "  Naga Unit Tests:      ${{ needs.naga-unit-tests.result }}"
+          echo "  Naga Fuzz Tests:      ${{ needs.naga-fuzz-tests.result }}"
           echo "  Driver Unit Tests:    ${{ needs.driver-unit-tests.result }}"
           echo "  SPIR-V Validation:    ${{ needs.validate-spirv.result }}"
           echo "  Smoke Test:           ${{ needs.smoke-test.result }}"
@@ -376,6 +408,10 @@ jobs:
           fi
           if [ "${{ needs.naga-unit-tests.result }}" = "failure" ]; then
             echo "::error::Naga-converter unit tests failed"
+            FAILED=1
+          fi
+          if [ "${{ needs.naga-fuzz-tests.result }}" = "failure" ]; then
+            echo "::error::Naga-converter fuzz tests found a crash"
             FAILED=1
           fi
           if [ "${{ needs.driver-unit-tests.result }}" = "failure" ]; then

@@ -15,7 +15,7 @@
 | **Unit tests (driver)** | Done | 305 JS tests covering ring buffer, shadow buffer, bind group layout, pipeline hashing, command buffer, format mapping, buffer alignment, std140 packing, texture layout, texture conversion, bind group compatibility | — |
 | **Unit tests (naga-converter)** | Done | 71 Rust `#[test]` covering all rewriting passes, post-parse fixes, end-to-end SPIR-V → WGSL, and error cases | — |
 | **Regression test suite** | Missing | No named/tracked regression cases | A suite of known-bug repros that run in CI to prevent recurrence |
-| **Fuzz testing** | Missing | *Nothing* | Fuzz the naga-converter with random/corrupted SPIR-V to find panics or incorrect transforms |
+| **Fuzz testing** | Done | 3 cargo-fuzz targets (spirv_to_wgsl, preprocess_passes, split_samplers) with seeded corpus; found & fixed 4 bugs | — |
 | **Multi-browser CI** | Done | Scene smoketest runs 18 scenes on Chrome + Firefox + Safari; CI runs Chrome + Firefox | Safari CI automation (requires macOS runner) |
 | **Performance benchmarks** | Missing | *Nothing* | Frame-time / draw-call benchmarks to catch performance regressions (shader compile time, IPC overhead, buffer upload) |
 | **Async readback tests** | Missing | *Nothing dedicated* | Test viewport capture, GPU->CPU buffer readback timing, fence/callback correctness |
@@ -52,11 +52,22 @@
 - [x] Buffer alignment and offset calculations (33 tests)
 - [x] Uniform buffer packing (std140 layout) (23 tests)
 
-### 3. Fuzz testing (naga-converter)
+### 3. Fuzz testing (naga-converter) — DONE
 
-- [ ] Set up `cargo-fuzz` target for the SPIR-V -> WGSL pipeline
-- [ ] Seed corpus from engine-compiled `.spv` files
-- [ ] CI job to run fuzzer for N minutes on each PR (or nightly)
+3 cargo-fuzz targets in `drivers/webgpu/naga-converter/fuzz/`:
+
+- [x] `spirv_to_wgsl` — full pipeline (all passes + naga parse + WGSL gen), catch_unwind for naga panics
+- [x] `preprocess_passes` — all 7 SPIR-V rewriting passes chained, no naga parsing
+- [x] `split_samplers` — most complex pass (~500 lines) in isolation
+- [x] Seeded corpus: 9 .spv fixtures + 2 regression files + 6 synthetic edge cases
+- [x] CI job runs all 3 targets for 60s each on every push/PR
+- [x] Local CI (`local_ci.sh`) Stage 3 runs fuzz tests when Rust nightly available
+
+Bugs found and fixed by fuzzing:
+- Integer overflows in `split_combined_samplers` (3 multiplication sites → `wrapping_mul`/`wrapping_add`)
+- Out-of-bounds read in `read_word` (added bounds check)
+- `alloc_id` overflow when SPIR-V bound = u32::MAX (`next_id += 1` → `wrapping_add`)
+- Conditional compilation fix for `log()` and `spirv_to_wgsl` outside WASM runtime
 
 ### 4. Regression test suite
 

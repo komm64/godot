@@ -9,16 +9,16 @@ use naga::{
     valid::{Validator, ValidationFlags, Capabilities},
 };
 
-#[cfg(not(test))]
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
 }
 
-#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 fn log(_s: &str) {
-    // No-op in tests; avoids wasm_bindgen extern dependency.
+    // No-op outside WASM (tests, fuzzing, native builds).
 }
 
 // SPIR-V opcodes relevant to specialization constants.
@@ -37,8 +37,12 @@ const OP_SPEC_CONSTANT_COMPOSITE: u16 = 51;
 const OP_SPEC_CONSTANT_OP: u16 = 52;
 
 /// Read a u32 from a little-endian byte slice at the given word index.
+/// Returns 0 for out-of-bounds access (malformed SPIR-V safety).
 fn read_word(bytes: &[u8], word_idx: usize) -> u32 {
     let off = word_idx * 4;
+    if off + 3 >= bytes.len() {
+        return 0;
+    }
     u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
 }
 
@@ -51,7 +55,7 @@ fn push_word(out: &mut Vec<u8>, w: u32) {
 /// Naga does not support OpSpecConstantOp, causing InvalidId cascades.
 /// We evaluate each op using previously-collected constant values and emit
 /// regular OpConstant instructions instead.
-fn freeze_spec_constant_ops(bytes: &[u8]) -> Vec<u8> {
+pub fn freeze_spec_constant_ops(bytes: &[u8]) -> Vec<u8> {
     let total_words = bytes.len() / 4;
     if total_words < 5 {
         return bytes.to_vec();
@@ -315,7 +319,7 @@ const PC_RING_BUFFER_BINDING: u32 = 120;
 ///
 /// By adding NonWritable here, NAGA emits `var<storage>` for truly read-only SSBOs,
 /// which WebGPU allows to alias freely (ReadOnlyStorage bindings share buffers freely).
-fn infer_readonly_storage(bytes: &[u8]) -> Vec<u8> {
+pub fn infer_readonly_storage(bytes: &[u8]) -> Vec<u8> {
     let len = bytes.len();
     if len < 20 || len % 4 != 0 {
         return bytes.to_vec();
@@ -542,7 +546,7 @@ fn infer_readonly_storage(bytes: &[u8]) -> Vec<u8> {
 ///
 /// The struct type already carries `Block` + `Offset` decorations from GLSL
 /// compilation, so it is already valid as a UBO in SPIR-V / WGSL.
-fn convert_push_constants_to_uniforms(bytes: &[u8]) -> Vec<u8> {
+pub fn convert_push_constants_to_uniforms(bytes: &[u8]) -> Vec<u8> {
     let total_words = bytes.len() / 4;
     if total_words < 5 {
         return bytes.to_vec();
@@ -699,7 +703,7 @@ fn convert_push_constants_to_uniforms(bytes: &[u8]) -> Vec<u8> {
 /// logically equivalent but have different decorations. Naga doesn't support it,
 /// but OpCopyObject is semantically equivalent for our purposes (the types have
 /// identical memory layout; only decorations differ).
-fn rewrite_copy_logical(bytes: &[u8]) -> Vec<u8> {
+pub fn rewrite_copy_logical(bytes: &[u8]) -> Vec<u8> {
     let total_words = bytes.len() / 4;
     if total_words < 5 {
         return bytes.to_vec();
@@ -758,7 +762,7 @@ fn rewrite_copy_logical(bytes: &[u8]) -> Vec<u8> {
 /// OpTerminateInvocation is from SPV_KHR_terminate_invocation and behaves like
 /// OpKill but with defined helper-invocation semantics. Naga doesn't support it.
 /// OpKill is the SPIR-V 1.0 equivalent and naga handles it correctly.
-fn rewrite_terminate_invocation(bytes: &[u8]) -> Vec<u8> {
+pub fn rewrite_terminate_invocation(bytes: &[u8]) -> Vec<u8> {
     let total_words = bytes.len() / 4;
     if total_words < 5 {
         return bytes.to_vec();
@@ -828,7 +832,7 @@ fn rewrite_terminate_invocation(bytes: &[u8]) -> Vec<u8> {
 /// Binding convention (matching Godot's WebGPU uniform_set_create):
 ///   Original combined sampler at binding N →
 ///     Sampler at binding N*2+0, Image at binding N*2+1 (repurposed original var)
-fn split_combined_samplers(bytes: &[u8]) -> Vec<u8> {
+pub fn split_combined_samplers(bytes: &[u8]) -> Vec<u8> {
     let total_words = bytes.len() / 4;
     if total_words < 5 {
         return bytes.to_vec();
@@ -947,7 +951,7 @@ fn split_combined_samplers(bytes: &[u8]) -> Vec<u8> {
 
     // --- Allocate new IDs ---
     let mut next_id = bound;
-    let mut alloc_id = || { let id = next_id; next_id += 1; id };
+    let mut alloc_id = || { let id = next_id; next_id = next_id.wrapping_add(1); id };
 
     // For each combined var, we reuse the original var as the image var (just change its binding
     // and type pointer). We allocate NEW IDs for:
@@ -1175,7 +1179,7 @@ fn split_combined_samplers(bytes: &[u8]) -> Vec<u8> {
                 push_word(&mut out, (4u32 << 16) | 71); // OpDecorate
                 push_word(&mut out, split.sampler_var_id);
                 push_word(&mut out, 33); // Binding
-                push_word(&mut out, split.binding * 2);
+                push_word(&mut out, split.binding.wrapping_mul(2));
             }
         }
 
@@ -1218,7 +1222,7 @@ fn split_combined_samplers(bytes: &[u8]) -> Vec<u8> {
                     push_word(&mut out, w0); // same wc|op
                     push_word(&mut out, target);
                     push_word(&mut out, 33); // Binding
-                    push_word(&mut out, binding * 2 + 1);
+                    push_word(&mut out, binding.wrapping_mul(2).wrapping_add(1));
                     pos += wc;
                     continue;
                 } else if decoration == 24 { // NonWritable → remove
@@ -1234,7 +1238,7 @@ fn split_combined_samplers(bytes: &[u8]) -> Vec<u8> {
                 let new_binding = if old_binding == PC_RING_BUFFER_BINDING {
                     old_binding
                 } else {
-                    old_binding * 2
+                    old_binding.wrapping_mul(2)
                 };
                 push_word(&mut out, w0);
                 push_word(&mut out, target);
@@ -1350,7 +1354,7 @@ fn split_combined_samplers(bytes: &[u8]) -> Vec<u8> {
 /// Function parameter image types with depth=0 are NOT changed here —
 /// those are handled in mod.rs by patching function parameters that have
 /// COMPARISON-only sampling flags to Depth type after parsing.
-fn fix_depth2_images(bytes: &[u8]) -> (Vec<u8>, Vec<(u32, u32, u32)>) {
+pub fn fix_depth2_images(bytes: &[u8]) -> (Vec<u8>, Vec<(u32, u32, u32)>) {
     let total_words = bytes.len() / 4;
     if total_words < 5 {
         return (bytes.to_vec(), Vec::new());
@@ -1770,6 +1774,56 @@ pub fn spirv_to_wgsl(spirv_bytes: &[u8]) -> Result<String, JsError> {
     // texture_depth_2d supports both textureSample and textureSampleCompare.
 
     let wgsl = format!("{binding_metadata}{prefix}{wgsl}");
+
+    Ok(wgsl)
+}
+
+/// Native (non-WASM) version of `spirv_to_wgsl` for fuzzing and testing.
+/// Identical pipeline but returns `Result<String, String>` instead of `JsError`.
+pub fn spirv_to_wgsl_native(spirv_bytes: &[u8]) -> Result<String, String> {
+    if spirv_bytes.len() % 4 != 0 {
+        return Err("SPIR-V byte length must be a multiple of 4".into());
+    }
+
+    let spirv_bytes = freeze_spec_constant_ops(spirv_bytes);
+    let spirv_bytes = rewrite_copy_logical(&spirv_bytes);
+    let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
+    let spirv_bytes = infer_readonly_storage(&spirv_bytes);
+    let spirv_bytes = convert_push_constants_to_uniforms(&spirv_bytes);
+    let spirv_bytes = split_combined_samplers(&spirv_bytes);
+    let (spirv_bytes, _depth_aliases) = fix_depth2_images(&spirv_bytes);
+
+    let opts = spv::Options {
+        adjust_coordinate_space: true,
+        strict_capabilities: false,
+        block_ctx_dump_prefix: None,
+    };
+
+    let mut module = spv::parse_u8_slice(&spirv_bytes, &opts)
+        .map_err(|e| format!("SPIR-V parse error: {e:?}"))?;
+
+    fix_writeonly_storage(&mut module);
+    fix_nonfinite_literals(&mut module);
+    strip_point_size(&mut module);
+    flatten_binding_arrays(&mut module);
+
+    let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .map_err(|e| format!("Validation error: {e:?}"))?;
+
+    let pipeline_constants = PipelineConstants::default();
+    let (module, info) = process_overrides(&module, &info, None, &pipeline_constants)
+        .map_err(|e| format!("Pipeline constants error: {e:?}"))?;
+
+    let mut module = module.into_owned();
+    module.overrides = Arena::new();
+
+    let wgsl = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty())
+        .map_err(|e| format!("WGSL write error: {e:?}"))?;
+
+    let wgsl = fix_fmax_literals(&wgsl);
+    let wgsl = wgsl.replace("enable f16;\n", "");
+    let wgsl = wgsl.replace("enable f16;", "");
 
     Ok(wgsl)
 }
