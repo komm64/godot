@@ -8,7 +8,7 @@ A complete WebGPU rendering backend for Godot Engine 4.6.2 that enables Godot ga
 
 ### 2. Which Godot renderer does it use?
 
-The **Forward Mobile** renderer. This is Godot's lighter-weight 3D renderer designed for mobile GPUs, which maps well to WebGPU's single-queue, limited-feature-set model. The Forward Clustered renderer (Godot's desktop-class renderer) is not supported because WebGPU cannot meet its resource requirements (48+ sampled textures per stage, extensive compute).
+The **Forward Mobile** renderer. This is Godot's lighter-weight 3D renderer designed for mobile GPUs, which maps well to WebGPU's single-queue, limited-feature-set model. The Forward Clustered renderer (Godot's desktop-class renderer) is not supported and is saved for a future update.
 
 ### 3. What browsers are supported?
 
@@ -21,8 +21,10 @@ All major desktop browsers with WebGPU enabled. Mobile browser support is emergi
 ### 4. How do I build the WebGPU export template?
 
 ```bash
-scons platform=web target=template_release webgpu=yes opengl3=no threads=no
+scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
 ```
+
+The `dlink_enabled=yes` flag enables Emscripten dynamic linking, which produces a main module (`godot.wasm`) and a side module (`godot.side.wasm`). This is required for the WebGPU export template.
 
 Requirements:
 - Emscripten 4.0.10+ (for the emdawnwebgpu port)
@@ -31,13 +33,28 @@ Requirements:
 
 ### 5. Do I need to modify my Godot project to use WebGPU?
 
-No. Existing Godot 4.6 projects targeting the Mobile renderer will work without modification. The WebGPU backend is transparent — it implements the same `RenderingDevice` API that Vulkan uses. Your shaders, materials, and scenes work as-is.
+Almost nothing. Existing Godot 4.6 projects targeting the Mobile renderer will generally work without modification — shaders, materials, and scenes carry over as-is.
 
-The only user-visible difference is setting `rendering/renderer/rendering_method.web` to `mobile` or `forward_plus` (which maps to `mobile` on web) in project settings.
+The one exception is **GPU readback**. Any code that reads data back from the GPU — including `RenderingDevice.texture_get_data()`, `Image.get_image()`, or compute shader result retrieval — must be adapted. On native backends (Vulkan, Metal, D3D12), these calls are synchronous and return data immediately. On WebGPU, the underlying `buffer.mapAsync()` is asynchronous and cannot resolve while C++ holds the WASM call stack, so the first call returns `null`/empty data. You must poll across frames until the result is available:
+
+```gdscript
+# Native (Vulkan/Metal): works immediately
+var data = rd.texture_get_data(texture_rid, 0)
+
+# WebGPU: must poll — first call returns null
+var data = null
+while data == null or data.size() == 0:
+    await get_tree().process_frame  # unwind the call stack so the browser event loop can tick
+    data = rd.texture_get_data(texture_rid, 0)
+```
+
+This 1+ frame latency applies to any GPU→CPU data transfer. If your project never reads back from the GPU (the common case for most games), no changes are needed.
+
+The only other user-visible difference is setting `rendering/renderer/rendering_method.web` to `mobile` or `forward_plus` (which maps to `mobile` on web) in project settings.
 
 ### 6. Why WebGPU instead of WebGL 2?
 
-WebGL 2 maps to OpenGL ES 3.0, which lacks compute shaders, storage buffers, and the programmable pipeline features that Godot 4's RenderingDevice architecture requires. WebGPU provides a modern GPU API comparable to Vulkan/Metal/D3D12, enabling Godot's full RD-based renderer to run in the browser for the first time.
+WebGPU provides an asynchronous GPU API, which prevents the frame-stalling pipeline bubbles that are impossible to avoid on WebGL — the browser can overlap CPU and GPU work instead of blocking on synchronous GL calls. Beyond that, WebGL 2 maps to OpenGL ES 3.0, which lacks compute shaders, storage buffers, and the programmable pipeline features that Godot 4's RenderingDevice architecture requires. WebGPU provides a modern GPU API comparable to Vulkan/Metal/D3D12, enabling Godot's full RD-based renderer to run in the browser for the first time.
 
 ---
 
@@ -45,9 +62,9 @@ WebGL 2 maps to OpenGL ES 3.0, which lacks compute shaders, storage buffers, and
 
 ### 7. How does WebGPU performance compare to native?
 
-On desktop browsers with the optimizations enabled, WebGPU achieves **performance parity with native Vulkan/Metal** for typical Forward Mobile scenes. The benchmark journey:
+On desktop browsers with the optimizations enabled, WebGPU achieves **close to parity with native Vulkan/Metal** for typical Forward Mobile scenes — around 1.4x native frame times. The benchmark journey:
 - Initial unoptimized: 3.25x slower than native
-- After all optimizations: equivalent frame times
+- After all optimizations: ~1.4x native
 
 The key insight: WebGPU is IPC-bound (not GPU-bound), and our optimizations reduce IPC message count by 99%+ for common cases.
 
@@ -55,7 +72,7 @@ The key insight: WebGPU is IPC-bound (not GPU-bound), and our optimizations redu
 
 Every WebGPU API call on the web crosses an inter-process communication boundary: WASM → JS context switch → browser GPU process (via Mojo IPC on Chromium). Each call costs ~200-500ns vs ~5ns on native. Godot's renderer, designed assuming "commands are free," issued ~24,000 GPU calls per frame — accumulating 7ms+ of pure IPC overhead.
 
-### 9. How did you achieve parity?
+### 9. How did you achieve near parity?
 
 A layered optimization stack that reduces IPC message count:
 1. **Staging buffer fixes**: Eliminated redundant 32MB flushes (200x improvement in staging cost)
@@ -136,7 +153,7 @@ JavaScript creates the device **before** WASM loads (since device creation is as
 
 ### 17. Why a single 7733-line implementation file?
 
-Pragmatic choice during rapid development. The Vulkan backend splits across multiple files (buffers, textures, pipelines, etc.), and we plan to do the same refactor before upstream submission. For now, the file is navigable due to clear section markers and extensive comments.
+This matches the Vulkan driver's structure — `rendering_device_driver_vulkan.cpp` is also a single 6598-line file. Both backends implement the same `RenderingDeviceDriver` interface in one `.cpp`. The WebGPU driver is actually *more* factored than Vulkan, having extracted `webgpu_objects.h` (429 lines) and `pixel_formats_webgpu.h` (705 lines) into separate files. The file is navigable due to clear `/* SECTION */` markers and extensive comments.
 
 ---
 
@@ -225,7 +242,7 @@ This ensures the prior read operations complete before the write begins. It's co
 
 WebGPU's `mapAsync` returns a Promise that cannot be awaited from synchronous C++ (without Asyncify, which was abandoned). The solution is a frame-deferred pattern:
 
-**Frame N**: 
+**Frame N**:
 - Engine calls `texture_get_data()` or `buffer_get_data_direct()`
 - Driver copies GPU texture/buffer to a staging buffer
 - Initiates `wgpuBufferMapAsync` on the staging buffer
@@ -268,10 +285,9 @@ New methods include: `buffer_create_with_data`, `buffer_initiate_async_map`, `bu
 ### 29. What would need to change for upstream Godot acceptance?
 
 1. **RFC for API traits**: The 10 new trait enums need formal review by Godot rendering team
-2. **Split the monolithic .cpp**: Match Vulkan backend file structure
-3. **Move WGSL patching to Rust**: AST transforms in naga-converter instead of C++ string manipulation
+2. **Move WGSL patching to Rust**: AST transforms in naga-converter instead of C++ string manipulation
 4. **Upstream naga patches**: Submit the 6 modifications to the Naga project
-5. **CI infrastructure**: Headless Chrome/Firefox WebGPU testing
+5. **CI infrastructure**: Adapt existing headless Chrome/Firefox test suite (`webgpu_tests/`) to Godot's upstream CI runners
 6. **Shared constants**: Single source of truth for magic numbers (binding 120, ring size, alignment)
 7. **Feature flags documentation**: Clear docs on what each ApiTrait does and when it's safe to enable
 
@@ -302,15 +318,24 @@ The atlas grows with power-of-two strategy (min 64KB). The uniform set is rebuil
 
 ### 32. Is there a test suite? How is correctness validated?
 
-Currently, there is no automated test suite for the WebGPU backend. Correctness is validated through:
-- Manual testing across Chrome, Firefox, and Safari
-- Stress test scenes (20k instances, 32 lights, 60k shared-material objects)
-- The browser's own WebGPU validation layer (catches spec violations)
-- Naga's built-in SPIR-V and WGSL validation passes
-- Performance counter monitoring for unexpected behavior
+Yes. The `webgpu_tests/` directory contains a multi-layer automated test suite with CI integration (`.github/workflows/webgpu_tests.yml`). The layers are:
 
-For upstream, we'd need:
-- Headless browser CI with WebGPU (Chrome --headless + SwiftShader)
-- Shader corpus tests (convert all built-in shaders, validate WGSL output)
-- Screenshot comparison tests across browsers
-- Resource lifecycle stress tests (rapid create/destroy cycles)
+| Test | What it validates | Runtime |
+|------|------------------|---------|
+| **Shader Corpus** | 9 hand-crafted GLSL fixtures through SPIR-V → WGSL via naga-converter WASM | ~1s |
+| **SPIR-V Dump Validation** | All 309 engine-compiled shaders through naga-converter offline | ~5s |
+| **Smoke Test** | Full runtime in headless Chrome — no shader errors, no device lost | ~60s |
+| **Scene Smoketest** | 18 demo/benchmark scenes across Chrome, Firefox, and Safari | ~8min |
+| **Resource Lifecycle** | Rapid create/destroy of buffers, textures, pipelines | ~30s |
+| **Screenshot Comparison** | Visual regression across Chrome and Firefox | ~60s |
+| **Driver Unit Tests** | 12 JS test suites covering bind groups, buffers, formats, pipelines, ring buffer, shadow buffer, textures, std140 packing | standalone |
+| **Rust Unit Tests** | 71 `#[test]` functions in naga-converter covering all 7 SPIR-V preprocessing passes | `cargo test` |
+| **Fuzz Targets** | 3 cargo-fuzz targets (spirv_to_wgsl, split_samplers, preprocess_passes) for naga-converter | continuous |
+
+CI runs on push/PR when `drivers/webgpu/`, `servers/rendering/`, or `webgpu_tests/` change. Jobs run in parallel where possible; shader-corpus, resource-lifecycle, scene-smoketest, and screenshot-comparison need no engine build. The build-dependent jobs (validate-spirv, smoke-test) gate on a ~60min web template build. A `local_ci.sh` script runs the full pipeline locally.
+
+Additional correctness layers:
+- The browser's own WebGPU validation layer (catches spec violations at runtime)
+- Naga's built-in SPIR-V and WGSL validation passes
+- Stress test scenes (20k instances, 32 lights, 60k shared-material objects)
+- An expected-failures baseline (`expected_failures.json`) tracking 32 Vulkan-only shader variants that fail offline but are never used at runtime — CI fails only on regressions beyond this baseline

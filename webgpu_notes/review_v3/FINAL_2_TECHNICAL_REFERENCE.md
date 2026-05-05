@@ -390,10 +390,10 @@ All bone data consolidated into a single GPU storage buffer:
 
 ```bash
 # WebGPU-only release template:
-scons platform=web target=template_release webgpu=yes opengl3=no threads=no
+scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
 
 # Debug with both renderers:
-scons platform=web target=template_debug webgpu=yes opengl3=yes
+scons platform=web target=template_debug dlink_enabled=yes webgpu=yes opengl3=yes
 ```
 
 ### 8.2 Build Pipeline

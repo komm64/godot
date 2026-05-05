@@ -74,11 +74,6 @@ Personal reference: items to address before public release (5 days).
 - **Future fix**: Free-list or generational compaction
 - **Effort**: ~half day
 
-### Monolithic .cpp File (7733 lines)
-- **Status**: Works but makes navigation/maintenance harder
-- **Future fix**: Split into subsystem files (buffers+textures, shaders+pipelines, commands, misc)
-- **Effort**: ~1 day (refactor only, no behavior change)
-
 ### WGSL String Patching → Rust
 - **Status**: Format remapping and binding_array removal done via fragile C++ string manipulation
 - **Future fix**: Move these transforms into naga-converter as AST operations
@@ -95,7 +90,7 @@ Personal reference: items to address before public release (5 days).
 - **Effort**: ~half day
 
 ### CI for Prebuilt Verification
-- **Status**: No automated check that prebuilt naga WASM matches source
+- **Status**: No automated check that prebuilt naga WASM matches source (note: broader test CI exists in `.github/workflows/webgpu_tests.yml`)
 - **Future fix**: CI job that rebuilds and verifies (or at least compiles successfully)
 - **Effort**: ~half day for CI setup
 
@@ -134,8 +129,8 @@ Personal reference: items to address before public release (5 days).
 
 ## Quick Sanity Checks Before Ship
 
-- [ ] Build succeeds: `scons platform=web target=template_release webgpu=yes opengl3=no threads=no`
-- [ ] Build succeeds: `scons platform=web target=template_debug webgpu=yes`
+- [ ] Build succeeds: `scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no`
+- [ ] Build succeeds: `scons platform=web target=template_debug dlink_enabled=yes webgpu=yes`
 - [ ] 3D scene renders correctly in Chrome
 - [ ] 3D scene renders correctly in Firefox
 - [ ] 3D scene renders correctly in Safari (if available)

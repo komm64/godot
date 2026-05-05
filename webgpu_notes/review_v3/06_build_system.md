@@ -264,10 +264,10 @@ avoids redundant conversions for duplicate shader stages.
 
 ```bash
 # Full WebGPU-only web template (release):
-scons platform=web target=template_release webgpu=yes opengl3=no threads=no
+scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no
 
 # Debug build with both renderers:
-scons platform=web target=template_debug webgpu=yes opengl3=yes
+scons platform=web target=template_debug dlink_enabled=yes webgpu=yes opengl3=yes
 ```
 
 The build process:

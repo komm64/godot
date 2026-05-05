@@ -366,17 +366,15 @@ Based on TODO/FIXME analysis of the driver-authored code (excluding vendored nag
 
 ### 7.2 Concerns
 
-1. **Monolithic Implementation File**: At 7733 lines, `rendering_device_driver_webgpu.cpp` is very large. The Vulkan backend splits across multiple files (buffers, textures, pipelines, etc.). This makes navigation and maintenance harder.
+1. **WGSL Text Manipulation**: The shader creation function performs extensive string manipulation on WGSL output (format remapping, binding_array removal, storage access demotion via `strstr`/`memcpy`). This is fragile - any change in Naga's output format could break these patterns.
 
-2. **WGSL Text Manipulation**: The shader creation function performs extensive string manipulation on WGSL output (format remapping, binding_array removal, storage access demotion via `strstr`/`memcpy`). This is fragile - any change in Naga's output format could break these patterns.
+2. **Magic Numbers**: While documented, values like binding 120, ring size 256KB, stub buffer 64KB, and alignment 256 are scattered across both C++ and Rust with comments saying "must match X". A shared header or generated constants file would be safer.
 
-3. **Magic Numbers**: While documented, values like binding 120, ring size 256KB, stub buffer 64KB, and alignment 256 are scattered across both C++ and Rust with comments saying "must match X". A shared header or generated constants file would be safer.
+3. **Conditional Compilation Coupling**: Feature detection uses hardcoded enum values (`(WGPUFeatureName)13`, `(WGPUFeatureName)14`) where the emdawnwebgpu header doesn't yet define them. Direct JS queries (`EM_ASM_INT`) for `texture-formats-tier1` bypass the C API entirely.
 
-4. **Conditional Compilation Coupling**: Feature detection uses hardcoded enum values (`(WGPUFeatureName)13`, `(WGPUFeatureName)14`) where the emdawnwebgpu header doesn't yet define them. Direct JS queries (`EM_ASM_INT`) for `texture-formats-tier1` bypass the C API entirely.
+4. **Debug Code in Production Paths**: `WEBGPU_VERBOSE` gating is good, but some diagnostic code remains unconditionally (e.g., the performance counter logging in `begin_segment`, the `static int _rp_end_log` counters). These are lightweight but add noise.
 
-5. **Debug Code in Production Paths**: `WEBGPU_VERBOSE` gating is good, but some diagnostic code remains unconditionally (e.g., the performance counter logging in `begin_segment`, the `static int _rp_end_log` counters). These are lightweight but add noise.
-
-6. **No Unit Tests**: Unlike Vulkan/Metal backends which can be tested with validation layers, the WebGPU backend has no standalone test infrastructure. Testing requires a full web export + browser.
+5. **No Unit Tests**: Unlike Vulkan/Metal backends which can be tested with validation layers, the WebGPU backend has no standalone test infrastructure. Testing requires a full web export + browser.
 
 ### 7.3 Naming Conventions
 
@@ -402,7 +400,6 @@ This is appropriate for a rendering backend where graceful degradation is prefer
 
 | Debt Item | Severity | Description |
 |-----------|----------|-------------|
-| Monolithic .cpp | Medium | 7733 lines should be split into subsystem files |
 | WGSL string patching | High | Fragile text manipulation for format remapping |
 | Hardcoded enum values | Low | Will resolve when emdawnwebgpu updates headers |
 | Missing indirect count | Low | Uses max count (wastes GPU but works) |
@@ -449,14 +446,13 @@ The Forward+ requirement of 48+ sampled textures per stage cannot be met on curr
    - Built as an external dependency (wasm-pack)
    - Replaced with build-time SPIR-V -> WGSL if specialization constants can be resolved differently
 
-4. **No Test Coverage**: Godot's CI would need WebGPU test infrastructure (headless Chrome/Firefox with WebGPU).
+4. **Test Coverage**: A multi-layer test suite exists in `webgpu_tests/` (unit tests, shader corpus, fuzz targets, headless browser CI, screenshot comparison) but Godot's upstream CI would need to adopt or adapt it.
 
 5. **Export Workflow**: The JS shell modifications and build system changes need to integrate cleanly with existing web export templates.
 
 ### 9.2 What Would Need to Change
 
 - Extract API traits into a proposal/RFC for the driver interface
-- Split the monolithic .cpp into smaller files matching Vulkan backend structure
 - Move WGSL text patching into the Naga converter (Rust) rather than C++ post-processing
 - Add feature flags so the new API traits are opt-in per backend
 - Write integration tests that run in CI with headless browser
@@ -480,18 +476,16 @@ The WebGPU backend is architecturally sound, pragmatic, and functional. It corre
 
 ### Top Recommendations
 
-1. **Split the monolithic implementation**: Break `rendering_device_driver_webgpu.cpp` into at least 4 files (buffers/textures, shaders/pipelines, commands/rendering, misc/capabilities) for maintainability.
+1. **Move WGSL text patching to Rust**: The format remapping, binding_array removal, and storage access demotion should happen in the naga-converter where they can be expressed as AST transformations rather than fragile string operations.
 
-2. **Move WGSL text patching to Rust**: The format remapping, binding_array removal, and storage access demotion should happen in the naga-converter where they can be expressed as AST transformations rather than fragile string operations.
+2. **Formalize the magic number coordination**: Create a shared `webgpu_constants.h` that the Rust crate reads (via build script or generated file) so `PC_RING_BUFFER_BINDING = 120` is defined in exactly one place.
 
-3. **Formalize the magic number coordination**: Create a shared `webgpu_constants.h` that the Rust crate reads (via build script or generated file) so `PC_RING_BUFFER_BINDING = 120` is defined in exactly one place.
+3. **Address the indirect draw count stub**: Even a simple "read count on next frame" approach would prevent wasted GPU work in scenes with dynamic draw counts.
 
-4. **Address the indirect draw count stub**: Even a simple "read count on next frame" approach would prevent wasted GPU work in scenes with dynamic draw counts.
+4. **Consider shader pre-compilation for exports**: The 15s startup conversion cost could be eliminated by running naga at export time and shipping WGSL directly. Runtime conversion would only be needed when specialization constants differ from defaults.
 
-5. **Consider shader pre-compilation for exports**: The 15s startup conversion cost could be eliminated by running naga at export time and shipping WGSL directly. Runtime conversion would only be needed when specialization constants differ from defaults.
-
-6. **Plan Naga version management**: The patched Naga will need periodic rebasing. Consider upstreaming the critical patches (push constant rewrite, combined sampler split) to the Naga project.
+5. **Plan Naga version management**: The patched Naga will need periodic rebasing. Consider upstreaming the critical patches (push constant rewrite, combined sampler split) to the Naga project.
 
 ### Overall Assessment
 
-This is a well-executed WebGPU backend that achieves functional parity with the Mobile renderer path. The architecture follows Godot conventions while making appropriate adaptations for WebGPU's constraints. The main risks are maintainability (monolithic file, vendored Naga, WGSL string patching) and upstream acceptability (base interface modifications). For its current purpose as a working WebGPU web export target, the architecture is fit for purpose.
+This is a well-executed WebGPU backend that achieves functional parity with the Mobile renderer path. The architecture follows Godot conventions while making appropriate adaptations for WebGPU's constraints. The main risks are maintainability (vendored Naga, WGSL string patching) and upstream acceptability (base interface modifications). For its current purpose as a working WebGPU web export target, the architecture is fit for purpose.

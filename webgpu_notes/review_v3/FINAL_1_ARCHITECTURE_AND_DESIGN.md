@@ -357,10 +357,9 @@ Layer 3: firstInstance + PC dedup         → eliminate per-draw SetBindGroup
 ### What Would Need to Change for Mainline Godot
 
 1. **Base driver interface**: 10 new ApiTrait enums and ~9 new virtual methods affect all backends (have safe no-op defaults, but need review)
-2. **Monolithic implementation**: The 7733-line .cpp should be split to match Vulkan backend structure
-3. **WGSL string manipulation**: Should move to the Rust naga-converter (AST transforms vs fragile text patching)
+2. **WGSL string manipulation**: Should move to the Rust naga-converter (AST transforms vs fragile text patching)
 4. **Vendored Naga**: Upstream would want patches submitted to naga project or built as external dep
-5. **Test infrastructure**: Need headless Chrome/Firefox WebGPU for CI
+5. **Test infrastructure**: Headless Chrome/Firefox CI exists (`webgpu_tests/`, `.github/workflows/webgpu_tests.yml`) but would need adaptation to Godot's upstream CI runners
 6. **Shared constants**: Magic numbers (binding 120, ring size 256KB) should be in one shared header
 
 ### What Aligns Well with Godot Architecture
@@ -382,7 +381,6 @@ Layer 3: firstInstance + PC dedup         → eliminate per-draw SetBindGroup
 - **Consistent patterns**: Object lifecycle, error handling, and async safety are uniform throughout
 
 ### Concerns
-- **Monolithic file**: 7733 lines in one .cpp is navigable but maintenance-heavy
 - **WGSL string patching**: Fragile dependency on Naga's exact output format
 - **Naga patch maintenance**: 6 patches to vendored naga v28 require ongoing maintenance with upstream
 - **Single developer knowledge**: No co-authors visible in commit history (bus factor risk)

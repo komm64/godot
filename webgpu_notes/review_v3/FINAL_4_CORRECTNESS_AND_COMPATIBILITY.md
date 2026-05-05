@@ -354,18 +354,18 @@ Six patches to vendored naga v28. Assessment of each:
 - Async readback (viewport capture)
 - Dynamic scenes (skeleton animation)
 
-### What Lacks Testing Infrastructure
-- No automated unit tests for the WebGPU driver
-- No headless browser CI (testing is manual)
-- No regression test suite
-- No fuzz testing of the shader pipeline
-- Edge cases of the naga patches rely on Godot's built-in shader corpus
+### Testing Infrastructure (webgpu_tests/)
+The test suite covers multiple layers:
+- **Driver unit tests**: 12 JS test suites (bind groups, buffers, formats, pipelines, ring buffer, shadow buffer, textures, std140 packing)
+- **Rust unit tests**: 71 `#[test]` functions in naga-converter covering all 7 SPIR-V preprocessing passes
+- **Fuzz testing**: 3 cargo-fuzz targets (spirv_to_wgsl, split_samplers, preprocess_passes) — found and fixed 4 bugs
+- **Shader corpus**: 9 hand-crafted GLSL fixtures + validation of all 309 engine-compiled SPIR-V shaders through naga
+- **Headless browser CI**: Multi-browser scene smoketest (18 scenes × Chrome/Firefox/Safari), resource lifecycle stress tests, screenshot comparison
+- **CI pipeline**: `.github/workflows/webgpu_tests.yml` runs on push/PR; `local_ci.sh` for local execution
 
-### Recommendations for Post-Launch
-1. Headless Chrome/Firefox WebGPU tests in CI
-2. Shader corpus tests (convert all built-in shaders, validate WGSL)
-3. Resource lifecycle stress test (rapid create/destroy cycles)
-4. Multi-browser automated screenshot comparison
+### Remaining Testing Gaps
+- Integration with Godot's upstream CI runners (current CI is project-specific)
+- Edge cases of the naga patches still rely partly on Godot's built-in shader corpus coverage
 
 ---
 

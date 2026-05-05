@@ -424,9 +424,10 @@ Specialized modules are owned by the `WGPipelineWrapper` and released with it.
    decisions, WebGPU spec limitations, and workarounds. The comments are genuinely
    helpful for understanding the code.
 
-2. **Single-file implementation**: At ~7500 lines, `rendering_device_driver_webgpu.cpp`
-   is large but navigable due to clear section markers. The shader creation function
-   (~1000 lines) could benefit from extraction into helpers.
+2. **File structure**: The `rendering_device_driver_webgpu.cpp` implementation matches
+   the Vulkan driver pattern (also a single ~6600-line `.cpp`). Clear `/* SECTION */`
+   markers make it navigable. Object types and format tables are factored out into
+   `webgpu_objects.h` and `pixel_formats_webgpu.h`.
 
 3. **Diagnostic infrastructure**: The `WEBGPU_VERBOSE` conditional and JS-side
    monkey-patching provide excellent debugging capabilities without production overhead.
