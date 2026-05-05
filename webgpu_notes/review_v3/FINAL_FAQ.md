@@ -1,0 +1,316 @@
+# Godot WebGPU — Frequently Asked Questions
+
+## General / Getting Started
+
+### 1. What is godot-webgpu?
+
+A complete WebGPU rendering backend for Godot Engine 4.6.2 that enables Godot games to run in the browser using the modern WebGPU API instead of the legacy WebGL. It implements Godot's `RenderingDeviceDriver` interface — the same abstraction used by the Vulkan, Metal, and D3D12 backends — targeting the browser's WebGPU API via Emscripten's emdawnwebgpu port.
+
+### 2. Which Godot renderer does it use?
+
+The **Forward Mobile** renderer. This is Godot's lighter-weight 3D renderer designed for mobile GPUs, which maps well to WebGPU's single-queue, limited-feature-set model. The Forward Clustered renderer (Godot's desktop-class renderer) is not supported because WebGPU cannot meet its resource requirements (48+ sampled textures per stage, extensive compute).
+
+### 3. What browsers are supported?
+
+- **Chrome 113+** (and Chromium-based browsers: Edge, Opera, Brave)
+- **Firefox 120+** (via wgpu backend)
+- **Safari 18+** (Technology Preview; WebGPU support still maturing)
+
+All major desktop browsers with WebGPU enabled. Mobile browser support is emerging (Chrome Android with WebGPU flag, Safari iOS 18+).
+
+### 4. How do I build the WebGPU export template?
+
+```bash
+scons platform=web target=template_release webgpu=yes opengl3=no threads=no
+```
+
+Requirements:
+- Emscripten 4.0.10+ (for the emdawnwebgpu port)
+- No Rust toolchain needed (naga converter ships as a prebuilt WASM binary)
+- Standard Godot build dependencies (SCons, Python, C++ compiler)
+
+### 5. Do I need to modify my Godot project to use WebGPU?
+
+No. Existing Godot 4.6 projects targeting the Mobile renderer will work without modification. The WebGPU backend is transparent — it implements the same `RenderingDevice` API that Vulkan uses. Your shaders, materials, and scenes work as-is.
+
+The only user-visible difference is setting `rendering/renderer/rendering_method.web` to `mobile` or `forward_plus` (which maps to `mobile` on web) in project settings.
+
+### 6. Why WebGPU instead of WebGL 2?
+
+WebGL 2 maps to OpenGL ES 3.0, which lacks compute shaders, storage buffers, and the programmable pipeline features that Godot 4's RenderingDevice architecture requires. WebGPU provides a modern GPU API comparable to Vulkan/Metal/D3D12, enabling Godot's full RD-based renderer to run in the browser for the first time.
+
+---
+
+## Performance
+
+### 7. How does WebGPU performance compare to native?
+
+On desktop browsers with the optimizations enabled, WebGPU achieves **performance parity with native Vulkan/Metal** for typical Forward Mobile scenes. The benchmark journey:
+- Initial unoptimized: 3.25x slower than native
+- After all optimizations: equivalent frame times
+
+The key insight: WebGPU is IPC-bound (not GPU-bound), and our optimizations reduce IPC message count by 99%+ for common cases.
+
+### 8. Why was WebGPU initially 3.25x slower than native?
+
+Every WebGPU API call on the web crosses an inter-process communication boundary: WASM → JS context switch → browser GPU process (via Mojo IPC on Chromium). Each call costs ~200-500ns vs ~5ns on native. Godot's renderer, designed assuming "commands are free," issued ~24,000 GPU calls per frame — accumulating 7ms+ of pure IPC overhead.
+
+### 9. How did you achieve parity?
+
+A layered optimization stack that reduces IPC message count:
+1. **Staging buffer fixes**: Eliminated redundant 32MB flushes (200x improvement in staging cost)
+2. **Shadow pass merging**: 196 render passes → 4 per frame (-43% frame time)
+3. **Instance batching**: 20,000 draws → 1 instanced draw (-25%)
+4. **Skeleton atlas**: 4,000 bone uploads → 1 per frame (-17%)
+5. **firstInstance encoding**: Eliminates per-draw push constant IPC (-3.6%)
+6. **Color pass batching**: 32,190 draws → 14 per frame (+34.6% FPS)
+
+### 10. What's the startup time?
+
+Approximately 15 seconds for first-time shader compilation (~383 unique SPIR-V stages converted to WGSL via the naga converter). Subsequent loads from browser cache are near-instant because the WGSL cache persists for the page session.
+
+This is a known limitation. Future work: pre-compile WGSL at export time, shipping directly without runtime conversion.
+
+### 11. Are there any performance regressions vs native I should know about?
+
+- **Omni light shadows**: Forced to dual-paraboloid mode (slightly lower quality than cubemap, but 43% faster)
+- **Shader startup**: ~15s first-time compilation (native has no equivalent cost)
+- **Texture readback**: 1-frame async delay (native is synchronous)
+- **No multi-threaded command recording**: Single queue, main thread only
+- **No GPU-driven rendering**: Indirect draw count always uses max (wastes some GPU cycles)
+
+---
+
+## Architecture / Design
+
+### 12. How does the WebGPU driver fit into Godot's architecture?
+
+It implements `RenderingDeviceDriver` — the same abstract interface that the Vulkan, Metal, and D3D12 backends implement. The driver is selected at startup based on project settings. From the renderer's perspective, it's just another backend — the Forward Mobile renderer doesn't know or care that it's running on WebGPU.
+
+The driver advertises its capabilities via `ApiTrait` enums, and the rendering server conditionally activates optimized code paths based on those traits. This keeps platform-specific logic out of the core renderer.
+
+### 13. How are push constants handled without native WebGPU support?
+
+WebGPU has no push constants. We emulate them with a **256KB storage buffer ring**:
+
+- 1024 slots × 256 bytes each (matching `minStorageBufferOffsetAlignment`)
+- A bind group with `hasDynamicOffset=true` is bound once, and the offset advances per draw
+- A CPU shadow buffer accumulates all push constant data during command recording
+- A single `wgpuQueueWriteBuffer` flushes the dirty range at submit time (one IPC per frame)
+
+This design means push constant updates cost zero additional IPC — they're batched into the one submit-time flush.
+
+### 14. How does the shader pipeline work?
+
+Godot compiles GLSL → SPIR-V at engine build time (via glslang). At runtime in the browser:
+
+1. SPIR-V bytecode is loaded from the shader container
+2. Five binary-level preprocessing passes fix Naga's limitations (spec constants, readonly inference, push constant rewrite, combined sampler split, depth image fix)
+3. Patched Naga (compiled to WASM) parses SPIR-V and generates WGSL
+4. Post-processing fixes browser-specific issues (f32::MAX literals, f16 stripping, derivative uniformity)
+5. C++ applies format remapping and binding_array flattening
+6. `wgpuDeviceCreateShaderModule` creates the GPU shader
+
+Results are cached by 64-bit SPIR-V hash — identical stages are never converted twice.
+
+### 15. Why did you vendor and patch Naga instead of using upstream?
+
+Upstream Naga v28 has six issues that prevent it from handling Godot's SPIR-V output correctly:
+1. Rejects boolean values in `@location` shader I/O (Godot passes bools between stages)
+2. Rejects depth/float type mismatches in function arguments
+3. No TEXTURE barrier support (needed for compute shaders)
+4. Rejects textures used for both comparison and non-comparison sampling
+5. Doesn't promote function parameter types for depth textures
+6. Doesn't propagate sampling flags through array access chains
+
+Each patch is minimal and targeted. We plan to upstream them to the Naga project.
+
+### 16. How does the WebGPU device get created?
+
+JavaScript creates the device **before** WASM loads (since device creation is async and Emscripten C++ can't await Promises without Asyncify). The `engine.js` shell:
+1. Calls `navigator.gpu.requestAdapter()` with `powerPreference: 'high-performance'`
+2. Requests a device with all supported optional features and maximum limits
+3. Loads the naga WASM converter in parallel
+4. Passes the device into the Emscripten module config
+5. C++ imports it via `WebGPU.importJsDevice()`
+
+### 17. Why a single 7733-line implementation file?
+
+Pragmatic choice during rapid development. The Vulkan backend splits across multiple files (buffers, textures, pipelines, etc.), and we plan to do the same refactor before upstream submission. For now, the file is navigable due to clear section markers and extensive comments.
+
+---
+
+## Compatibility
+
+### 18. What rendering features work on WebGPU vs native?
+
+**Fully working**: 3D Forward Mobile rendering, 2D Canvas, sky rendering, shadow mapping (dual-paraboloid), skeleton animation, tone mapping, SMAA, debanding, instance batching, texture compression (BC/ETC2/ASTC if GPU supports it).
+
+**Limited/degraded**: Omni shadows (DP only, no cubemap), texture readback (async 1-frame delay), storage textures (format promoted), FSR (unavailable — storage bit removed from render targets).
+
+**Not available**: Subpass-based post-processing, multiview/VR, VRS, tessellation, geometry shaders, subgroups, half-float math, texture component swizzle (emulated on CPU for L8/LA8).
+
+### 19. Will my custom shaders work?
+
+Yes, with caveats:
+- Standard Godot shader language features work
+- `modf`, `isinf`, `isnan` are automatically replaced with WGSL-compatible equivalents
+- Array varyings are decomposed into individual variables
+- Switch statements are converted to if/else chains
+- Canvas shaders: binding 0 in set 3 is reserved for push constant emulation (bindings shifted to 1-4)
+
+If you use very advanced GLSL features or rely on specific Vulkan behaviors, test on WebGPU early.
+
+### 20. Does it work on mobile browsers?
+
+Emerging support:
+- **Chrome Android** (with WebGPU flag): Works, but Adreno GPUs may trigger float32→float16 texture downgrades
+- **Safari iOS 18+**: WebGPU support is early; works with the binding_array and format workarounds
+- **Firefox Android**: Not yet shipping WebGPU
+
+Mobile WebGPU is the next frontier. The performance optimizations (especially IPC reduction) are even more impactful on mobile where the trampoline cost is 3-5x higher.
+
+### 21. What about SharedArrayBuffer / COOP/COEP headers?
+
+WebGPU does **not** require SharedArrayBuffer or cross-origin isolation headers. This means:
+- Non-threaded WebGPU builds work on any hosting provider (GitHub Pages, Netlify, etc.)
+- No special server configuration needed
+- Only threaded builds (for audio/physics offloading) need COOP/COEP
+
+This is a significant deployment advantage over threaded web builds.
+
+### 22. How does it handle browsers that don't support WebGPU?
+
+The HTML shell (`full-size.html`) checks `navigator.gpu` on load. If WebGPU is unavailable, it displays a clear message directing users to update their browser. The engine never starts if WebGPU is missing.
+
+For dual-renderer builds (`webgpu=yes opengl3=yes`), the export plugin can be configured to fall back to WebGL if WebGPU is unavailable.
+
+---
+
+## Technical Deep-Dives
+
+### 23. How does the bind group rebinding cache work?
+
+WebGPU requires bind group layouts to match exactly when binding a uniform set to a pipeline. When a uniform set created with shader A's layout needs to work with shader B's pipeline (common in Godot where one material is used with multiple shaders), the driver:
+
+1. Checks if layouts are pointer-equal (fast path — same shader)
+2. Checks the per-uniform-set rebind cache
+3. On cache miss: adapts entries (adjusts sampler types, texture sample types, view dimensions), filters to target layout's bindings, creates a new bind group, caches it
+
+This avoids re-creating bind groups every frame while ensuring WebGPU validation passes.
+
+### 24. How does format promotion work for storage textures?
+
+WebGPU only supports a limited set of storage texture formats (see spec section 26.1.1). When Godot creates a texture with `StorageBinding` usage and a format like R8Unorm:
+
+1. **At texture creation**: format promoted to R32Float (actual GPU allocation)
+2. **In WGSL shaders**: format name `r8unorm` replaced with `r32float` via string substitution
+3. **On upload**: data converted from R8 to R32Float by `texture_upload_convert`
+4. **On readback**: data converted back from R32Float to R8 by `texture_readback_convert`
+
+This is transparent to the engine — it thinks it's working with R8, and the driver handles all conversion.
+
+### 25. What's the encoder splitting mechanism for sync isolation?
+
+WebGPU has implicit synchronization within a command encoder, but it cannot handle a texture being used as both a read (TextureBinding) and write (RenderAttachment) target within the same encoder without an explicit scope break.
+
+When the driver detects a render pass attachment that has both usage flags, it:
+1. Flushes the push constant shadow buffer
+2. Finishes and submits the current command encoder
+3. Creates a fresh encoder
+
+This ensures the prior read operations complete before the write begins. It's conservative (splits even when no actual conflict exists in the current frame) but prevents WebGPU validation errors that would invalidate the entire command buffer.
+
+### 26. How does async buffer readback work without blocking?
+
+WebGPU's `mapAsync` returns a Promise that cannot be awaited from synchronous C++ (without Asyncify, which was abandoned). The solution is a frame-deferred pattern:
+
+**Frame N**: 
+- Engine calls `texture_get_data()` or `buffer_get_data_direct()`
+- Driver copies GPU texture/buffer to a staging buffer
+- Initiates `wgpuBufferMapAsync` on the staging buffer
+- Returns empty data (not ready yet)
+
+**Frame N+1**:
+- Engine calls again
+- Callback has fired between frames (during `requestAnimationFrame`)
+- Driver returns the mapped data from the staging buffer
+- Initiates a fresh copy for the next request
+
+The 1-frame latency is acceptable for viewport capture, profiling, and compute result readback.
+
+### 27. How is the combined-sampler splitting implemented?
+
+At the SPIR-V binary level (before Naga parsing), the most complex preprocessing pass (~500 lines of Rust):
+
+1. Identifies all `OpVariable` with `OpTypeSampledImage` pointer type
+2. For each combined variable at binding N:
+   - Keeps original variable as the **image** (reuses original ID for reference stability)
+   - Creates a new variable as the **sampler** at binding N*2
+   - Image gets binding N*2+1
+3. Rewrites all `OpLoad` of combined variables to emit separate image + sampler loads followed by `OpSampledImage`
+4. Handles function parameters by rewriting call sites
+5. Doubles ALL other bindings to avoid collision (except PC ring buffer at binding 120)
+6. Updates `OpEntryPoint` interface lists
+
+This approach is more robust than post-Naga text patching because it handles edge cases like multi-level function call chains and access chain expressions.
+
+---
+
+## For Godot Core Contributors
+
+### 28. What changes were made to the base RenderingDeviceDriver interface?
+
+10 new `ApiTrait` enum values and ~9 new virtual methods were added to `rendering_device_driver.h`. All new methods have safe default implementations (return invalid/false/empty), so non-WebGPU backends are completely unaffected.
+
+New methods include: `buffer_create_with_data`, `buffer_initiate_async_map`, `buffer_write_direct`, `buffer_get_data_direct`, `buffer_flush`, `texture_get_gpu_pixel_size`, `texture_readback_convert`, `texture_upload_convert`, `texture_initialize_direct_layered`, `command_copy_buffer_to_texture_layered`.
+
+### 29. What would need to change for upstream Godot acceptance?
+
+1. **RFC for API traits**: The 10 new trait enums need formal review by Godot rendering team
+2. **Split the monolithic .cpp**: Match Vulkan backend file structure
+3. **Move WGSL patching to Rust**: AST transforms in naga-converter instead of C++ string manipulation
+4. **Upstream naga patches**: Submit the 6 modifications to the Naga project
+5. **CI infrastructure**: Headless Chrome/Firefox WebGPU testing
+6. **Shared constants**: Single source of truth for magic numbers (binding 120, ring size, alignment)
+7. **Feature flags documentation**: Clear docs on what each ApiTrait does and when it's safe to enable
+
+### 30. How does the instance batching interact with Godot's existing render list?
+
+The batching is a lookahead in `_render_list_template` (Forward Mobile). After processing a draw, it peeks ahead at the next N draws checking if they share:
+- Same mesh surface (same variant for the current pass)
+- Same material uniform set
+- Same LOD index
+- Same cull variant
+- Same pipeline specialization (light counts, features)
+- Not transparent, not skinned, not multimesh, not particle
+
+If all match, they merge into a single `drawIndexed(indexCount, batchCount)` call. The shader uses `draw_call.instance_index + gl_InstanceIndex` to index into per-instance data.
+
+This works because Godot's render list is already sorted by shader → material → geometry, making same-state draws naturally adjacent.
+
+### 31. How does the skeleton atlas integrate with the existing skeleton system?
+
+When `supports_buffer_direct_write()` returns true (WebGPU only), the mesh storage system uses a shared GPU buffer instead of per-skeleton buffers:
+
+- `_update_dirty_skeletons()` has two paths: atlas (new) and legacy (original)
+- Atlas path: memcpy all dirty skeleton data into CPU mirror, track dirty range, single `buffer_update_direct()`
+- Shader: `bone_offset` push constant (repurposed padding field) indexes into the atlas
+- Skeleton compute shader adds `bone_offset` to all bone lookups
+
+The atlas grows with power-of-two strategy (min 64KB). The uniform set is rebuilt lazily on buffer reallocation.
+
+### 32. Is there a test suite? How is correctness validated?
+
+Currently, there is no automated test suite for the WebGPU backend. Correctness is validated through:
+- Manual testing across Chrome, Firefox, and Safari
+- Stress test scenes (20k instances, 32 lights, 60k shared-material objects)
+- The browser's own WebGPU validation layer (catches spec violations)
+- Naga's built-in SPIR-V and WGSL validation passes
+- Performance counter monitoring for unexpected behavior
+
+For upstream, we'd need:
+- Headless browser CI with WebGPU (Chrome --headless + SwiftShader)
+- Shader corpus tests (convert all built-in shaders, validate WGSL output)
+- Screenshot comparison tests across browsers
+- Resource lifecycle stress tests (rapid create/destroy cycles)
