@@ -37,6 +37,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/os/os.h"
 #include "core/profiling/profiling.h"
 #include "core/templates/fixed_vector.h"
 #include "modules/modules_enabled.gen.h"
@@ -3779,6 +3780,28 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 	const RenderingShaderContainerFormat &container_format = driver->get_shader_container_format();
 	Ref<RenderingShaderContainer> shader_container = container_format.create_container();
 	ERR_FAIL_COND_V(shader_container.is_null(), Vector<uint8_t>());
+
+	// Dump SPIR-V to disk when GODOT_DUMP_SPIRV is set (for CI shader validation).
+	static const String dump_dir = OS::get_singleton()->get_environment("GODOT_DUMP_SPIRV");
+	if (!dump_dir.is_empty()) {
+		static const char *stage_suffixes[] = { "vert", "frag", "tesc", "tese", "comp" };
+		Ref<DirAccess> da = DirAccess::open(dump_dir);
+		if (da.is_null()) {
+			DirAccess::make_dir_recursive_absolute(dump_dir);
+		}
+		for (int i = 0; i < p_spirv.size(); i++) {
+			if (p_spirv[i].spirv.is_empty()) {
+				continue;
+			}
+			String stage_ext = (p_spirv[i].shader_stage < 5) ? stage_suffixes[p_spirv[i].shader_stage] : "spv";
+			String safe_name = p_shader_name.is_empty() ? "unnamed" : p_shader_name.replace("/", "_").replace("\\", "_");
+			String path = dump_dir.path_join(safe_name + "." + stage_ext + ".spv");
+			Ref<FileAccess> f = FileAccess::open(path, FileAccess::WRITE);
+			if (f.is_valid()) {
+				f->store_buffer(p_spirv[i].spirv.ptr(), p_spirv[i].spirv.size());
+			}
+		}
+	}
 
 	// Compile shader binary from SPIR-V.
 	bool code_compiled = shader_container->set_code_from_spirv(p_shader_name, p_spirv);
