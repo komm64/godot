@@ -9,6 +9,7 @@ Automated tests for the Godot WebGPU rendering backend. Validates the full shade
 | [Shader Corpus](shader_corpus/) | SPIR-V → WGSL conversion via naga-converter WASM | ~1s | No |
 | [SPIR-V Validation](shader_corpus/validate_spirv_dump.mjs) | ALL engine-compiled SPIR-V through naga | ~5s | Yes (editor) |
 | [Smoke Test](test_project/smoke_test.mjs) | Full runtime in headless Chrome — no shader errors, no device lost | ~60s | Yes (editor + web template) |
+| [Scene Smoketest](scene_smoketest/) | 18 demo/benchmark scenes across Chrome, Firefox, and Safari | ~8min | Yes (pre-exported) |
 | [Resource Lifecycle](resource_lifecycle/) | Rapid create/destroy of buffers, textures, pipelines | ~30s | No (standalone) |
 | [Screenshot Comparison](screenshot_comparison/) | Visual regression across Chrome and Firefox | ~60s | No (standalone) |
 
@@ -102,7 +103,30 @@ node smoke_test.mjs ./export/
 
 **Pass criteria:** Engine starts, all shaders compile (no `[SHADER]` errors), no device-lost, GDScript reports `[ShaderCoverage] PASS`.
 
-### 4. Resource Lifecycle (standalone, needs Playwright)
+### 4. Scene Smoketest — Multi-Browser (requires pre-exported scenes)
+
+Runs 18 demo and benchmark scenes across Chrome, Firefox, and Safari:
+
+```bash
+cd webgpu_tests/scene_smoketest
+npm install playwright && npx playwright install chromium firefox --with-deps
+node run_scenes.mjs --browser all         # All 3 browsers
+node run_scenes.mjs --browser chrome      # Chrome only (default)
+node run_scenes.mjs --browser firefox     # Firefox only
+node run_scenes.mjs --browser safari      # Safari only (macOS, requires "Allow JS from Apple Events")
+node run_scenes.mjs --scene benchmark_pbr # Single scene, default browser
+```
+
+**Pass criteria:** Engine starts (canvas > 300px), no GPU validation errors, no shader failures, no device-lost.
+
+**Safari prerequisite:** Enable Safari → Develop → "Allow JavaScript from Apple Events" (uses real Safari via AppleScript since Playwright's safaridriver disables WebGPU).
+
+**Exporting scenes** (requires editor + web template):
+```bash
+node run_scenes.mjs --export --browser chrome
+```
+
+### 5. Resource Lifecycle (standalone, needs Playwright)
 
 ```bash
 cd webgpu_tests/resource_lifecycle
@@ -110,7 +134,7 @@ npm install playwright && npx playwright install chromium --with-deps
 node run_tests.mjs
 ```
 
-### 5. Screenshot Comparison (standalone, needs Playwright)
+### 6. Screenshot Comparison (standalone, needs Playwright)
 
 ```bash
 cd webgpu_tests/screenshot_comparison
@@ -142,6 +166,11 @@ Defined in `.github/workflows/webgpu_tests.yml`. Runs on push/PR to `webgpu-4.6.
 │  │ comparison      │                                            │
 │  └─────────────────┘                                            │
 │                                                                 │
+│  ┌─────────────────┐  (parallel, no build needed)               │
+│  │ scene-smoketest │  18 scenes × Chrome + Firefox              │
+│  │                 │  (pre-exported in repo)                    │
+│  └─────────────────┘                                            │
+│                                                                 │
 │  ┌─────────────────┐                                            │
 │  │ build-webgpu    │  Web template + Linux editor + export      │
 │  │ (~60 min)       │  + SPIR-V dump (309 shaders)               │
@@ -169,6 +198,7 @@ Defined in `.github/workflows/webgpu_tests.yml`. Runs on push/PR to `webgpu-4.6.
 | `build-webgpu` | — | 90 min | Yes |
 | `validate-spirv` | build-webgpu | 10 min | Yes |
 | `smoke-test` | build-webgpu | 15 min | Yes |
+| `scene-smoketest` | — | 20 min | Yes |
 | `resource-lifecycle` | — | 15 min | Yes |
 | `screenshot-comparison` | — | 20 min | No (warning only) |
 | `test-summary` | all above | — | — |

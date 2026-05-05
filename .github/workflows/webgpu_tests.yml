@@ -210,6 +210,36 @@ jobs:
         run: node smoke_test.mjs ./export/
 
   # ═══════════════════════════════════════════════════════════════════════════════
+  # Scene Smoketest: 18 demos/benchmarks across Chrome + Firefox
+  # ═══════════════════════════════════════════════════════════════════════════════
+  scene-smoketest:
+    runs-on: ubuntu-24.04
+    name: Scene Smoketest (Chrome + Firefox)
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright and browsers
+        run: |
+          cd webgpu_tests/scene_smoketest
+          npm install
+          npx playwright install chromium firefox --with-deps
+
+      - name: Run scene smoketest (Chrome)
+        working-directory: webgpu_tests/scene_smoketest
+        run: node run_scenes.mjs --browser chrome --timeout 30000
+
+      - name: Run scene smoketest (Firefox)
+        working-directory: webgpu_tests/scene_smoketest
+        run: node run_scenes.mjs --browser firefox --timeout 30000
+
+  # ═══════════════════════════════════════════════════════════════════════════════
   # Resource Lifecycle: Browser-based stress test
   # ═══════════════════════════════════════════════════════════════════════════════
   resource-lifecycle:
@@ -279,7 +309,7 @@ jobs:
   test-summary:
     runs-on: ubuntu-24.04
     name: Test Summary
-    needs: [shader-corpus, validate-spirv, smoke-test, resource-lifecycle, screenshot-comparison]
+    needs: [shader-corpus, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
     if: always()
     steps:
       - name: Check results
@@ -291,6 +321,7 @@ jobs:
           echo "  Shader Corpus:        ${{ needs.shader-corpus.result }}"
           echo "  SPIR-V Validation:    ${{ needs.validate-spirv.result }}"
           echo "  Smoke Test:           ${{ needs.smoke-test.result }}"
+          echo "  Scene Smoketest:      ${{ needs.scene-smoketest.result }}"
           echo "  Resource Lifecycle:   ${{ needs.resource-lifecycle.result }}"
           echo "  Screenshot Compare:   ${{ needs.screenshot-comparison.result }}"
           echo ""
@@ -307,6 +338,10 @@ jobs:
           fi
           if [ "${{ needs.smoke-test.result }}" = "failure" ]; then
             echo "::error::Headless smoke test failed — shader compilation or WebGPU errors in browser"
+            FAILED=1
+          fi
+          if [ "${{ needs.scene-smoketest.result }}" = "failure" ]; then
+            echo "::error::Scene smoketest failed — one or more scenes have GPU/shader errors in Chrome or Firefox"
             FAILED=1
           fi
           if [ "${{ needs.resource-lifecycle.result }}" = "failure" ]; then

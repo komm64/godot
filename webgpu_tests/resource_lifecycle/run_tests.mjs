@@ -29,7 +29,8 @@ const MIME_TYPES = {
 function startServer(port = 0) {
     return new Promise((resolve) => {
         const server = createServer((req, res) => {
-            const filePath = join(__dirname, req.url === '/' ? 'index.html' : req.url);
+            const urlPath = new URL(req.url, 'http://localhost').pathname;
+            const filePath = join(__dirname, urlPath === '/' ? 'index.html' : urlPath);
             if (!existsSync(filePath)) {
                 res.writeHead(404);
                 res.end('Not found');
@@ -56,13 +57,17 @@ async function runWithPlaywright(url) {
     }
 
     console.log('Launching browser with WebGPU support...');
-    const browser = await chromium.launch({
-        headless: false, // WebGPU often requires headed mode
-        args: [
-            '--enable-unsafe-webgpu',
-            '--enable-features=Vulkan,UseSkiaRenderer',
-        ],
-    });
+    const isCI = !!process.env.CI;
+    const launchOpts = isCI
+        ? { headless: true, args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan,UseSkiaRenderer', '--use-angle=swiftshader', '--enable-gpu'] }
+        : {
+            headless: false,
+            executablePath: process.platform === 'darwin'
+                ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+                : process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : '/usr/bin/google-chrome',
+            args: [],
+        };
+    const browser = await chromium.launch(launchOpts);
 
     const page = await browser.newPage();
 
@@ -73,14 +78,25 @@ async function runWithPlaywright(url) {
         }
     });
 
-    console.log(`Navigating to ${url}?autorun...`);
-    await page.goto(`${url}?autorun`);
+    console.log(`Navigating to ${url}/?autorun...`);
+    await page.goto(`${url}/?autorun`, { waitUntil: 'load' });
+
+    // Wait for autorun to start (status changes to 'running')
+    console.log('Waiting for tests to start...');
+    await page.waitForFunction(() => {
+        const status = document.getElementById('status');
+        return status && status.className.includes('running');
+    }, { timeout: 15000 }).catch(() => {
+        // If autorun didn't trigger, invoke it manually
+        console.log('  Auto-run did not trigger, invoking manually...');
+        return page.evaluate(() => { if (typeof runAllTests === 'function') runAllTests(); });
+    });
 
     // Wait for tests to complete (status element changes from 'running')
     console.log('Waiting for tests to complete...');
     await page.waitForFunction(() => {
         const status = document.getElementById('status');
-        return status && !status.className.includes('running');
+        return status && (status.className.includes('pass') || status.className.includes('fail'));
     }, { timeout: 120000 });
 
     // Extract results
