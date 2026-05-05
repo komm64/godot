@@ -687,6 +687,125 @@ fn convert_push_constants_to_uniforms(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Rewrite OpCopyLogical (op 400) to OpCopyObject (op 83).
+///
+/// OpCopyLogical is a SPIR-V 1.4+ instruction for copying between structs that are
+/// logically equivalent but have different decorations. Naga doesn't support it,
+/// but OpCopyObject is semantically equivalent for our purposes (the types have
+/// identical memory layout; only decorations differ).
+fn rewrite_copy_logical(bytes: &[u8]) -> Vec<u8> {
+    let total_words = bytes.len() / 4;
+    if total_words < 5 {
+        return bytes.to_vec();
+    }
+
+    const OP_COPY_LOGICAL: u16 = 400;
+    const OP_COPY_OBJECT: u16 = 83;
+
+    // Quick scan: if no CopyLogical present, return as-is.
+    let mut found = false;
+    let mut pos = 5usize;
+    while pos < total_words {
+        let w0 = read_word(bytes, pos);
+        let wc = (w0 >> 16) as usize;
+        let op = (w0 & 0xFFFF) as u16;
+        if wc == 0 || pos + wc > total_words { break; }
+        if op == OP_COPY_LOGICAL {
+            found = true;
+            break;
+        }
+        pos += wc;
+    }
+
+    if !found {
+        return bytes.to_vec();
+    }
+
+    // Rewrite: replace OpCopyLogical with OpCopyObject (same word count and layout).
+    let mut out = bytes.to_vec();
+    let mut count = 0u32;
+    pos = 5;
+    while pos < total_words {
+        let w0 = read_word(&out, pos);
+        let wc = (w0 >> 16) as usize;
+        let op = (w0 & 0xFFFF) as u16;
+        if wc == 0 || pos + wc > total_words { break; }
+        if op == OP_COPY_LOGICAL {
+            // Replace opcode in-place: keep word count, change opcode to CopyObject.
+            let new_w0 = ((wc as u32) << 16) | (OP_COPY_OBJECT as u32);
+            let off = pos * 4;
+            out[off..off + 4].copy_from_slice(&new_w0.to_le_bytes());
+            count += 1;
+        }
+        pos += wc;
+    }
+
+    if count > 0 {
+        log(&format!("[REWRITE] Replaced {} OpCopyLogical → OpCopyObject", count));
+    }
+
+    out
+}
+
+/// Rewrite OpTerminateInvocation (op 4416) to OpKill (op 252).
+///
+/// OpTerminateInvocation is from SPV_KHR_terminate_invocation and behaves like
+/// OpKill but with defined helper-invocation semantics. Naga doesn't support it.
+/// OpKill is the SPIR-V 1.0 equivalent and naga handles it correctly.
+fn rewrite_terminate_invocation(bytes: &[u8]) -> Vec<u8> {
+    let total_words = bytes.len() / 4;
+    if total_words < 5 {
+        return bytes.to_vec();
+    }
+
+    const OP_TERMINATE_INVOCATION: u16 = 4416;
+    const OP_KILL: u16 = 252;
+
+    // Quick scan: if no TerminateInvocation present, return as-is.
+    let mut found = false;
+    let mut pos = 5usize;
+    while pos < total_words {
+        let w0 = read_word(bytes, pos);
+        let wc = (w0 >> 16) as usize;
+        let op = (w0 & 0xFFFF) as u16;
+        if wc == 0 || pos + wc > total_words { break; }
+        if op == OP_TERMINATE_INVOCATION {
+            found = true;
+            break;
+        }
+        pos += wc;
+    }
+
+    if !found {
+        return bytes.to_vec();
+    }
+
+    // Rewrite in-place.
+    let mut out = bytes.to_vec();
+    let mut count = 0u32;
+    pos = 5;
+    while pos < total_words {
+        let w0 = read_word(&out, pos);
+        let wc = (w0 >> 16) as usize;
+        let op = (w0 & 0xFFFF) as u16;
+        if wc == 0 || pos + wc > total_words { break; }
+        if op == OP_TERMINATE_INVOCATION {
+            // Both OpKill and OpTerminateInvocation have word count 1, but be safe.
+            let new_w0 = ((wc as u32) << 16) | (OP_KILL as u32);
+            let off = pos * 4;
+            out[off..off + 4].copy_from_slice(&new_w0.to_le_bytes());
+            count += 1;
+        }
+        pos += wc;
+    }
+
+    if count > 0 {
+        log(&format!("[REWRITE] Replaced {} OpTerminateInvocation → OpKill", count));
+    }
+
+    out
+}
+
 /// Split combined image sampler variables into separate image + sampler.
 /// Naga's SPIR-V frontend doesn't handle OpLoad of combined image sampler
 /// variables — it expects separate image/sampler loads followed by OpSampledImage.
@@ -1495,6 +1614,10 @@ pub fn spirv_to_wgsl(spirv_bytes: &[u8]) -> Result<String, JsError> {
 
     // Pre-process: freeze OpSpecConstantOp instructions that naga can't handle.
     let spirv_bytes = freeze_spec_constant_ops(spirv_bytes);
+
+    // Pre-process: rewrite SPIR-V 1.4+ instructions unsupported by naga.
+    let spirv_bytes = rewrite_copy_logical(&spirv_bytes);
+    let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
 
     // Pre-process: add OpDecorate NonWritable to storage buffer vars that are never
     // stored to. glslang omits NonWritable for `restrict readonly buffer` blocks, so

@@ -16,7 +16,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Paths
-const NAGA_WASM_PATH = join(__dirname, '../../drivers/webgpu/naga-converter/out/naga_converter_bg.wasm');
+const NAGA_WASM_PATH = join(__dirname, '../../drivers/webgpu/naga-converter/prebuilt/naga_wasm_bg.wasm');
 const FIXTURES_DIR = join(__dirname, 'fixtures');
 const RESULTS_DIR = join(__dirname, 'results');
 

@@ -93,12 +93,12 @@ jobs:
       - name: Setup Python and SCons
         uses: ./.github/actions/godot-deps
 
-      - name: Build WebGPU export template (template_debug for shader dump)
+      - name: Build WebGPU export template
         uses: ./.github/actions/godot-build
         with:
           scons-flags: ${{ env.SCONS_FLAGS }} threads=no webgpu=yes opengl3=no
           platform: web
-          target: template_debug
+          target: template_release
 
       - name: Save Godot build cache
         uses: ./.github/actions/godot-cache-save
@@ -115,17 +115,17 @@ jobs:
           mkdir -p /tmp/spirv_dump
           mkdir -p webgpu_tests/test_project/export
 
-          # Install WebGPU template
+          # Install WebGPU template (editor looks for web_nothreads_release.zip)
           mkdir -p ~/.local/share/godot/export_templates/4.6.2.dev
-          cp bin/godot.web.template_debug.wasm32.nothreads.zip \
-             ~/.local/share/godot/export_templates/4.6.2.dev/web_debug.zip || true
+          cp bin/godot.web.template_release.wasm32.nothreads.zip \
+             ~/.local/share/godot/export_templates/4.6.2.dev/web_nothreads_release.zip || true
 
           # Run editor headless to import project and compile all shaders
           # GODOT_DUMP_SPIRV causes all compiled SPIR-V to be written to disk
           GODOT_DUMP_SPIRV=/tmp/spirv_dump timeout 120 \
             bin/godot.linuxbsd.editor.x86_64 \
               --headless --path webgpu_tests/test_project \
-              --export-debug "WebGPU" export/index.html || true
+              --export-release "WebGPU" export/index.html || true
 
           echo "SPIR-V files dumped:"
           ls -la /tmp/spirv_dump/ | head -50
