@@ -416,8 +416,9 @@ Ref<Resource> Resource::_duplicate(const DuplicateParams &p_params) const {
 	}
 
 	// komm64: track origin path for duplicated resources (StateShot factory hook).
-	if (!resource_path.is_empty()) {
-		r->set_meta(SNAME("_origin_path"), resource_path);
+	const String origin_path = get_path();
+	if (!origin_path.is_empty()) {
+		r->set_meta(SNAME("_origin_path"), origin_path);
 	}
 
 	return r;
