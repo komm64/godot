@@ -731,6 +731,18 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 		print_verbose("WebGPU: texture-formats-tier1 feature is available — r8/rg8 storage formats supported natively.");
 	}
 
+	// readonly-and-readwrite-storage-textures: allows read and read_write access
+	// modes on storage textures. Without this, only write-only is valid.
+	has_rw_storage_textures = (bool)EM_ASM_INT({
+		var d = Module['preinitializedWebGPUDevice'];
+		return (d && d.features && d.features.has('readonly-and-readwrite-storage-textures')) ? 1 : 0;
+	});
+	if (has_rw_storage_textures) {
+		print_verbose("WebGPU: readonly-and-readwrite-storage-textures feature is available.");
+	} else {
+		print_verbose("WebGPU: readonly-and-readwrite-storage-textures NOT available — will split read_write storage textures.");
+	}
+
 	// Optional texture-compression families. The JS shell opts in to these when
 	// the adapter supports them; we must match that here so Godot only advertises
 	// the corresponding DataFormats when they'll actually work.
@@ -1504,6 +1516,11 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 	// Upgrade to 32-bit equivalents when storage binding is needed.
 	if (tex->usage & WGPUTextureUsage_StorageBinding) {
 		tex->format = _promote_storage_format(tex->format);
+		// When read_write storage textures are split (Safari lacks the extension),
+		// we need CopySrc to copy the texture to a shadow read binding.
+		if (!has_rw_storage_textures) {
+			tex->usage |= WGPUTextureUsage_CopySrc;
+		}
 	}
 
 	// When float32-filterable is not supported (e.g. Adreno GPU), float32
@@ -1788,6 +1805,12 @@ void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
 		for (uint64_t k : to_remove) {
 			_readback_cache.erase(k);
 		}
+	}
+
+	// Remove any rw_shadow_copy_map entries keyed on this texture's handle,
+	// so stale handles can't match a recycled WGPUTexture later.
+	if (tex->handle) {
+		rw_shadow_copy_map.erase(tex->handle);
 	}
 
 	if (tex->default_view) {
@@ -3142,6 +3165,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
 	HashMap<uint32_t, uint32_t> wgsl_buffer_stages;
 
+	// Read-write storage texture splits: maps (set << 16 | write_binding) → shadow_read_binding.
+	// Populated when readonly-and-readwrite-storage-textures is unavailable.
+	HashMap<uint32_t, uint32_t> wgsl_rw_storage_splits;
+
 	// --- Create one WGPUShaderModule per stage ---
 	bool detected_override_declarations = false;
 	Vector<RenderingShaderContainer::Shader> &stage_shaders = p_shader_container->shaders;
@@ -3347,6 +3374,101 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			CharString cs = ws.utf8();
 			wgsl_str = (char *)malloc(cs.length() + 1);
 			memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
+		}
+
+		// When readonly-and-readwrite-storage-textures is not available, split
+		// read_write storage textures into separate write + read (shadow) bindings.
+		// Safari rejects read_write storage texture access at BGL validation.
+		// The shadow read binding uses the odd slot (B+1) which is free for IMAGE
+		// types due to NAGA's binding doubling (even=resource, odd=sampler for combined).
+		if (!has_rw_storage_textures && strstr(wgsl_str, "read_write>")) {
+			struct RWSplitInfo {
+				uint32_t grp, bnd;
+				String var_name, dim_type, fmt;
+			};
+			LocalVector<RWSplitInfo> rw_infos;
+
+			// Scan for texture_storage_*<fmt,read_write> declarations.
+			{
+				const char *p = wgsl_str;
+				while ((p = strstr(p, "@group(")) != nullptr) {
+					unsigned int grp = 0, bnd = 0;
+					if (sscanf(p, "@group(%u) @binding(%u)", &grp, &bnd) != 2) { p++; continue; }
+					const char *semi = strchr(p, ';');
+					if (!semi) { p++; continue; }
+					const char *rw = strstr(p, "read_write>");
+					if (!rw || rw >= semi) { p = semi; continue; }
+					const char *ts = strstr(p, "texture_storage_");
+					if (!ts || ts >= semi) { p = semi; continue; }
+					// Variable name: "var NAME:"
+					const char *vp = strstr(p, "var ");
+					if (!vp || vp > ts) { p = semi; continue; }
+					vp += 4;
+					const char *colon = strchr(vp, ':');
+					if (!colon || colon > ts) { p = semi; continue; }
+					const char *ne = colon;
+					while (ne > vp && (*(ne - 1) == ' ' || *(ne - 1) == '\t')) ne--;
+					if (ne <= vp) { p = semi; continue; }
+					// Dim type: texture_storage_Xd
+					const char *lt = strchr(ts, '<');
+					if (!lt || lt > rw) { p = semi; continue; }
+					// Format: between < and , before read_write
+					const char *comma = strchr(lt + 1, ',');
+					if (!comma || comma >= rw) { p = semi; continue; }
+					int fmt_len = (int)(comma - lt - 1);
+					if (fmt_len <= 0 || fmt_len >= 64) { p = semi; continue; }
+
+					RWSplitInfo info;
+					info.grp = grp;
+					info.bnd = bnd;
+					{ char buf[256]; int len = (int)(ne - vp); if (len > 255) len = 255; memcpy(buf, vp, len); buf[len] = '\0'; info.var_name = buf; }
+					{ char buf[256]; int len = (int)(lt - ts); if (len > 255) len = 255; memcpy(buf, ts, len); buf[len] = '\0'; info.dim_type = buf; }
+					{ char buf[64]; if (fmt_len > 63) fmt_len = 63; memcpy(buf, lt + 1, fmt_len); buf[fmt_len] = '\0'; info.fmt = String(buf).strip_edges(); }
+					rw_infos.push_back(info);
+					p = semi;
+				}
+			}
+
+			if (rw_infos.size() > 0) {
+				String ws(wgsl_str);
+				for (const RWSplitInfo &info : rw_infos) {
+					uint32_t shadow_bnd = info.bnd + 1;
+					String shadow_name = info.var_name + "_rw_in";
+
+					// 1. Replace read_write with write in the declaration.
+					ws = ws.replace(
+							info.dim_type + "<" + info.fmt + ",read_write>",
+							info.dim_type + "<" + info.fmt + ",write>");
+					ws = ws.replace(
+							info.dim_type + "<" + info.fmt + ", read_write>",
+							info.dim_type + "<" + info.fmt + ", write>");
+
+					// 2. Insert shadow read binding declaration after the original.
+					String write_pat = info.dim_type + "<" + info.fmt + ",write>;";
+					int64_t wt_pos = ws.find(write_pat);
+					if (wt_pos == -1) {
+						write_pat = info.dim_type + "<" + info.fmt + ", write>;";
+						wt_pos = ws.find(write_pat);
+					}
+					if (wt_pos != -1) {
+						int64_t insert_pos = wt_pos + write_pat.length();
+						String shadow_decl = "\n@group(" + itos(info.grp) + ") @binding(" + itos(shadow_bnd) + ") \nvar " + shadow_name + ": " + info.dim_type + "<" + info.fmt + ",read>;";
+						ws = ws.substr(0, insert_pos) + shadow_decl + ws.substr(insert_pos);
+					}
+
+					// 3. Redirect textureLoad to the shadow (not textureStore).
+					ws = ws.replace("textureLoad(" + info.var_name + ",", "textureLoad(" + shadow_name + ",");
+					ws = ws.replace("textureLoad(" + info.var_name + ")", "textureLoad(" + shadow_name + ")");
+
+					// Record the split for BGL/bind-group creation.
+					uint32_t key = ((uint32_t)info.grp << 16) | info.bnd;
+					wgsl_rw_storage_splits[key] = shadow_bnd;
+				}
+				free(wgsl_str);
+				CharString cs = ws.utf8();
+				wgsl_str = (char *)malloc(cs.length() + 1);
+				memcpy(wgsl_str, cs.get_data(), cs.length() + 1);
+			}
 		}
 
 		WGPUShaderSourceWGSL wgsl_source = {};
@@ -4013,6 +4135,25 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			entries.push_back(alias_entry);
 		}
 
+		// Add BGL entries for read_write storage texture shadow read bindings.
+		// Each shadow is a read-only storage texture at (write_binding + 1).
+		for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_rw_storage_splits) {
+			uint32_t write_key = kv.key;
+			uint32_t shadow_bnd = kv.value;
+			uint32_t split_grp = write_key >> 16;
+			if (split_grp != set) {
+				continue;
+			}
+			uint32_t shadow_key = ((uint32_t)split_grp << 16) | shadow_bnd;
+			WGPUBindGroupLayoutEntry shadow_entry = {};
+			shadow_entry.binding = shadow_bnd;
+			shadow_entry.visibility = WGPUShaderStage_Compute; // read_write images are compute-only.
+			shadow_entry.storageTexture.access = WGPUStorageTextureAccess_ReadOnly;
+			shadow_entry.storageTexture.format = wgsl_storage_tex_format.has(shadow_key) ? wgsl_storage_tex_format[shadow_key] : WGPUTextureFormat_RGBA8Unorm;
+			shadow_entry.storageTexture.viewDimension = wgsl_tex_dims.has(shadow_key) ? wgsl_tex_dims[shadow_key] : WGPUTextureViewDimension_2D;
+			entries.push_back(shadow_entry);
+		}
+
 		// Log any duplicate binding indices for debugging.
 		for (uint32_t a = 0; a < entries.size(); a++) {
 			for (uint32_t b = a + 1; b < entries.size(); b++) {
@@ -4041,6 +4182,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 	// Store depth alias bindings on the shader for use during uniform_set_create.
 	shader->depth_alias_bindings = wgsl_depth_alias_bindings;
+
+	// Store read_write storage texture splits for bind group creation.
+	shader->rw_storage_splits = wgsl_rw_storage_splits;
 
 	// --- Build WGPUPipelineLayout ---
 	// The number of bind groups in the pipeline layout must cover:
@@ -4123,6 +4267,20 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					ae.texture.viewDimension = wgsl_tex_dims.has(kv.key) ? wgsl_tex_dims[kv.key] : WGPUTextureViewDimension_2D;
 					ae.texture.multisampled = false;
 					merged_entries.push_back(ae);
+				}
+				// Add rw_storage split entries to the merged layout.
+				for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_rw_storage_splits) {
+					uint32_t split_grp = kv.key >> 16;
+					uint32_t shadow_bnd = kv.value;
+					if (split_grp != i) { continue; }
+					uint32_t shadow_key = ((uint32_t)split_grp << 16) | shadow_bnd;
+					WGPUBindGroupLayoutEntry se = {};
+					se.binding = shadow_bnd;
+					se.visibility = WGPUShaderStage_Compute;
+					se.storageTexture.access = WGPUStorageTextureAccess_ReadOnly;
+					se.storageTexture.format = wgsl_storage_tex_format.has(shadow_key) ? wgsl_storage_tex_format[shadow_key] : WGPUTextureFormat_RGBA8Unorm;
+					se.storageTexture.viewDimension = wgsl_tex_dims.has(shadow_key) ? wgsl_tex_dims[shadow_key] : WGPUTextureViewDimension_2D;
+					merged_entries.push_back(se);
 				}
 
 				WGPUBindGroupLayoutDescriptor merged_desc = {};
@@ -4615,6 +4773,86 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 		}
 	}
 
+	// Add shadow read bindings for read_write storage texture splits.
+	// For each split, create a GPU copy of the original texture and bind it
+	// at the shadow read slot (write_binding + 1).
+	for (const KeyValue<uint32_t, uint32_t> &kv : shader->rw_storage_splits) {
+		uint32_t split_grp = kv.key >> 16;
+		uint32_t write_bnd = kv.key & 0xFFFF;
+		uint32_t shadow_bnd = kv.value;
+		if (split_grp != p_set_index) {
+			continue;
+		}
+		// Find the original texture from the write binding.
+		WGTexture *orig_tex = nullptr;
+		if (us->bound_textures.has(write_bnd)) {
+			orig_tex = us->bound_textures[write_bnd];
+		}
+		if (!orig_tex) {
+			continue;
+		}
+		// Create a shadow texture with the same format and size.
+		WGPUTextureDescriptor shadow_desc = {};
+		shadow_desc.usage = WGPUTextureUsage_StorageBinding | WGPUTextureUsage_CopyDst;
+		shadow_desc.dimension = orig_tex->dimension;
+		shadow_desc.size = { orig_tex->width, orig_tex->height, orig_tex->depth };
+		shadow_desc.format = orig_tex->format;
+		shadow_desc.mipLevelCount = orig_tex->mipmaps;
+		shadow_desc.sampleCount = orig_tex->sample_count;
+		WGPUTexture shadow_tex = wgpuDeviceCreateTexture(device, &shadow_desc);
+		if (!shadow_tex) {
+			WARN_PRINT("WebGPU: failed to create shadow read texture for rw_storage split.");
+			continue;
+		}
+		// GPU-copy original → shadow. The original must have CopySrc usage.
+		// Queue the copy; it completes before subsequent compute dispatches on the same queue.
+		{
+			WGPUCommandEncoderDescriptor enc_desc = {};
+			WGPUCommandEncoder copy_enc = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
+			WGPUTexelCopyTextureInfo src = {};
+			src.texture = orig_tex->gpu_handle();
+			src.mipLevel = 0;
+			src.origin = { 0, 0, 0 };
+			src.aspect = WGPUTextureAspect_All;
+			WGPUTexelCopyTextureInfo dst = {};
+			dst.texture = shadow_tex;
+			dst.mipLevel = 0;
+			dst.origin = { 0, 0, 0 };
+			dst.aspect = WGPUTextureAspect_All;
+			WGPUExtent3D extent = { orig_tex->width, orig_tex->height, orig_tex->depth };
+			wgpuCommandEncoderCopyTextureToTexture(copy_enc, &src, &dst, &extent);
+			WGPUCommandBufferDescriptor cb_desc = {};
+			WGPUCommandBuffer cb = wgpuCommandEncoderFinish(copy_enc, &cb_desc);
+			wgpuQueueSubmit(queue, 1, &cb);
+			wgpuCommandBufferRelease(cb);
+			wgpuCommandEncoderRelease(copy_enc);
+		}
+		// Create a view and bind it at the shadow slot.
+		WGPUTextureViewDescriptor vd = {};
+		vd.format = orig_tex->format;
+		vd.dimension = orig_tex->view_dimension;
+		vd.baseMipLevel = 0;
+		vd.mipLevelCount = orig_tex->mipmaps;
+		vd.baseArrayLayer = 0;
+		vd.arrayLayerCount = orig_tex->layers;
+		vd.aspect = WGPUTextureAspect_All;
+		WGPUTextureView shadow_view = wgpuTextureCreateView(shadow_tex, &vd);
+		if (shadow_view) {
+			WGPUBindGroupEntry shadow_entry = {};
+			shadow_entry.binding = shadow_bnd;
+			shadow_entry.textureView = shadow_view;
+			entries.push_back(shadow_entry);
+			us->rw_shadow_textures.push_back(shadow_tex);
+			us->rw_shadow_views.push_back(shadow_view);
+			// Register in the driver-level map so future texture_update calls
+			// on the source also copy to this shadow.
+			rw_shadow_copy_map[orig_tex->gpu_handle()].push_back(shadow_tex);
+			us->rw_shadow_registrations.push_back({ orig_tex->gpu_handle(), shadow_tex });
+		} else {
+			wgpuTextureRelease(shadow_tex);
+		}
+	}
+
 	// If this is the merged PC group, inject the push constant ring buffer at PUSH_CONSTANT_RING_BINDING.
 	// Dynamic offset is 0 here; _flush_push_constants will rebind with the correct offset.
 	if (is_pc_group) {
@@ -4829,6 +5067,13 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_get_compatible_bind_group(WGUniformS
 			target_bindings.insert(alias_bnd);
 		}
 	}
+	// Add rw_storage shadow read bindings.
+	for (const KeyValue<uint32_t, uint32_t> &kv : p_target_shader->rw_storage_splits) {
+		uint32_t split_grp = kv.key >> 16;
+		if (split_grp == p_set_idx) {
+			target_bindings.insert(kv.value);
+		}
+	}
 	// Add push constant ring buffer binding if this is the PC group.
 	if (p_target_shader->merged_pc_group_layout && p_set_idx == p_target_shader->push_constant_bind_group) {
 		target_bindings.insert(PUSH_CONSTANT_RING_BINDING);
@@ -4866,6 +5111,32 @@ void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
 	for (WGPUTextureView v : us->temp_views) {
 		if (v) {
 			wgpuTextureViewRelease(v);
+		}
+	}
+	// Release shadow read textures/views from read_write storage splits.
+	for (WGPUTextureView v : us->rw_shadow_views) {
+		if (v) {
+			wgpuTextureViewRelease(v);
+		}
+	}
+	for (WGPUTexture t : us->rw_shadow_textures) {
+		if (t) {
+			wgpuTextureRelease(t);
+		}
+	}
+	// Deregister shadow copy targets from the driver-level map.
+	for (const WGUniformSet::RWShadowRegistration &reg : us->rw_shadow_registrations) {
+		if (rw_shadow_copy_map.has(reg.source)) {
+			LocalVector<WGPUTexture> &shadows = rw_shadow_copy_map[reg.source];
+			for (int i = (int)shadows.size() - 1; i >= 0; i--) {
+				if (shadows[i] == reg.shadow) {
+					shadows.remove_at(i);
+					break;
+				}
+			}
+			if (shadows.is_empty()) {
+				rw_shadow_copy_map.erase(reg.source);
+			}
 		}
 	}
 	// Release cached rebind bind groups.
@@ -5377,6 +5648,26 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 	// redundantly flushing the entire staging buffer (often 32MB) to the GPU.
 	if (use_write_texture) {
 		src->map_dirty = false;
+	}
+
+	// If the destination texture has read_write storage shadow copies, update
+	// them now so compute shaders reading from the shadow see the latest data.
+	WGPUTexture dst_handle = dst->gpu_handle();
+	if (rw_shadow_copy_map.has(dst_handle)) {
+		for (WGPUTexture shadow : rw_shadow_copy_map[dst_handle]) {
+			WGPUTexelCopyTextureInfo shd_src = {};
+			shd_src.texture = dst_handle;
+			shd_src.mipLevel = 0;
+			shd_src.origin = { 0, 0, 0 };
+			shd_src.aspect = WGPUTextureAspect_All;
+			WGPUTexelCopyTextureInfo shd_dst = {};
+			shd_dst.texture = shadow;
+			shd_dst.mipLevel = 0;
+			shd_dst.origin = { 0, 0, 0 };
+			shd_dst.aspect = WGPUTextureAspect_All;
+			WGPUExtent3D shd_extent = { dst->width, dst->height, dst->depth };
+			wgpuCommandEncoderCopyTextureToTexture(cmd->encoder, &shd_src, &shd_dst, &shd_extent);
+		}
 	}
 }
 

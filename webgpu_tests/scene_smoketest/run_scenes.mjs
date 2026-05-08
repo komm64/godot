@@ -11,17 +11,20 @@
  * (most should be 0, some have known JS/GPU warnings).
  *
  * Usage:
- *   node run_scenes.mjs [--export] [--skip-export] [--scene <name>]
+ *   node run_scenes.mjs [--export] [--export-only] [--skip-export]
+ *                       [--scene <name>] [--scenes <name,name,...>]
  *                       [--browser <chrome|firefox|safari|all>]
  *                       [--timeout <ms>] [--frames <n>]
  *
  * Options:
- *   --export         Export scenes before running (requires Godot editor binary)
- *   --skip-export    Only run already-exported scenes (default)
- *   --scene <name>   Run only the named scene
- *   --browser <name> Browser to test: chrome (default), firefox, safari, or all
- *   --timeout <ms>   Per-scene timeout (default: 30000)
- *   --frames <n>     Minimum frames to wait (default: 60)
+ *   --export           Export scenes before running (requires Godot editor binary)
+ *   --export-only      Export scenes and exit without running tests
+ *   --skip-export      Only run already-exported scenes (default)
+ *   --scene <name>     Run only the named scene (partial match supported)
+ *   --scenes <a,b,...> Run comma-separated list of scenes (--scene also works)
+ *   --browser <name>   Browser to test: chrome (default), firefox, safari, or all
+ *   --timeout <ms>     Per-scene timeout (default: 30000)
+ *   --frames <n>       Minimum frames to wait (default: 60)
  *
  * Exit codes:
  *   0 = all scenes pass
@@ -534,8 +537,11 @@ function launchSafari() {
 
 async function main() {
     const args = process.argv.slice(2);
-    const doExport = args.includes('--export');
-    const sceneFilter = args.includes('--scene') ? args[args.indexOf('--scene') + 1] : null;
+    const doExport = args.includes('--export') || args.includes('--export-only');
+    const exportOnly = args.includes('--export-only');
+    // Support both --scene and --scenes (common typo)
+    const sceneFlag = args.includes('--scenes') ? '--scenes' : args.includes('--scene') ? '--scene' : null;
+    const sceneFilter = sceneFlag ? args[args.indexOf(sceneFlag) + 1] : null;
     const timeout = args.includes('--timeout') ? parseInt(args[args.indexOf('--timeout') + 1]) : DEFAULT_TIMEOUT;
     const browserArg = args.includes('--browser') ? args[args.indexOf('--browser') + 1] : 'chrome';
 
@@ -553,7 +559,8 @@ async function main() {
     let scenes = config.scenes;
 
     if (sceneFilter) {
-        scenes = scenes.filter(s => s.id === sceneFilter || s.id.includes(sceneFilter));
+        const filters = sceneFilter.split(',').map(f => f.trim());
+        scenes = scenes.filter(s => filters.some(f => s.id === f || s.id.includes(f)));
         if (scenes.length === 0) {
             console.error(`No scenes matching "${sceneFilter}"`);
             process.exit(1);
@@ -604,6 +611,11 @@ async function main() {
             }
         }
         console.log('');
+    }
+
+    if (exportOnly) {
+        console.log('Export-only mode — skipping tests.');
+        process.exit(0);
     }
 
     // Run tests per browser
