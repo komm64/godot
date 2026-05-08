@@ -133,6 +133,14 @@ run_test "Driver unit tests (305)" \
     "$SCRIPT_DIR/driver_unit_tests" \
     node run_tests.mjs
 
+run_test "WGSL precompile Python tests" \
+    "$SCRIPT_DIR/wgsl_cache" \
+    python3 test_wgsl_precompile.py
+
+run_test "WGSL precompile JS tests" \
+    "$SCRIPT_DIR/wgsl_cache" \
+    node test_wgsl_cache.mjs
+
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────

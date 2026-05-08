@@ -3,7 +3,17 @@ from misc.utility.scons_hints import *
 
 Import("env")
 
+import wgsl_precompile
+
 env_webgpu = env.Clone()
 
 # WebGPU driver sources.
 env_webgpu.add_source_files(env.drivers_sources, "*.cpp")
+
+# Generate precompiled SPIR-V → WGSL lookup table at build time.
+# The generated header is #included by rendering_device_driver_webgpu.cpp.
+env.CommandNoCache(
+    "#drivers/webgpu/wgsl_precompiled.gen.h",
+    "#drivers/webgpu/wgsl_precompile.py",
+    env.Run(wgsl_precompile.build_wgsl_precompiled),
+)
