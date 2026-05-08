@@ -375,10 +375,13 @@ const Engine = (function () {
 			nagaWasm.__wbindgen_start();
 
 			// Expose the converter globally for the C++ EM_ASM call.
+			// Uses the override pipeline so specialization constants become
+			// WGSL `@id(N) override` declarations instead of folded constants.
+			// For shaders without spec constants, output is identical.
 			window.nagaSpirvToWgsl = function (spirvBytes) {
 				var ptr0 = passArray8(spirvBytes);
 				var len0 = WASM_VEC_LEN;
-				var ret = nagaWasm.spirv_to_wgsl(ptr0, len0);
+				var ret = nagaWasm.spirv_to_wgsl_with_overrides(ptr0, len0);
 				var ptr2 = ret[0];
 				var len2 = ret[1];
 				if (ret[3]) {
@@ -389,7 +392,7 @@ const Engine = (function () {
 				nagaWasm.__wbindgen_free(ptr2, len2, 1);
 				return result;
 			};
-			console.log('[Godot] naga SPIR-V→WGSL converter loaded.');
+			console.log('[Godot] naga SPIR-V→WGSL converter loaded (override mode).');
 		});
 	};
 

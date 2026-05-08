@@ -666,7 +666,7 @@ def convert_spirv_batch(spv_files, naga_cli_path):
 
     paths = [p for _, p in spv_files]
     result = subprocess.run(
-        ["node", naga_cli_path, "--batch"] + paths,
+        ["node", naga_cli_path, "--batch", "--override"] + paths,
         capture_output=True,
         text=True,
         timeout=120,

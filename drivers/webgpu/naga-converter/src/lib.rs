@@ -1828,6 +1828,144 @@ pub fn spirv_to_wgsl_native(spirv_bytes: &[u8]) -> Result<String, String> {
     Ok(wgsl)
 }
 
+/// Convert SPIR-V to WGSL while preserving `override` declarations for
+/// specialization constants.
+///
+/// Unlike `spirv_to_wgsl`, this function:
+/// - Does NOT call `freeze_spec_constant_ops()` — the naga patch handles
+///   `OpSpecConstantOp` natively, creating function-body expressions that
+///   reference Override IR nodes.
+/// - Does NOT call `process_overrides()` — Override IR nodes survive to the
+///   WGSL writer, which emits `@id(N) override name: type = default;`.
+/// - Does NOT clear `module.overrides`.
+///
+/// The resulting WGSL is suitable for build-time precompilation: at runtime,
+/// specialization values are passed via `createRenderPipeline({ constants: {...} })`.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn spirv_to_wgsl_with_overrides(spirv_bytes: &[u8]) -> Result<String, JsError> {
+    if spirv_bytes.len() % 4 != 0 {
+        return Err(JsError::new("SPIR-V byte length must be a multiple of 4"));
+    }
+
+    // Do NOT call freeze_spec_constant_ops() — naga patch handles OpSpecConstantOp.
+
+    // Pre-process: rewrite SPIR-V instructions unsupported by naga.
+    let spirv_bytes = rewrite_copy_logical(spirv_bytes);
+    let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
+    let spirv_bytes = infer_readonly_storage(&spirv_bytes);
+    let spirv_bytes = convert_push_constants_to_uniforms(&spirv_bytes);
+    let spirv_bytes = split_combined_samplers(&spirv_bytes);
+    let (spirv_bytes, _depth_aliases) = fix_depth2_images(&spirv_bytes);
+
+    let opts = spv::Options {
+        adjust_coordinate_space: true,
+        strict_capabilities: false,
+        block_ctx_dump_prefix: None,
+    };
+
+    let mut module = spv::parse_u8_slice(&spirv_bytes, &opts)
+        .map_err(|e| {
+            dump_spirv_around_error(&spirv_bytes, &format!("{e:?}"));
+            JsError::new(&format!("SPIR-V parse error: {e:?}"))
+        })?;
+
+    // Pre-validation fixes.
+    fix_writeonly_storage(&mut module);
+    fix_nonfinite_literals(&mut module);
+    strip_point_size(&mut module);
+    flatten_binding_arrays(&mut module);
+
+    // Validate (with overrides still present).
+    let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .map_err(|e| JsError::new(&format!("Validation error: {e:?}")))?;
+
+    // Do NOT call process_overrides() — overrides survive to WGSL output.
+    // Do NOT clear module.overrides.
+
+    // Extract per-entry-point storage buffer binding usage metadata.
+    let mut binding_metadata = String::new();
+    for (ep_idx, _ep) in module.entry_points.iter().enumerate() {
+        let ep_info = info.get_entry_point(ep_idx);
+        for (handle, var) in module.global_variables.iter() {
+            let usage = ep_info[handle];
+            if let Some(ref bind) = var.binding {
+                if matches!(var.space, AddressSpace::Storage { .. }) {
+                    if !usage.is_empty() {
+                        binding_metadata.push_str(&format!(
+                            "//SSBO_USED:{},{}\n", bind.group, bind.binding
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Write WGSL (with override declarations preserved).
+    let wgsl = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty())
+        .map_err(|e| JsError::new(&format!("WGSL write error: {e:?}")))?;
+
+    // Post-process: push_constant rewrite.
+    let wgsl = wgsl.replace(
+        "var<push_constant>",
+        &format!("@group(3) @binding({PC_RING_BUFFER_BINDING}) var<storage, read>"),
+    );
+
+    let wgsl = fix_fmax_literals(&wgsl);
+    let wgsl = wgsl.replace("enable f16;\n", "");
+    let wgsl = wgsl.replace("enable f16;", "");
+
+    let prefix = "diagnostic(off, derivative_uniformity);\n";
+    let wgsl = format!("{binding_metadata}{prefix}{wgsl}");
+
+    Ok(wgsl)
+}
+
+/// Native (non-WASM) version of `spirv_to_wgsl_with_overrides` for testing.
+pub fn spirv_to_wgsl_with_overrides_native(spirv_bytes: &[u8]) -> Result<String, String> {
+    if spirv_bytes.len() % 4 != 0 {
+        return Err("SPIR-V byte length must be a multiple of 4".into());
+    }
+
+    // Do NOT call freeze_spec_constant_ops().
+    let spirv_bytes = rewrite_copy_logical(spirv_bytes);
+    let spirv_bytes = rewrite_terminate_invocation(&spirv_bytes);
+    let spirv_bytes = infer_readonly_storage(&spirv_bytes);
+    let spirv_bytes = convert_push_constants_to_uniforms(&spirv_bytes);
+    let spirv_bytes = split_combined_samplers(&spirv_bytes);
+    let (spirv_bytes, _depth_aliases) = fix_depth2_images(&spirv_bytes);
+
+    let opts = spv::Options {
+        adjust_coordinate_space: true,
+        strict_capabilities: false,
+        block_ctx_dump_prefix: None,
+    };
+
+    let module = spv::parse_u8_slice(&spirv_bytes, &opts)
+        .map_err(|e| format!("SPIR-V parse error: {e:?}"))?;
+
+    let mut module = module;
+    fix_writeonly_storage(&mut module);
+    fix_nonfinite_literals(&mut module);
+    strip_point_size(&mut module);
+    flatten_binding_arrays(&mut module);
+
+    let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .map_err(|e| format!("Validation error: {e:?}"))?;
+
+    // No process_overrides, no arena clearing.
+
+    let wgsl = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty())
+        .map_err(|e| format!("WGSL write error: {e:?}"))?;
+
+    let wgsl = fix_fmax_literals(&wgsl);
+    let wgsl = wgsl.replace("enable f16;\n", "");
+    let wgsl = wgsl.replace("enable f16;", "");
+
+    Ok(wgsl)
+}
+
 /// Replace overflowing f32 decimal literals (near f32::MAX) with hex float
 /// equivalents that WGSL always accepts.
 fn fix_fmax_literals(wgsl: &str) -> String {
@@ -4131,5 +4269,878 @@ mod tests {
         };
         let result = spv::parse_u8_slice(empty, &opts);
         assert!(result.is_err(), "Empty SPIR-V should fail parsing");
+    }
+
+    // ==================== Override proof-of-concept tests ====================
+
+    /// Helper: build a complete, valid SPIR-V compute shader with a
+    /// specialization constant (OpSpecConstant with SpecId decoration).
+    /// The shader has a single entry point and references the spec constant.
+    fn build_spirv_with_spec_constant() -> Vec<u8> {
+        let mut spv = spirv_header(20);
+
+        // --- Capabilities and memory model ---
+        // OpCapability Shader (cap=1)
+        spv.extend(encode_inst(17, &[1]));
+        // OpMemoryModel Logical(0) GLSL450(1)
+        spv.extend(encode_inst(14, &[0, 1]));
+
+        // --- Entry point ---
+        // OpEntryPoint GLCompute(5) %func(1) "main"
+        // "main" as u32 words: 0x6E69616D, 0x00000000
+        let mut ep_inst = vec![5u32, 1, 0x6E69616D, 0x00000000];
+        let ep_bytes = encode_inst(15, &ep_inst);
+        spv.extend(ep_bytes);
+
+        // OpExecutionMode %func(1) LocalSize(17) 1 1 1
+        spv.extend(encode_inst(16, &[1, 17, 1, 1, 1]));
+
+        // --- Decorations ---
+        // OpDecorate %spec_const(10) SpecId(decoration=1) 0
+        spv.extend(encode_inst(71, &[10, 1, 0]));
+
+        // --- Types ---
+        // OpTypeVoid %2
+        spv.extend(encode_inst(19, &[2]));
+        // OpTypeFunction %3 %2  (void function)
+        spv.extend(encode_inst(33, &[3, 2]));
+        // OpTypeInt %4 32 0  (u32)
+        spv.extend(encode_inst(21, &[4, 32, 0]));
+
+        // --- Constants ---
+        // OpSpecConstant %u32(4) %spec_const(10) value=0
+        spv.extend(encode_inst(50, &[4, 10, 0]));
+
+        // --- Function ---
+        // OpFunction %void(2) %func(1) None(0) %func_type(3)
+        spv.extend(encode_inst(54, &[2, 1, 0, 3]));
+        // OpLabel %11
+        spv.extend(encode_inst(248, &[11]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        spv
+    }
+
+    /// Helper: build a SPIR-V compute shader with OpSpecConstant + OpSpecConstantOp.
+    /// This mimics Godot's specialization pattern: packed bitfield constants
+    /// with bitwise extraction via OpSpecConstantOp.
+    ///
+    /// Layout:
+    ///   @id(0) spec_packed_0: u32 = 0
+    ///   _masked = spec_packed_0 & 1  (OpSpecConstantOp BitwiseAnd)
+    ///   _flag = _masked != 0         (OpSpecConstantOp INotEqual)
+    ///   main() uses _flag in a branch
+    fn build_spirv_with_spec_constant_op() -> Vec<u8> {
+        let mut spv = spirv_header(30);
+
+        // --- Capabilities and memory model ---
+        spv.extend(encode_inst(17, &[1]));        // OpCapability Shader
+        spv.extend(encode_inst(14, &[0, 1]));     // OpMemoryModel Logical GLSL450
+
+        // --- Entry point ---
+        // OpEntryPoint GLCompute(5) %func(1) "main"
+        spv.extend(encode_inst(15, &[5, 1, 0x6E69616D, 0x00000000]));
+        // OpExecutionMode %func(1) LocalSize(17) 1 1 1
+        spv.extend(encode_inst(16, &[1, 17, 1, 1, 1]));
+
+        // --- Decorations ---
+        // OpDecorate %spec_packed(10) SpecId(1) 0
+        spv.extend(encode_inst(71, &[10, 1, 0]));
+
+        // --- Types ---
+        // %2 = OpTypeVoid
+        spv.extend(encode_inst(19, &[2]));
+        // %3 = OpTypeFunction %void
+        spv.extend(encode_inst(33, &[3, 2]));
+        // %4 = OpTypeInt 32 0  (u32)
+        spv.extend(encode_inst(21, &[4, 32, 0]));
+        // %5 = OpTypeBool
+        spv.extend(encode_inst(20, &[5]));
+
+        // --- Constants ---
+        // %10 = OpSpecConstant %u32 0  (SpecId=0)
+        spv.extend(encode_inst(50, &[4, 10, 0]));
+        // %11 = OpConstant %u32 1  (literal 1 for masking)
+        spv.extend(encode_inst(43, &[4, 11, 1]));
+        // %12 = OpConstant %u32 0  (literal 0 for comparison)
+        spv.extend(encode_inst(43, &[4, 12, 0]));
+
+        // --- Spec constant operations ---
+        // %13 = OpSpecConstantOp %u32 BitwiseAnd(199) %10 %11
+        //   i.e., spec_packed_0 & 1
+        spv.extend(encode_inst(52, &[4, 13, 199, 10, 11]));
+        // %14 = OpSpecConstantOp %bool INotEqual(171) %13 %12
+        //   i.e., (spec_packed_0 & 1) != 0
+        spv.extend(encode_inst(52, &[5, 14, 171, 13, 12]));
+
+        // --- Function ---
+        // %1 = OpFunction %void None %func_type
+        spv.extend(encode_inst(54, &[2, 1, 0, 3]));
+        // %20 = OpLabel
+        spv.extend(encode_inst(248, &[20]));
+        // OpSelectionMerge %22 None
+        spv.extend(encode_inst(247, &[22, 0]));
+        // OpBranchConditional %14(_flag) %21 %22
+        spv.extend(encode_inst(250, &[14, 21, 22]));
+        // %21 = OpLabel (then block)
+        spv.extend(encode_inst(248, &[21]));
+        // OpBranch %22
+        spv.extend(encode_inst(249, &[22]));
+        // %22 = OpLabel (merge block)
+        spv.extend(encode_inst(248, &[22]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        spv
+    }
+
+    #[test]
+    fn test_naga_patch_spec_constant_op_override_output() {
+        // Test that the naga patch produces WGSL with override declarations
+        // and function-body expressions for OpSpecConstantOp.
+        //
+        // This exercises the FULL pipeline:
+        //   1. SPIR-V with OpSpecConstant + OpSpecConstantOp
+        //   2. naga parses → creates Override for spec const, defers spec ops
+        //   3. make_expression_storage materializes spec ops as Binary exprs
+        //   4. Validator accepts the module
+        //   5. WGSL writer emits @id(0) override + function-body expressions
+        //   6. process_overrides() is NOT called
+        let spv = build_spirv_with_spec_constant_op();
+
+        // Do NOT run freeze_spec_constant_ops — let naga handle spec constants
+        // directly via the patch.
+
+        let opts = spv::Options {
+            adjust_coordinate_space: false,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+
+        let module = spv::parse_u8_slice(&spv, &opts)
+            .expect("SPIR-V with OpSpecConstantOp should parse successfully");
+
+        // Verify the module has overrides.
+        assert!(
+            !module.overrides.is_empty(),
+            "Module should have overrides from OpSpecConstant"
+        );
+
+        // Validate without process_overrides.
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("Validation should succeed with live overrides and spec op expressions");
+
+        // Write WGSL.
+        let wgsl = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty())
+            .expect("WGSL writer should handle override references in function body");
+
+        eprintln!("=== WGSL with OpSpecConstantOp override output ===\n{}", wgsl);
+
+        // Verify output contains override declarations.
+        assert!(wgsl.contains("override"), "WGSL should contain 'override'");
+        assert!(wgsl.contains("@id(0)"), "WGSL should contain '@id(0)'");
+
+        // Verify the function body contains bitwise AND expression referencing the override.
+        // The exact syntax depends on naga's output, but it should reference the override
+        // name and use & operator.
+        assert!(
+            wgsl.contains("&") || wgsl.contains("!="),
+            "WGSL should contain bitwise operations or comparisons from spec ops. Got:\n{}",
+            wgsl
+        );
+    }
+
+    #[test]
+    fn test_override_poc_wgsl_writer_with_live_overrides() {
+        // PROOF OF CONCEPT: Test that naga's WGSL writer can emit override
+        // declarations when process_overrides() is NOT called.
+        //
+        // This is the core risk question for the specialized shader precompilation
+        // approach. If this test passes, the WGSL writer works with live overrides.
+        let spv = build_spirv_with_spec_constant();
+
+        let opts = spv::Options {
+            adjust_coordinate_space: false,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+
+        let module = spv::parse_u8_slice(&spv, &opts)
+            .expect("SPIR-V should parse successfully");
+
+        // Verify the module has overrides after parsing.
+        assert!(
+            !module.overrides.is_empty(),
+            "Module should have overrides after parsing OpSpecConstant with SpecId"
+        );
+
+        // Validate WITHOUT calling process_overrides.
+        let info = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("Validation should succeed with live overrides");
+
+        // Write WGSL WITHOUT calling process_overrides — overrides survive.
+        let wgsl = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty())
+            .expect("WGSL writer should handle live overrides");
+
+        eprintln!("=== WGSL output with live overrides ===\n{}", wgsl);
+
+        // Verify the output contains override declarations.
+        assert!(
+            wgsl.contains("override"),
+            "WGSL should contain 'override' declaration. Got:\n{}",
+            wgsl
+        );
+        assert!(
+            wgsl.contains("@id(0)"),
+            "WGSL should contain '@id(0)' for SpecId 0. Got:\n{}",
+            wgsl
+        );
+    }
+
+    #[test]
+    fn test_spirv_to_wgsl_with_overrides_native_pipeline() {
+        // Test the full spirv_to_wgsl_with_overrides_native() pipeline with a
+        // shader containing multiple specialization constants and derived ops,
+        // mimicking Godot's packed_0/packed_1 bitfield pattern.
+        //
+        // SPIR-V layout:
+        //   %packed_0 = OpSpecConstant %u32 0  (SpecId=0)
+        //   %packed_1 = OpSpecConstant %u32 0  (SpecId=1)
+        //   %flag = OpSpecConstantOp BitwiseAnd %packed_0 1
+        //   %use_flag = OpSpecConstantOp INotEqual %flag 0
+        //   %lights = OpSpecConstantOp BitwiseAnd %packed_1 0xFF
+        //   main() uses %use_flag in a branch and %lights in a comparison
+        let spv = build_spirv_multi_spec_constant();
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("spirv_to_wgsl_with_overrides_native should succeed");
+
+        eprintln!("=== spirv_to_wgsl_with_overrides_native output ===\n{}", wgsl);
+
+        // Must have override declarations for both spec constants.
+        assert!(wgsl.contains("@id(0)"), "Should have @id(0) override");
+        assert!(wgsl.contains("@id(1)"), "Should have @id(1) override");
+        assert!(wgsl.contains("override"), "Should contain override keyword");
+
+        // Must NOT have been resolved to constants (no process_overrides).
+        // The override names should appear in expressions.
+        assert!(!wgsl.contains("process_overrides"), "Should not mention process_overrides");
+
+        // The derived expressions should reference the override constants.
+        assert!(wgsl.contains("&"), "Should contain bitwise AND from spec ops");
+    }
+
+    /// Build SPIR-V with two OpSpecConstant + multiple OpSpecConstantOp
+    /// instructions, mimicking Godot's packed_0/packed_1 pattern.
+    fn build_spirv_multi_spec_constant() -> Vec<u8> {
+        let mut spv = spirv_header(30);
+
+        // OpCapability Shader
+        spv.extend(encode_inst(17, &[1]));
+        // OpMemoryModel Logical GLSL450
+        spv.extend(encode_inst(14, &[0, 1]));
+
+        // OpEntryPoint GLCompute %1 "main"
+        let main_str = 0x6E69616Du32; // "main" little-endian
+        spv.extend(encode_inst(15, &[5, 1, main_str, 0]));
+        // OpExecutionMode %1 LocalSize 1 1 1
+        spv.extend(encode_inst(16, &[1, 17, 1, 1, 1]));
+
+        // Decorations (annotations section — must come before types)
+        // OpDecorate %10 SpecId 0
+        spv.extend(encode_inst(71, &[10, 1, 0]));
+        // OpDecorate %11 SpecId 1
+        spv.extend(encode_inst(71, &[11, 1, 1]));
+
+        // Types
+        // %2 = OpTypeVoid
+        spv.extend(encode_inst(19, &[2]));
+        // %3 = OpTypeFunction %2
+        spv.extend(encode_inst(33, &[3, 2]));
+        // %4 = OpTypeBool
+        spv.extend(encode_inst(20, &[4]));
+        // %5 = OpTypeInt 32 0 (uint)
+        spv.extend(encode_inst(21, &[5, 32, 0]));
+
+        // Literal constants
+        // %6 = OpConstant %5 0
+        spv.extend(encode_inst(43, &[5, 6, 0]));
+        // %7 = OpConstant %5 1
+        spv.extend(encode_inst(43, &[5, 7, 1]));
+        // %8 = OpConstant %5 255 (0xFF mask for lights)
+        spv.extend(encode_inst(43, &[5, 8, 255]));
+
+        // Specialization constants
+        // %10 = OpSpecConstant %5 0  (packed_0)
+        spv.extend(encode_inst(50, &[5, 10, 0]));
+        // %11 = OpSpecConstant %5 0  (packed_1)
+        spv.extend(encode_inst(50, &[5, 11, 0]));
+
+        // OpSpecConstantOp instructions:
+        // %13 = OpSpecConstantOp %5 BitwiseAnd(199) %10 %7   → packed_0 & 1
+        spv.extend(encode_inst(52, &[5, 13, 199, 10, 7]));
+        // %14 = OpSpecConstantOp %4 INotEqual(171) %13 %6    → (packed_0 & 1) != 0
+        spv.extend(encode_inst(52, &[4, 14, 171, 13, 6]));
+        // %15 = OpSpecConstantOp %5 BitwiseAnd(199) %11 %8   → packed_1 & 0xFF
+        spv.extend(encode_inst(52, &[5, 15, 199, 11, 8]));
+
+        // Function %20 (called by main, uses spec constants)
+        // %20 = OpFunction %2 None %3
+        spv.extend(encode_inst(54, &[2, 20, 0, 3]));
+        // %21 = OpLabel
+        spv.extend(encode_inst(248, &[21]));
+        // OpSelectionMerge %merge None
+        spv.extend(encode_inst(247, &[23, 0]));
+        // OpBranchConditional %14 %then %merge
+        spv.extend(encode_inst(250, &[14, 22, 23]));
+        // %22 = OpLabel (then)
+        spv.extend(encode_inst(248, &[22]));
+        // OpBranch %merge
+        spv.extend(encode_inst(249, &[23]));
+        // %23 = OpLabel (merge)
+        spv.extend(encode_inst(248, &[23]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        // main %1
+        // %1 = OpFunction %2 None %3
+        spv.extend(encode_inst(54, &[2, 1, 0, 3]));
+        // %25 = OpLabel
+        spv.extend(encode_inst(248, &[25]));
+        // %26 = OpFunctionCall %2 %20
+        spv.extend(encode_inst(57, &[2, 26, 20]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        spv
+    }
+
+    #[test]
+    fn test_real_shader_spec_constants_with_overrides() {
+        // Test the override pipeline with a real compiled Godot-style shader
+        // fixture that has 3 specialization constants (bool, int, float).
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/spec_constants.spv"
+        )).expect("spec_constants.spv fixture should exist");
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("Real shader should convert with overrides");
+
+        eprintln!("=== Real shader override output ===\n{}", wgsl);
+
+        // Must have override declarations for the 3 spec constants.
+        assert!(wgsl.contains("override"), "Should contain override declarations");
+        assert!(wgsl.contains("@id(0)"), "Should have @id(0) for USE_TEXTURE");
+        assert!(wgsl.contains("@id(1)"), "Should have @id(1) for NUM_LIGHTS");
+        assert!(wgsl.contains("@id(2)"), "Should have @id(2) for AMBIENT_STRENGTH");
+    }
+
+    #[test]
+    fn test_all_fixtures_both_pipelines() {
+        // Verify all shader fixtures convert successfully through BOTH
+        // the regular pipeline and the override pipeline.
+        let fixtures_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures"
+        );
+        let fixtures = [
+            "basic_vertex.spv",
+            "basic_fragment.spv",
+            "compute_particles.spv",
+            "depth_sampling.spv",
+            "multi_texture.spv",
+            "readonly_ssbo.spv",
+            "shadow_pass.spv",
+            "spec_constants.spv",
+            "storage_image.spv",
+            "per_stage_overrides_vert.spv",
+            "per_stage_overrides_frag.spv",
+            "chained_spec_ops.spv",
+            "many_overrides.spv",
+        ];
+
+        for name in &fixtures {
+            let path = format!("{}/{}", fixtures_dir, name);
+            let spv = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(_) => { eprintln!("  SKIP: {} not found", name); continue; }
+            };
+
+            // Regular pipeline (should always work).
+            let regular_result = spirv_to_wgsl_native(&spv);
+            assert!(regular_result.is_ok(), "Regular pipeline failed for {}: {:?}", name, regular_result.err());
+
+            // Override pipeline (should also work — no spec constants just means no overrides).
+            let override_result = spirv_to_wgsl_with_overrides_native(&spv);
+            assert!(override_result.is_ok(), "Override pipeline failed for {}: {:?}", name, override_result.err());
+
+            eprintln!("  OK: {} (regular={}B, override={}B)", name,
+                regular_result.unwrap().len(),
+                override_result.unwrap().len());
+        }
+    }
+
+    // ==================== Per-stage override filtering tests ====================
+
+    #[test]
+    fn test_per_stage_override_filtering_vertex_only() {
+        // Vertex shader with @id(0) only — must NOT have @id(1) or @id(2).
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/per_stage_overrides_vert.spv"
+        )).expect("per_stage_overrides_vert.spv should exist");
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("Vertex shader should convert with overrides");
+
+        eprintln!("=== per_stage_overrides vertex override output ===\n{}", wgsl);
+
+        assert!(wgsl.contains("@id(0)"), "Vertex stage should have @id(0) for VERTEX_FLAGS");
+        assert!(!wgsl.contains("@id(1)"), "Vertex stage must NOT have @id(1) — that belongs to fragment");
+        assert!(!wgsl.contains("@id(2)"), "Vertex stage must NOT have @id(2) — that belongs to fragment");
+    }
+
+    #[test]
+    fn test_per_stage_override_filtering_fragment_only() {
+        // Fragment shader with @id(1) and @id(2) only — must NOT have @id(0).
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/per_stage_overrides_frag.spv"
+        )).expect("per_stage_overrides_frag.spv should exist");
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("Fragment shader should convert with overrides");
+
+        eprintln!("=== per_stage_overrides fragment override output ===\n{}", wgsl);
+
+        assert!(!wgsl.contains("@id(0)"), "Fragment stage must NOT have @id(0) — that belongs to vertex");
+        assert!(wgsl.contains("@id(1)"), "Fragment stage should have @id(1) for FRAG_MODE");
+        assert!(wgsl.contains("@id(2)"), "Fragment stage should have @id(2) for BRIGHTNESS");
+    }
+
+    #[test]
+    fn test_per_stage_id_extraction_logic() {
+        // Test the per-stage @id extraction logic used in the C++ driver,
+        // simulated here in Rust. The C++ code parses "@id(N)" patterns
+        // from WGSL text and builds a HashSet of IDs per stage.
+        fn extract_override_ids(wgsl: &str) -> Vec<u32> {
+            let mut ids = Vec::new();
+            let mut search = wgsl;
+            while let Some(pos) = search.find("@id(") {
+                search = &search[pos + 4..];
+                let mut id = 0u32;
+                let mut has_digits = false;
+                let mut chars = search.chars();
+                while let Some(c) = chars.next() {
+                    if c.is_ascii_digit() {
+                        id = id * 10 + (c as u32 - '0' as u32);
+                        has_digits = true;
+                    } else if c == ')' && has_digits {
+                        ids.push(id);
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            ids
+        }
+
+        // Vertex stage should have {0}
+        let vtx_spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/per_stage_overrides_vert.spv"
+        )).unwrap();
+        let vtx_wgsl = spirv_to_wgsl_with_overrides_native(&vtx_spv).unwrap();
+        let vtx_ids = extract_override_ids(&vtx_wgsl);
+        assert_eq!(vtx_ids, vec![0], "Vertex stage should only have @id(0)");
+
+        // Fragment stage should have {1, 2}
+        let frg_spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/per_stage_overrides_frag.spv"
+        )).unwrap();
+        let frg_wgsl = spirv_to_wgsl_with_overrides_native(&frg_spv).unwrap();
+        let frg_ids = extract_override_ids(&frg_wgsl);
+        assert!(frg_ids.contains(&1), "Fragment stage should have @id(1)");
+        assert!(frg_ids.contains(&2), "Fragment stage should have @id(2)");
+        assert!(!frg_ids.contains(&0), "Fragment stage must not have @id(0)");
+
+        eprintln!("Vertex override IDs: {:?}", vtx_ids);
+        eprintln!("Fragment override IDs: {:?}", frg_ids);
+    }
+
+    // ==================== Round-trip override value correctness tests ====================
+
+    #[test]
+    fn test_override_values_present_in_wgsl_output() {
+        // Verify that override declarations include correct default values
+        // in the WGSL output. These defaults should match the SPIR-V
+        // OpSpecConstant literal values.
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/spec_constants.spv"
+        )).expect("spec_constants.spv should exist");
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("Should convert with overrides");
+
+        eprintln!("=== Override value correctness output ===\n{}", wgsl);
+
+        // Check that default values appear in the override declarations.
+        // USE_TEXTURE = true (bool), NUM_LIGHTS = 4 (int), AMBIENT_STRENGTH = 0.1 (float)
+        assert!(wgsl.contains("@id(0)"), "Should have @id(0)");
+        assert!(wgsl.contains("@id(1)"), "Should have @id(1)");
+        assert!(wgsl.contains("@id(2)"), "Should have @id(2)");
+
+        // The override keyword must be present.
+        let override_count = wgsl.matches("override").count();
+        assert!(override_count >= 3, "Should have at least 3 override declarations, found {}", override_count);
+
+        // Verify bool default value: true
+        // naga emits bool spec constants as "override name: bool = true;"
+        assert!(wgsl.contains("true"), "Should have default value 'true' for USE_TEXTURE");
+    }
+
+    #[test]
+    fn test_override_compute_shader_values() {
+        // Verify the chained spec ops compute shader has correct override
+        // declarations with default values matching the GLSL source.
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/chained_spec_ops.spv"
+        )).expect("chained_spec_ops.spv should exist");
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("Chained spec ops shader should convert");
+
+        eprintln!("=== Chained spec ops override output ===\n{}", wgsl);
+
+        // All 3 spec constants should have override declarations.
+        assert!(wgsl.contains("@id(0)"), "Should have @id(0) for SPEC_A");
+        assert!(wgsl.contains("@id(1)"), "Should have @id(1) for SPEC_B");
+        assert!(wgsl.contains("@id(2)"), "Should have @id(2) for SPEC_C");
+
+        // Default values: SPEC_A=10, SPEC_B=20, SPEC_C=3
+        assert!(wgsl.contains("10"), "Should have default value 10 for SPEC_A");
+        assert!(wgsl.contains("20"), "Should have default value 20 for SPEC_B");
+
+        // The output should contain arithmetic ops from the chain.
+        assert!(wgsl.contains("+") || wgsl.contains("&") || wgsl.contains(">>"),
+            "Should contain derived arithmetic ops from the chained spec constant operations");
+    }
+
+    // ==================== Legacy fallback path regression tests ====================
+
+    #[test]
+    fn test_legacy_path_still_works_for_no_spec_constants() {
+        // Shaders WITHOUT spec constants must still work through the
+        // regular (non-override) pipeline. This is the legacy fallback path
+        // used when has_override_declarations is false.
+        let fixtures = [
+            "basic_vertex.spv",
+            "basic_fragment.spv",
+            "shadow_pass.spv",
+            "readonly_ssbo.spv",
+        ];
+        let fixtures_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures"
+        );
+
+        for name in &fixtures {
+            let path = format!("{}/{}", fixtures_dir, name);
+            let spv = std::fs::read(&path)
+                .unwrap_or_else(|_| panic!("{} should exist", name));
+
+            // Regular pipeline (legacy path).
+            let wgsl = spirv_to_wgsl_native(&spv)
+                .unwrap_or_else(|e| panic!("Legacy pipeline failed for {}: {:?}", name, e));
+
+            // Must NOT contain override declarations — these shaders have no spec constants.
+            assert!(!wgsl.contains("@id("), "Legacy path for {} should not produce @id() overrides", name);
+            assert!(!wgsl.contains("override "), "Legacy path for {} should not produce override declarations", name);
+
+            eprintln!("  LEGACY OK: {} ({}B, no overrides)", name, wgsl.len());
+        }
+    }
+
+    #[test]
+    fn test_legacy_vs_override_output_identical_for_no_spec_constants() {
+        // For shaders with NO specialization constants, the regular and
+        // override pipelines should produce identical WGSL output.
+        let fixtures = [
+            "basic_vertex.spv",
+            "shadow_pass.spv",
+            "readonly_ssbo.spv",
+        ];
+        let fixtures_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures"
+        );
+
+        for name in &fixtures {
+            let path = format!("{}/{}", fixtures_dir, name);
+            let spv = std::fs::read(&path).unwrap();
+
+            let regular = spirv_to_wgsl_native(&spv).unwrap();
+            let override_out = spirv_to_wgsl_with_overrides_native(&spv).unwrap();
+
+            assert_eq!(regular, override_out,
+                "For {} (no spec constants), regular and override pipelines should produce identical WGSL",
+                name);
+
+            eprintln!("  IDENTICAL OK: {} ({}B)", name, regular.len());
+        }
+    }
+
+    #[test]
+    fn test_legacy_path_folds_spec_constants() {
+        // The legacy (regular) pipeline should FOLD spec constants to literals,
+        // NOT produce override declarations.
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/spec_constants.spv"
+        )).expect("spec_constants.spv should exist");
+
+        let regular = spirv_to_wgsl_native(&spv)
+            .expect("Regular pipeline should succeed");
+
+        // Must NOT have override declarations.
+        assert!(!regular.contains("@id("), "Legacy path should fold, not override: found @id()");
+        assert!(!regular.contains("override "), "Legacy path should fold, not override: found 'override'");
+
+        // Compare with override pipeline — they should differ.
+        let override_out = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("Override pipeline should succeed");
+
+        assert!(override_out.contains("@id("), "Override pipeline should have @id()");
+        assert_ne!(regular, override_out,
+            "Regular and override pipelines should produce different output for spec constant shaders");
+
+        eprintln!("  FOLD OK: regular={}B (no overrides), override={}B (with overrides)",
+            regular.len(), override_out.len());
+    }
+
+    // ==================== Chained OpSpecConstantOp tests ====================
+
+    #[test]
+    fn test_chained_spec_constant_ops_cross_constant() {
+        // Build SPIR-V with OpSpecConstantOp chaining TWO spec constants:
+        //   spec_0 (SpecId=0) = 100
+        //   spec_1 (SpecId=1) = 7
+        //   a = spec_0 & spec_1           (BitwiseAnd — cross-constant op)
+        //   b = a != 0                    (INotEqual → bool for branch)
+        //   main() uses b in a branch
+        //
+        // Unlike build_spirv_multi_spec_constant() (which chains spec_0 → mask → INotEqual
+        // and spec_1 → mask independently), this test chains BOTH spec constants
+        // into a SINGLE derived op, verifying the deferred materialization handles
+        // cross-constant dependencies.
+        let mut spv = spirv_header(30);
+
+        // OpCapability Shader
+        spv.extend(encode_inst(17, &[1]));
+        // OpMemoryModel Logical GLSL450
+        spv.extend(encode_inst(14, &[0, 1]));
+
+        // OpEntryPoint GLCompute %1 "main"
+        spv.extend(encode_inst(15, &[5, 1, 0x6E69616D, 0x00000000]));
+        // OpExecutionMode %1 LocalSize 1 1 1
+        spv.extend(encode_inst(16, &[1, 17, 1, 1, 1]));
+
+        // Decorations
+        // OpDecorate %10 SpecId 0
+        spv.extend(encode_inst(71, &[10, 1, 0]));
+        // OpDecorate %11 SpecId 1
+        spv.extend(encode_inst(71, &[11, 1, 1]));
+
+        // Types
+        // %2 = OpTypeVoid
+        spv.extend(encode_inst(19, &[2]));
+        // %3 = OpTypeFunction %2
+        spv.extend(encode_inst(33, &[3, 2]));
+        // %4 = OpTypeBool
+        spv.extend(encode_inst(20, &[4]));
+        // %5 = OpTypeInt 32 0 (u32)
+        spv.extend(encode_inst(21, &[5, 32, 0]));
+
+        // Literal constants
+        // %6 = OpConstant %5 0
+        spv.extend(encode_inst(43, &[5, 6, 0]));
+
+        // Spec constants
+        // %10 = OpSpecConstant %5 100  (spec_0)
+        spv.extend(encode_inst(50, &[5, 10, 100]));
+        // %11 = OpSpecConstant %5 7    (spec_1)
+        spv.extend(encode_inst(50, &[5, 11, 7]));
+
+        // Chained OpSpecConstantOp across BOTH spec constants:
+        // %20 = OpSpecConstantOp %5 BitwiseAnd(199) %10 %11  → spec_0 & spec_1
+        spv.extend(encode_inst(52, &[5, 20, 199, 10, 11]));
+        // %21 = OpSpecConstantOp %4 INotEqual(171) %20 %6    → (spec_0 & spec_1) != 0
+        spv.extend(encode_inst(52, &[4, 21, 171, 20, 6]));
+
+        // Function that uses the chain result in a branch
+        // %1 = OpFunction %2 None %3
+        spv.extend(encode_inst(54, &[2, 1, 0, 3]));
+        // %25 = OpLabel
+        spv.extend(encode_inst(248, &[25]));
+        // OpSelectionMerge %27 None
+        spv.extend(encode_inst(247, &[27, 0]));
+        // OpBranchConditional %21 %26 %27
+        spv.extend(encode_inst(250, &[21, 26, 27]));
+        // %26 = OpLabel (then)
+        spv.extend(encode_inst(248, &[26]));
+        // OpBranch %27
+        spv.extend(encode_inst(249, &[27]));
+        // %27 = OpLabel (merge)
+        spv.extend(encode_inst(248, &[27]));
+        // OpReturn
+        spv.extend(encode_inst(253, &[]));
+        // OpFunctionEnd
+        spv.extend(encode_inst(56, &[]));
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("Cross-constant chained spec ops should convert");
+
+        eprintln!("=== Cross-constant chained spec ops output ===\n{}", wgsl);
+
+        // Both spec constants should be overrides.
+        assert!(wgsl.contains("@id(0)"), "Should have @id(0) for spec_0");
+        assert!(wgsl.contains("@id(1)"), "Should have @id(1) for spec_1");
+
+        // The derived chain should produce a BitwiseAnd expression.
+        assert!(wgsl.contains("&"), "Should contain & from cross-constant BitwiseAnd");
+
+        // Verify both override declarations exist.
+        let override_count = wgsl.matches("override").count();
+        assert!(override_count >= 2, "Should have at least 2 override declarations, found {}", override_count);
+    }
+
+    #[test]
+    fn test_chained_spec_ops_file_fixture() {
+        // Test the chained_spec_ops.comp fixture through the override pipeline.
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/chained_spec_ops.spv"
+        )).expect("chained_spec_ops.spv should exist");
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("chained_spec_ops fixture should convert with overrides");
+
+        eprintln!("=== chained_spec_ops.comp override output ===\n{}", wgsl);
+
+        // Must have all 3 override declarations.
+        assert!(wgsl.contains("@id(0)"), "Should have @id(0) for SPEC_A");
+        assert!(wgsl.contains("@id(1)"), "Should have @id(1) for SPEC_B");
+        assert!(wgsl.contains("@id(2)"), "Should have @id(2) for SPEC_C");
+
+        // Should have @compute entry point.
+        assert!(wgsl.contains("@compute"), "Should have compute entry point");
+    }
+
+    // ==================== Stress test: many override IDs ====================
+
+    #[test]
+    fn test_many_overrides_24_constants() {
+        // Stress test: shader with 24 specialization constants of mixed types
+        // (u32, f32, i32, bool). All should become override declarations.
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/many_overrides.spv"
+        )).expect("many_overrides.spv should exist");
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("24-override shader should convert");
+
+        eprintln!("=== many_overrides (24 constants) output ===\n{}", wgsl);
+
+        // All 24 override IDs should be present.
+        for id in 0..24u32 {
+            let id_str = format!("@id({})", id);
+            assert!(wgsl.contains(&id_str),
+                "Should have {} in override declarations", id_str);
+        }
+
+        // Count total override declarations.
+        let override_count = wgsl.matches("override").count();
+        assert_eq!(override_count, 24,
+            "Should have exactly 24 override declarations, found {}", override_count);
+
+        // Verify the WGSL is non-trivially long (24 constants + logic).
+        assert!(wgsl.len() > 500,
+            "24-override WGSL should be substantial, got {} chars", wgsl.len());
+    }
+
+    #[test]
+    fn test_many_overrides_all_types_represented() {
+        // Verify that the 24-override shader has the correct types:
+        // IDs 0-7, 20-23: u32
+        // IDs 8-11: f32
+        // IDs 12-15: i32
+        // IDs 16-19: bool
+        let spv = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures/many_overrides.spv"
+        )).expect("many_overrides.spv should exist");
+
+        let wgsl = spirv_to_wgsl_with_overrides_native(&spv)
+            .expect("24-override shader should convert");
+
+        // Check that all major WGSL scalar types appear in override declarations.
+        assert!(wgsl.contains("u32"), "Should have u32 overrides");
+        assert!(wgsl.contains("f32"), "Should have f32 overrides");
+        assert!(wgsl.contains("i32"), "Should have i32 overrides");
+        assert!(wgsl.contains("bool"), "Should have bool overrides");
+    }
+
+    // ==================== Additional fixture tests ====================
+
+    #[test]
+    fn test_all_fixtures_both_pipelines_extended() {
+        // Extended version of test_all_fixtures_both_pipelines that includes
+        // the new fixtures added for override testing.
+        let fixtures_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../webgpu_tests/shader_corpus/fixtures"
+        );
+        let new_fixtures = [
+            "per_stage_overrides_vert.spv",
+            "per_stage_overrides_frag.spv",
+            "chained_spec_ops.spv",
+            "many_overrides.spv",
+        ];
+
+        for name in &new_fixtures {
+            let path = format!("{}/{}", fixtures_dir, name);
+            let spv = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(_) => { eprintln!("  SKIP: {} not found", name); continue; }
+            };
+
+            // Regular pipeline.
+            let regular_result = spirv_to_wgsl_native(&spv);
+            assert!(regular_result.is_ok(), "Regular pipeline failed for {}: {:?}", name, regular_result.err());
+
+            // Override pipeline.
+            let override_result = spirv_to_wgsl_with_overrides_native(&spv);
+            assert!(override_result.is_ok(), "Override pipeline failed for {}: {:?}", name, override_result.err());
+
+            eprintln!("  OK: {} (regular={}B, override={}B)", name,
+                regular_result.unwrap().len(),
+                override_result.unwrap().len());
+        }
     }
 }

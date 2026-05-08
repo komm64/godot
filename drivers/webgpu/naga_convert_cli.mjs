@@ -99,17 +99,49 @@ function convertSpirvToWgsl(spirvBytes) {
 	return wgsl;
 }
 
+/**
+ * Convert SPIR-V to WGSL with override declarations preserved.
+ * Specialization constants become `@id(N) override` declarations in the WGSL
+ * output, and derived expressions (OpSpecConstantOp, OpSpecConstantComposite)
+ * are emitted as function-body expressions referencing the overrides.
+ */
+function convertSpirvToWgslWithOverrides(spirvBytes) {
+	const ptr0 = passArray8(spirvBytes);
+	const len0 = WASM_VEC_LEN;
+	const ret = nagaWasm.spirv_to_wgsl_with_overrides(ptr0, len0);
+	const ptr2 = ret[0];
+	const len2 = ret[1];
+	if (ret[3]) {
+		const err = takeFromTable(ret[2]);
+		throw new Error(err && err.message ? err.message : String(err));
+	}
+	const wgsl = getString(ptr2, len2);
+	nagaWasm.__wbindgen_free(ptr2, len2, 1);
+	return wgsl;
+}
+
 // ── CLI entry point ─────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
 
 if (args.length === 0) {
-	console.error('Usage: naga_convert_cli.mjs [--batch] <spirv_file> [spirv_file ...]');
+	console.error('Usage: naga_convert_cli.mjs [--batch] [--override] <spirv_file> [spirv_file ...]');
+	console.error('  --override  Preserve specialization constants as WGSL override declarations');
 	process.exit(1);
 }
 
-const batchMode = args[0] === '--batch';
-const files = batchMode ? args.slice(1) : args;
+// Parse flags.
+const flags = new Set();
+const positional = [];
+for (const a of args) {
+	if (a.startsWith('--')) flags.add(a);
+	else positional.push(a);
+}
+const batchMode = flags.has('--batch');
+const overrideMode = flags.has('--override');
+const files = positional;
+
+const converter = overrideMode ? convertSpirvToWgslWithOverrides : convertSpirvToWgsl;
 
 if (batchMode) {
 	// Batch mode: convert all files, output JSON.
@@ -117,7 +149,7 @@ if (batchMode) {
 	for (const file of files) {
 		try {
 			const spirv = readFileSync(file);
-			results[file] = convertSpirvToWgsl(spirv);
+			results[file] = converter(spirv);
 		} catch (e) {
 			results[file] = { error: e.message };
 		}
@@ -125,9 +157,13 @@ if (batchMode) {
 	process.stdout.write(JSON.stringify(results));
 } else {
 	// Single file mode: output WGSL to stdout.
+	if (files.length === 0) {
+		console.error('No input file specified.');
+		process.exit(1);
+	}
 	try {
 		const spirv = readFileSync(files[0]);
-		const wgsl = convertSpirvToWgsl(spirv);
+		const wgsl = converter(spirv);
 		process.stdout.write(wgsl);
 	} catch (e) {
 		console.error('SPIR-V → WGSL error:', e.message);

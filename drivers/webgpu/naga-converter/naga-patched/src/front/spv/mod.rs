@@ -356,6 +356,28 @@ struct LookupExpression {
     block_id: spirv::Word,
 }
 
+/// A deferred `OpSpecConstantOp` instruction recorded during module-scope
+/// parsing. These cannot be handled at module scope because naga's
+/// `global_expressions` arena only supports a limited set of expression types
+/// (Literal, Constant, Override, ZeroValue, Compose, Splat). The operations
+/// (Binary, Unary, Select) are materialized in each function's expression
+/// arena during `make_expression_storage`, making them available to function
+/// body instructions that reference the result.
+#[derive(Clone, Debug)]
+struct DeferredSpecOp {
+    /// The SPIR-V result ID produced by this operation.
+    result_id: spirv::Word,
+    /// The SPIR-V result type ID.
+    type_id: spirv::Word,
+    /// The embedded operation opcode (e.g., BitwiseAnd, INotEqual, Select).
+    opcode: spirv::Op,
+    /// The SPIR-V IDs of the operands (references to constants, overrides,
+    /// or results of earlier `OpSpecConstantOp` instructions).
+    operand_ids: Vec<spirv::Word>,
+    /// Source span for error reporting.
+    span: crate::Span,
+}
+
 #[derive(Debug)]
 struct LookupMember {
     type_id: spirv::Word,
@@ -617,6 +639,14 @@ pub struct Frontend<I> {
     //Note: each `OpFunctionCall` gets a single entry here, indexed by the
     // dummy `Handle<crate::Function>` of the call site.
     deferred_function_calls: Vec<spirv::Word>,
+    /// Deferred `OpSpecConstantOp` instructions. Recorded during module-scope
+    /// parsing and materialized as function-body expressions in
+    /// `make_expression_storage`.
+    deferred_spec_ops: Vec<DeferredSpecOp>,
+    /// Set to `true` by `make_expression_storage` when there are deferred spec
+    /// ops that need materializing in the first `next_block` call.  Cleared
+    /// after processing.
+    needs_spec_op_materialization: bool,
     dummy_functions: Arena<crate::Function>,
     // Graph of all function calls through the module.
     // It's used to sort the functions (as nodes) topologically,
@@ -673,6 +703,8 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
             lookup_entry_point: FastHashMap::default(),
             deferred_entry_points: Vec::default(),
             deferred_function_calls: Vec::default(),
+            deferred_spec_ops: Vec::new(),
+            needs_spec_op_materialization: false,
             dummy_functions: Arena::new(),
             function_call_graph: GraphMap::new(),
             options: options.clone(),
@@ -1526,7 +1558,11 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                 },
             );
         }
-        // done
+
+        // Flag deferred spec ops for materialization in the first next_block()
+        // call, where the emitter will properly cover them with Emit statements.
+        self.needs_spec_op_materialization = !self.deferred_spec_ops.is_empty();
+
         expressions
     }
 
@@ -1761,6 +1797,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
                 Op::ConstantFalse | Op::SpecConstantFalse => {
                     self.parse_bool_constant(inst, false, &mut module)
                 }
+                Op::SpecConstantOp => self.parse_spec_constant_op(inst),
                 Op::Variable => self.parse_global_variable(inst, &mut module),
                 Op::Function => {
                     self.switch(ModuleState::Function, inst.op)?;
@@ -3240,19 +3277,46 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
         let type_lookup = self.lookup_type.lookup(type_id)?;
         let ty = type_lookup.handle;
 
-        let mut components = Vec::with_capacity(inst.wc as usize - 3);
-        for _ in 0..components.capacity() {
-            let start = self.data_offset;
-            let component_id = self.next()?;
-            let span = self.span_from_with_op(start);
+        // Collect all component IDs first.
+        let component_count = inst.wc as usize - 3;
+        let mut component_ids = Vec::with_capacity(component_count);
+        for _ in 0..component_count {
+            component_ids.push(self.next()?);
+        }
+
+        let span = self.span_from_with_op(start);
+
+        // If this is OpSpecConstantComposite and any component is an Override,
+        // defer to function-body materialization.  Override components can't
+        // appear in a Constant's initializer in global_expressions.
+        if inst.op == spirv::Op::SpecConstantComposite {
+            let has_override = component_ids.iter().any(|&cid| {
+                matches!(
+                    self.lookup_constant.get(&cid),
+                    Some(lc) if matches!(lc.inner, Constant::Override(_))
+                )
+            });
+            if has_override {
+                self.deferred_spec_ops.push(DeferredSpecOp {
+                    result_id: id,
+                    type_id,
+                    opcode: spirv::Op::CompositeConstruct,
+                    operand_ids: component_ids,
+                    span,
+                });
+                return Ok(());
+            }
+        }
+
+        // Standard path: create Compose in global_expressions.
+        let mut components = Vec::with_capacity(component_ids.len());
+        for &component_id in &component_ids {
             let constant = self.lookup_constant.lookup(component_id)?;
             let expr = module
                 .global_expressions
                 .append(constant.inner.to_expr(), span);
             components.push(expr);
         }
-
-        let span = self.span_from_with_op(start);
 
         let init = module
             .global_expressions
@@ -3337,6 +3401,50 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
 
         self.lookup_constant
             .insert(id, LookupConstant { inner, type_id });
+        Ok(())
+    }
+
+    /// Record an `OpSpecConstantOp` instruction for deferred processing.
+    ///
+    /// `OpSpecConstantOp` performs an operation (BitwiseAnd, INotEqual, etc.)
+    /// on specialization constants at module scope. Naga's `global_expressions`
+    /// arena cannot represent arbitrary operations (only Literal, Constant,
+    /// Override, ZeroValue, Compose, Splat), so we defer these operations
+    /// and materialize them as function-body expressions in
+    /// `make_expression_storage`.
+    fn parse_spec_constant_op(
+        &mut self,
+        inst: Instruction,
+    ) -> Result<(), Error> {
+        let start = self.data_offset;
+        self.switch(ModuleState::Type, inst.op)?;
+        inst.expect_at_least(4)?;
+
+        let type_id = self.next()?;
+        let result_id = self.next()?;
+        let opcode_raw = self.next()?;
+
+        // The embedded opcode is a regular SPIR-V arithmetic/logic opcode.
+        let opcode = spirv::Op::from_u32(opcode_raw)
+            .ok_or(Error::UnsupportedInstruction(self.state, inst.op))?;
+
+        // Remaining words are operand IDs.
+        let operand_count = inst.wc as usize - 4;
+        let mut operand_ids = Vec::with_capacity(operand_count);
+        for _ in 0..operand_count {
+            operand_ids.push(self.next()?);
+        }
+
+        let span = self.span_from_with_op(start);
+
+        self.deferred_spec_ops.push(DeferredSpecOp {
+            result_id,
+            type_id,
+            opcode,
+            operand_ids,
+            span,
+        });
+
         Ok(())
     }
 

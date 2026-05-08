@@ -178,6 +178,17 @@ struct WGShader {
 	LocalVector<uint32_t> gap_bind_group_indices;
 
 	String name;
+
+	// True if the base shader modules were compiled with WGSL override
+	// declarations (spirv_to_wgsl_with_overrides). When set, specialization
+	// constants are passed as WGPUConstantEntry at pipeline creation time
+	// instead of patching SPIR-V + runtime naga conversion.
+	bool has_override_declarations = false;
+
+	// Per-stage set of override constant IDs found in the WGSL output.
+	// Used to filter WGPUConstantEntry per stage — WebGPU requires that
+	// every constant key passed to a stage actually exists in that module.
+	HashSet<uint32_t> stage_override_ids[6];
 };
 
 // =============================================================================

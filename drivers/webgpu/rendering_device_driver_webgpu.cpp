@@ -3143,6 +3143,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	HashMap<uint32_t, uint32_t> wgsl_buffer_stages;
 
 	// --- Create one WGPUShaderModule per stage ---
+	bool detected_override_declarations = false;
 	Vector<RenderingShaderContainer::Shader> &stage_shaders = p_shader_container->shaders;
 	for (int i = 0; i < stage_shaders.size(); i++) {
 		const RenderingShaderContainer::Shader &s = stage_shaders[i];
@@ -3629,6 +3630,73 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			}
 		}
 
+		// Extract per-stage override constant IDs from WGSL (@id(N) override ...).
+		// These are present when naga preserved specialization constants as overrides.
+		// Only include overrides whose variable is actually referenced in the shader
+		// body (beyond the declaration line). Safari's WebGPU WGSL→MSL compiler
+		// crashes when pipeline constants are passed for unreferenced overrides.
+		{
+			const char *scan = wgsl_str;
+			while ((scan = strstr(scan, "@id(")) != nullptr) {
+				scan += 4; // skip "@id("
+				uint32_t oid = 0;
+				bool has_digits = false;
+				while (*scan >= '0' && *scan <= '9') {
+					oid = oid * 10 + (*scan - '0');
+					scan++;
+					has_digits = true;
+				}
+				if (has_digits && *scan == ')') {
+					detected_override_declarations = true;
+					// Extract variable name: skip ") override " then read name up to ":".
+					const char *p = scan + 1; // skip ')'
+					while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+					if (strncmp(p, "override", 8) == 0) {
+						p += 8;
+						while (*p == ' ' || *p == '\t') p++;
+						const char *name_start = p;
+						while (*p != ':' && *p != '\0' && *p != ' ' && *p != '\n') p++;
+						int name_len = (int)(p - name_start);
+						if (name_len > 0 && name_len < 256) {
+							// Copy the variable name to a null-terminated buffer for strstr.
+							char name_buf[256];
+							memcpy(name_buf, name_start, name_len);
+							name_buf[name_len] = '\0';
+							// Check if this variable name is referenced beyond its declaration.
+							// Search from after the declaration line (past the ';').
+							const char *decl_end = p;
+							while (*decl_end && *decl_end != '\n') decl_end++;
+							bool found_usage = false;
+							const char *search = decl_end;
+							while ((search = strstr(search, name_buf)) != nullptr) {
+								// Verify it's a whole-word match (not a substring of another identifier).
+								if (search + name_len <= wgsl_str + strlen(wgsl_str)) {
+									char before = (search > wgsl_str) ? *(search - 1) : ' ';
+									char after = *(search + name_len);
+									bool boundary_before = !(before >= 'a' && before <= 'z') && !(before >= 'A' && before <= 'Z') && !(before >= '0' && before <= '9') && before != '_';
+									bool boundary_after = !(after >= 'a' && after <= 'z') && !(after >= 'A' && after <= 'Z') && !(after >= '0' && after <= '9') && after != '_';
+									if (boundary_before && boundary_after) {
+										found_usage = true;
+										break;
+									}
+								}
+								search++;
+							}
+							if (found_usage) {
+								shader->stage_override_ids[s.shader_stage].insert(oid);
+							}
+						} else {
+							// Fallback: couldn't parse name, include the override to be safe.
+							shader->stage_override_ids[s.shader_stage].insert(oid);
+						}
+					} else {
+						// Not followed by "override" keyword — include to be safe.
+						shader->stage_override_ids[s.shader_stage].insert(oid);
+					}
+				}
+			}
+		}
+
 		free(wgsl_str); // Free the EM_ASM-allocated string.
 		if (mod == nullptr) {
 			error_text = vformat("WebGPU: wgpuDeviceCreateShaderModule failed for stage %d.", (int)s.shader_stage);
@@ -3642,6 +3710,11 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		if (!shader->module) {
 			shader->module = mod;
 		}
+	}
+
+	shader->has_override_declarations = detected_override_declarations;
+	if (detected_override_declarations) {
+		print_verbose(vformat("WebGPU: shader '%s' has override declarations — will use pipeline constants for specialization.", shader->name));
 	}
 
 	if (!error_text.is_empty()) {
@@ -6781,25 +6854,73 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	const WGRenderPass::SubpassInfo &subpass = rp->subpasses[p_render_subpass];
 
 	// --- Specialization constants ---
-	// The default shader modules have spec constants frozen with default values.
-	// If pipeline-specific values are provided, create specialized modules.
+	// If the base shader modules were compiled with WGSL override declarations
+	// (spirv_to_wgsl_with_overrides), we can pass specialization values as
+	// pipeline constants instead of creating specialized shader modules.
+	// This eliminates all runtime SPIR-V patching and naga conversion.
 	WGPUShaderModule vertex_module = shader->stage_modules[SHADER_STAGE_VERTEX];
 	WGPUShaderModule fragment_module = shader->stage_modules[SHADER_STAGE_FRAGMENT];
 	WGPUShaderModule specialized_vertex = nullptr;
 	WGPUShaderModule specialized_fragment = nullptr;
+
+	// Build per-stage WGPUConstantEntry arrays from specialization constants.
+	// WebGPU requires that every constant key passed to a stage actually exists
+	// as an @id(N) override in that stage's module — unlike Vulkan which silently
+	// ignores unknown spec constant IDs. So we filter by stage_override_ids.
+	LocalVector<WGPUConstantEntry> vertex_constants;
+	LocalVector<WGPUConstantEntry> frag_constants;
+	LocalVector<CharString> constant_key_storage; // keep key strings alive
+	bool use_override_path = shader->has_override_declarations;
 	if (p_specialization_constants.size() > 0) {
-		if (!shader->stage_spirv[SHADER_STAGE_VERTEX].is_empty()) {
-			specialized_vertex = _create_module_with_spec_constants(
-					shader->stage_spirv[SHADER_STAGE_VERTEX], p_specialization_constants, SHADER_STAGE_VERTEX);
-			if (specialized_vertex) {
-				vertex_module = specialized_vertex;
+		if (use_override_path) {
+			// Override path: pass constants at pipeline creation, reuse base modules.
+			const HashSet<uint32_t> &vtx_ids = shader->stage_override_ids[SHADER_STAGE_VERTEX];
+			const HashSet<uint32_t> &frg_ids = shader->stage_override_ids[SHADER_STAGE_FRAGMENT];
+			for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
+				const PipelineSpecializationConstant &sc = p_specialization_constants[i];
+				bool in_vtx = vtx_ids.has(sc.constant_id);
+				bool in_frg = frg_ids.has(sc.constant_id);
+				if (!in_vtx && !in_frg) {
+					continue; // This constant ID doesn't exist in any stage's WGSL.
+				}
+				WGPUConstantEntry entry = {};
+				String key_str = itos(sc.constant_id);
+				CharString key_cs = key_str.utf8();
+				constant_key_storage.push_back(key_cs);
+				entry.key = { constant_key_storage[constant_key_storage.size() - 1].get_data(), WGPU_STRLEN };
+				switch (sc.type) {
+					case PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL:
+						entry.value = sc.bool_value ? 1.0 : 0.0;
+						break;
+					case PIPELINE_SPECIALIZATION_CONSTANT_TYPE_INT:
+						entry.value = (double)sc.int_value;
+						break;
+					case PIPELINE_SPECIALIZATION_CONSTANT_TYPE_FLOAT:
+						entry.value = (double)sc.float_value;
+						break;
+				}
+				if (in_vtx) {
+					vertex_constants.push_back(entry);
+				}
+				if (in_frg) {
+					frag_constants.push_back(entry);
+				}
 			}
-		}
-		if (!shader->stage_spirv[SHADER_STAGE_FRAGMENT].is_empty()) {
-			specialized_fragment = _create_module_with_spec_constants(
-					shader->stage_spirv[SHADER_STAGE_FRAGMENT], p_specialization_constants, SHADER_STAGE_FRAGMENT);
-			if (specialized_fragment) {
-				fragment_module = specialized_fragment;
+		} else {
+			// Legacy path: patch SPIR-V and create specialized modules via naga.
+			if (!shader->stage_spirv[SHADER_STAGE_VERTEX].is_empty()) {
+				specialized_vertex = _create_module_with_spec_constants(
+						shader->stage_spirv[SHADER_STAGE_VERTEX], p_specialization_constants, SHADER_STAGE_VERTEX);
+				if (specialized_vertex) {
+					vertex_module = specialized_vertex;
+				}
+			}
+			if (!shader->stage_spirv[SHADER_STAGE_FRAGMENT].is_empty()) {
+				specialized_fragment = _create_module_with_spec_constants(
+						shader->stage_spirv[SHADER_STAGE_FRAGMENT], p_specialization_constants, SHADER_STAGE_FRAGMENT);
+				if (specialized_fragment) {
+					fragment_module = specialized_fragment;
+				}
 			}
 		}
 	}
@@ -6856,6 +6977,10 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	vertex_state.entryPoint = { "main", WGPU_STRLEN };
 	vertex_state.bufferCount = vb_layouts.size();
 	vertex_state.buffers = vb_layouts.ptr();
+	if (use_override_path && !vertex_constants.is_empty()) {
+		vertex_state.constantCount = vertex_constants.size();
+		vertex_state.constants = vertex_constants.ptr();
+	}
 
 	// --- Primitive state ---
 	WGPUPrimitiveState primitive = {};
@@ -7109,6 +7234,10 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	frag.entryPoint = { "main", WGPU_STRLEN };
 	frag.targetCount = color_target_count;
 	frag.targets = color_targets.ptr();
+	if (use_override_path && !frag_constants.is_empty()) {
+		frag.constantCount = frag_constants.size();
+		frag.constants = frag_constants.ptr();
+	}
 
 	// --- Build and create render pipeline ---
 	WGPURenderPipelineDescriptor desc = {};
@@ -7277,14 +7406,44 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 	ERR_FAIL_COND_V_MSG(!shader->stage_modules[SHADER_STAGE_COMPUTE], PipelineID(),
 			"WebGPU: compute_pipeline_create called with a shader that has no compute stage.");
 
-	// Specialization constants: create a specialized module if values are provided.
+	// Specialization constants: override path or legacy module-patching path.
 	WGPUShaderModule compute_module = shader->stage_modules[SHADER_STAGE_COMPUTE];
 	WGPUShaderModule specialized_compute = nullptr;
-	if (p_specialization_constants.size() > 0 && !shader->stage_spirv[SHADER_STAGE_COMPUTE].is_empty()) {
-		specialized_compute = _create_module_with_spec_constants(
-				shader->stage_spirv[SHADER_STAGE_COMPUTE], p_specialization_constants, SHADER_STAGE_COMPUTE);
-		if (specialized_compute) {
-			compute_module = specialized_compute;
+	LocalVector<WGPUConstantEntry> compute_constants;
+	LocalVector<CharString> compute_key_storage;
+	bool use_override_path = shader->has_override_declarations;
+	if (p_specialization_constants.size() > 0) {
+		if (use_override_path) {
+			const HashSet<uint32_t> &cmp_ids = shader->stage_override_ids[SHADER_STAGE_COMPUTE];
+			for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
+				const PipelineSpecializationConstant &sc = p_specialization_constants[i];
+				if (!cmp_ids.has(sc.constant_id)) {
+					continue; // This constant ID doesn't exist in the compute stage's WGSL.
+				}
+				WGPUConstantEntry entry = {};
+				String key_str = itos(sc.constant_id);
+				CharString key_cs = key_str.utf8();
+				compute_key_storage.push_back(key_cs);
+				entry.key = { compute_key_storage[compute_key_storage.size() - 1].get_data(), WGPU_STRLEN };
+				switch (sc.type) {
+					case PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL:
+						entry.value = sc.bool_value ? 1.0 : 0.0;
+						break;
+					case PIPELINE_SPECIALIZATION_CONSTANT_TYPE_INT:
+						entry.value = (double)sc.int_value;
+						break;
+					case PIPELINE_SPECIALIZATION_CONSTANT_TYPE_FLOAT:
+						entry.value = (double)sc.float_value;
+						break;
+				}
+				compute_constants.push_back(entry);
+			}
+		} else if (!shader->stage_spirv[SHADER_STAGE_COMPUTE].is_empty()) {
+			specialized_compute = _create_module_with_spec_constants(
+					shader->stage_spirv[SHADER_STAGE_COMPUTE], p_specialization_constants, SHADER_STAGE_COMPUTE);
+			if (specialized_compute) {
+				compute_module = specialized_compute;
+			}
 		}
 	}
 
@@ -7292,6 +7451,10 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_
 	desc.layout = shader->pipeline_layout;
 	desc.compute.module = compute_module;
 	desc.compute.entryPoint = { "main", WGPU_STRLEN };
+	if (use_override_path && !compute_constants.is_empty()) {
+		desc.compute.constantCount = compute_constants.size();
+		desc.compute.constants = compute_constants.ptr();
+	}
 
 	WGPUComputePipeline pipeline = wgpuDeviceCreateComputePipeline(device, &desc);
 	if (!pipeline) {

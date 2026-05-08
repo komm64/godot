@@ -40,6 +40,182 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
         let mut emitter = crate::proc::Emitter::default();
         emitter.start(ctx.expressions);
 
+        // Materialize deferred OpSpecConstantOp instructions in the first block.
+        //
+        // These were recorded during module-scope parsing and cannot be
+        // represented in global_expressions (which only supports Literal,
+        // Constant, Override, ZeroValue, Compose, Splat). We create them as
+        // function-body expressions (Binary, Unary, Select, AccessIndex) that
+        // reference the Override/Constant expressions registered by
+        // make_expression_storage().
+        //
+        // Creating them here (inside the emitter) ensures they are covered by
+        // an Emit statement, which the validator requires for computed
+        // expressions.  The flag is set once per function by
+        // make_expression_storage() and cleared after processing.
+        if self.needs_spec_op_materialization {
+            self.needs_spec_op_materialization = false;
+            for spec_op in self.deferred_spec_ops.clone() {
+                let expr = match spec_op.opcode {
+                    // --- Binary operations ---
+                    spirv::Op::IAdd | spirv::Op::FAdd
+                    | spirv::Op::ISub | spirv::Op::FSub
+                    | spirv::Op::IMul | spirv::Op::FMul
+                    | spirv::Op::UDiv | spirv::Op::SDiv | spirv::Op::FDiv
+                    | spirv::Op::SRem
+                    | spirv::Op::IEqual | spirv::Op::FOrdEqual
+                    | spirv::Op::INotEqual | spirv::Op::FOrdNotEqual
+                    | spirv::Op::ULessThan | spirv::Op::SLessThan | spirv::Op::FOrdLessThan
+                    | spirv::Op::ULessThanEqual | spirv::Op::SLessThanEqual | spirv::Op::FOrdLessThanEqual
+                    | spirv::Op::UGreaterThan | spirv::Op::SGreaterThan | spirv::Op::FOrdGreaterThan
+                    | spirv::Op::UGreaterThanEqual | spirv::Op::SGreaterThanEqual | spirv::Op::FOrdGreaterThanEqual
+                    | spirv::Op::BitwiseOr | spirv::Op::BitwiseXor | spirv::Op::BitwiseAnd
+                    | spirv::Op::LogicalEqual | spirv::Op::LogicalNotEqual
+                    | spirv::Op::LogicalOr | spirv::Op::LogicalAnd
+                    | spirv::Op::ShiftRightLogical | spirv::Op::ShiftRightArithmetic
+                    | spirv::Op::ShiftLeftLogical
+                    | spirv::Op::UMod => {
+                        if spec_op.operand_ids.len() < 2 {
+                            log::warn!("OpSpecConstantOp {:?} needs 2 operands, got {}",
+                                spec_op.opcode, spec_op.operand_ids.len());
+                            continue;
+                        }
+                        let left_lexp = match self.lookup_expression.lookup(spec_op.operand_ids[0]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        let right_lexp = match self.lookup_expression.lookup(spec_op.operand_ids[1]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        let op = match map_binary_operator(spec_op.opcode) {
+                            Ok(op) => op,
+                            Err(_) => {
+                                match spec_op.opcode {
+                                    spirv::Op::ShiftRightLogical
+                                    | spirv::Op::ShiftRightArithmetic => crate::BinaryOperator::ShiftRight,
+                                    spirv::Op::ShiftLeftLogical => crate::BinaryOperator::ShiftLeft,
+                                    spirv::Op::UMod => crate::BinaryOperator::Modulo,
+                                    spirv::Op::LogicalOr => crate::BinaryOperator::LogicalOr,
+                                    spirv::Op::LogicalAnd => crate::BinaryOperator::LogicalAnd,
+                                    _ => continue,
+                                }
+                            }
+                        };
+                        crate::Expression::Binary { op, left: left_lexp, right: right_lexp }
+                    }
+
+                    // --- Unary operations ---
+                    spirv::Op::SNegate | spirv::Op::FNegate => {
+                        if spec_op.operand_ids.is_empty() { continue; }
+                        let expr_h = match self.lookup_expression.lookup(spec_op.operand_ids[0]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        crate::Expression::Unary { op: crate::UnaryOperator::Negate, expr: expr_h }
+                    }
+                    spirv::Op::Not => {
+                        if spec_op.operand_ids.is_empty() { continue; }
+                        let expr_h = match self.lookup_expression.lookup(spec_op.operand_ids[0]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        crate::Expression::Unary { op: crate::UnaryOperator::BitwiseNot, expr: expr_h }
+                    }
+                    spirv::Op::LogicalNot => {
+                        if spec_op.operand_ids.is_empty() { continue; }
+                        let expr_h = match self.lookup_expression.lookup(spec_op.operand_ids[0]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        crate::Expression::Unary { op: crate::UnaryOperator::LogicalNot, expr: expr_h }
+                    }
+
+                    // --- Select (ternary) ---
+                    spirv::Op::Select => {
+                        if spec_op.operand_ids.len() < 3 { continue; }
+                        let cond = match self.lookup_expression.lookup(spec_op.operand_ids[0]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        let accept = match self.lookup_expression.lookup(spec_op.operand_ids[1]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        let reject = match self.lookup_expression.lookup(spec_op.operand_ids[2]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        crate::Expression::Select { condition: cond, accept, reject }
+                    }
+
+                    // --- CompositeConstruct (from deferred OpSpecConstantComposite) ---
+                    spirv::Op::CompositeConstruct => {
+                        let ty = match self.lookup_type.lookup(spec_op.type_id) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        let mut components = Vec::with_capacity(spec_op.operand_ids.len());
+                        let mut all_ok = true;
+                        for &comp_id in &spec_op.operand_ids {
+                            match self.lookup_expression.lookup(comp_id) {
+                                Ok(l) => components.push(l.handle),
+                                Err(_) => { all_ok = false; break; }
+                            }
+                        }
+                        if !all_ok { continue; }
+                        crate::Expression::Compose { ty, components }
+                    }
+
+                    // --- CompositeExtract ---
+                    spirv::Op::CompositeExtract => {
+                        if spec_op.operand_ids.len() < 2 { continue; }
+                        let composite = match self.lookup_expression.lookup(spec_op.operand_ids[0]) {
+                            Ok(l) => l.handle,
+                            Err(_) => continue,
+                        };
+                        let index = spec_op.operand_ids[1];
+                        crate::Expression::AccessIndex { base: composite, index }
+                    }
+
+                    // --- Type conversions (alias only, no new expression) ---
+                    spirv::Op::UConvert | spirv::Op::SConvert
+                    | spirv::Op::ConvertFToU | spirv::Op::ConvertFToS
+                    | spirv::Op::ConvertSToF | spirv::Op::ConvertUToF => {
+                        if spec_op.operand_ids.is_empty() { continue; }
+                        let expr_h = match self.lookup_expression.lookup(spec_op.operand_ids[0]) {
+                            Ok(l) => l,
+                            Err(_) => continue,
+                        };
+                        self.lookup_expression.insert(
+                            spec_op.result_id,
+                            LookupExpression {
+                                type_id: spec_op.type_id,
+                                handle: expr_h.handle,
+                                block_id: 0,
+                            },
+                        );
+                        continue;
+                    }
+
+                    _ => {
+                        log::warn!("Unsupported OpSpecConstantOp opcode {:?}, skipping", spec_op.opcode);
+                        continue;
+                    }
+                };
+
+                let handle = ctx.expressions.append(expr, spec_op.span);
+                self.lookup_expression.insert(
+                    spec_op.result_id,
+                    LookupExpression {
+                        type_id: spec_op.type_id,
+                        handle,
+                        block_id: 0,
+                    },
+                );
+            }
+        }
+
         // Find the `Body` to which this block contributes.
         //
         // If this is some SPIR-V structured control flow construct's merge

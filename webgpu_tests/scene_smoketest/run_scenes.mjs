@@ -66,11 +66,34 @@ const ERROR_CAPTURE_SCRIPT = `
         if (msg.indexOf('[SHADER]') >= 0 || msg.indexOf('NAGA') >= 0) {
             window._webgpuDebug.shaderFails.push(msg.substring(0, 500));
         }
+        if (msg.indexOf('GPUValidationError') >= 0 || msg.indexOf('UNCAPTURED-GPU-ERROR') >= 0) {
+            window._webgpuDebug.gpuErrors.push(msg.substring(0, 500));
+        }
         origError.apply(console, arguments);
     };
-    // Capture uncaptured GPU errors via the DOM event
-    if (typeof GPUDevice !== 'undefined') {
-        var origCreate = navigator.gpu && navigator.gpu.requestAdapter;
+    // Hook GPUAdapter.requestDevice to capture uncapturedError events on GPU devices.
+    // This is critical for Safari where Playwright console listeners aren't available.
+    if (typeof navigator !== 'undefined' && navigator.gpu) {
+        var origRequestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+        navigator.gpu.requestAdapter = function() {
+            return origRequestAdapter.apply(navigator.gpu, arguments).then(function(adapter) {
+                if (!adapter) return adapter;
+                var origRequestDevice = adapter.requestDevice.bind(adapter);
+                adapter.requestDevice = function() {
+                    return origRequestDevice.apply(adapter, arguments).then(function(device) {
+                        if (device) {
+                            device.addEventListener('uncapturederror', function(e) {
+                                var msg = e.error ? (e.error.message || String(e.error)) : 'unknown GPU error';
+                                window._webgpuDebug.gpuErrors.push('[uncapturederror] ' + msg.substring(0, 500));
+                                window._webgpuDebug.allErrors.push('[uncapturederror] ' + msg.substring(0, 500));
+                            });
+                        }
+                        return device;
+                    });
+                };
+                return adapter;
+            });
+        };
     }
     window.addEventListener('unhandledrejection', function(e) {
         if (e.reason && e.reason.message) {
@@ -165,6 +188,32 @@ function exportScene(scene, editorBin, templateZip) {
     }
 }
 
+// ─── Blank Canvas Detection ─────────────────────────────────────────────────
+// Samples the canvas by drawing it to a temporary 2D canvas and checking if
+// any pixels have color. Returns { blank, nonBlackPixels, total } or null on error.
+const BLANK_CANVAS_CHECK_JS = `
+(function() {
+    var canvas = document.getElementById('canvas');
+    if (!canvas || canvas.width < 10 || canvas.height < 10) return JSON.stringify({ blank: true, reason: 'no canvas or too small' });
+    try {
+        var tmp = document.createElement('canvas');
+        tmp.width = 64;
+        tmp.height = 64;
+        var ctx = tmp.getContext('2d');
+        ctx.drawImage(canvas, 0, 0, 64, 64);
+        var data = ctx.getImageData(0, 0, 64, 64).data;
+        var nonBlack = 0;
+        for (var i = 0; i < data.length; i += 4) {
+            if (data[i] > 10 || data[i+1] > 10 || data[i+2] > 10) nonBlack++;
+        }
+        var total = data.length / 4;
+        return JSON.stringify({ blank: nonBlack < (total * 0.01), nonBlackPixels: nonBlack, total: total });
+    } catch(e) {
+        return JSON.stringify({ blank: null, reason: e.message });
+    }
+})()
+`;
+
 // ─── Run Scene (Chrome / Firefox via Playwright) ─────────────────────────────
 
 async function runScenePlaywright(scene, browser, timeout) {
@@ -248,12 +297,26 @@ async function runScenePlaywright(scene, browser, timeout) {
         }
     } catch {}
 
+    // Check for blank canvas using Playwright element screenshot.
+    // Note: drawImage from a WebGPU canvas returns black (the back buffer is cleared
+    // after presentation), so we use Playwright's compositor-level screenshot instead.
+    // A solid black canvas compresses to < 2KB as PNG. Rendered scenes with dark
+    // backgrounds still produce > 3KB due to anti-aliased edges, UI elements, etc.
+    let blankCanvas = false;
+    try {
+        const canvasEl = await page.$('#canvas');
+        if (canvasEl) {
+            const buf = await canvasEl.screenshot();
+            blankCanvas = buf.length < 2500;
+        }
+    } catch {}
+
     await page.close();
     server.close();
 
     const maxErrors = scene.max_errors || 0;
     const totalErrors = gpuErrors.length + shaderErrors.length + (deviceLost ? 1 : 0);
-    const passed = totalErrors <= maxErrors && !deviceLost;
+    const passed = totalErrors <= maxErrors && !deviceLost && !blankCanvas;
 
     return {
         status: passed ? 'PASS' : 'FAIL',
@@ -262,6 +325,7 @@ async function runScenePlaywright(scene, browser, timeout) {
         shaderErrors: shaderErrors.length,
         consoleErrors: consoleErrors.length,
         deviceLost,
+        blankCanvas,
         totalErrors,
         maxErrors,
         details: [...gpuErrors.slice(0, 3), ...shaderErrors.slice(0, 3)],
@@ -368,6 +432,12 @@ async function runSceneSafari(scene, timeout) {
         }
     }
 
+    // Note: blank canvas detection via drawImage doesn't work for WebGPU canvases
+    // (the back buffer is cleared after presentation). Safari doesn't support
+    // compositor-level screenshots via AppleScript, so we rely on error-based
+    // criteria (GPU errors, shader errors, device lost) for Safari pass/fail.
+    let blankCanvas = false;
+
     server.close();
 
     if (!result) {
@@ -379,6 +449,7 @@ async function runSceneSafari(scene, timeout) {
             shaderErrors: 0,
             consoleErrors: 0,
             deviceLost: false,
+            blankCanvas: false,
             totalErrors: 1,
             maxErrors: 0,
             details: [],
@@ -390,7 +461,7 @@ async function runSceneSafari(scene, timeout) {
     const deviceLost = !!result.deviceLost;
     const maxErrors = scene.max_errors || 0;
     const totalErrors = result.gpuErrors + result.shaderFails + (deviceLost ? 1 : 0);
-    const passed = totalErrors <= maxErrors && !deviceLost && loaded && !hasFatalError;
+    const passed = totalErrors <= maxErrors && !deviceLost && loaded && !hasFatalError && !blankCanvas;
 
     return {
         status: passed ? 'PASS' : 'FAIL',
@@ -399,6 +470,7 @@ async function runSceneSafari(scene, timeout) {
         shaderErrors: result.shaderFails,
         consoleErrors: result.allErrors,
         deviceLost,
+        blankCanvas,
         totalErrors,
         maxErrors,
         details,
@@ -586,7 +658,11 @@ async function main() {
                 console.log(`PASS  (gpu=${result.gpuErrors}, shader=${result.shaderErrors})${errNote}`);
                 passed++;
             } else {
-                console.log(`FAIL  (gpu=${result.gpuErrors}, shader=${result.shaderErrors}, device_lost=${result.deviceLost})`);
+                const blankNote = result.blankCanvas ? ', blank_canvas=true' : '';
+                console.log(`FAIL  (gpu=${result.gpuErrors}, shader=${result.shaderErrors}, device_lost=${result.deviceLost}${blankNote})`);
+                if (result.blankCanvas) {
+                    console.log(`         Canvas rendered but is blank/black`);
+                }
                 if (result.details && result.details.length > 0) {
                     for (const d of result.details.slice(0, 2)) {
                         console.log(`         ${d.substring(0, 100)}`);
