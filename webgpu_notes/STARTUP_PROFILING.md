@@ -369,3 +369,43 @@ node profile_startup.mjs --duration 60
 
 To change capture duration: `--duration <seconds>`
 To change output path: `--output <path>`
+
+---
+
+## Updated Results: Override Path (2026-05-08)
+
+The override specialization constant work eliminates all 348 runtime-specialized shader modules by replacing baked specialization constants with WGSL `@id(N) override` declarations. Instead of creating a separate shader module for each specialization variant (requiring a full naga SPIR-V-to-WGSL conversion per module), the base shader modules declare their specialization constants as overrides, and specialization happens at `createRenderPipeline` time via the pipeline's `constants` dictionary. The precompiled WGSL table (378 entries) supplies all base shader source at build time, eliminating the naga WASM module from the runtime entirely.
+
+**Why this works**: Previously, each specialized shader was a distinct SPIR-V blob with specialization constants folded in at compile time, requiring naga to convert it to WGSL independently. With the override path, a single base WGSL module contains `@id(0) override SPEC_0: u32 = 0;` declarations. When the engine needs a specialized pipeline, it passes `{ 0: value, 1: value, ... }` to `createRenderPipeline` -- the browser/Dawn handles constant substitution natively with no additional shader modules needed.
+
+**Important context**: The "before" profiling already had the WGSL cache/precompiled table in place for base shaders. The 6.7s cumulative naga conversion time was entirely from the 348 specialized shader modules that still required runtime SPIR-V-to-WGSL conversion. The override path improvement is specifically about eliminating those 348 runtime conversions.
+
+### Before / After Comparison
+
+| Metric | Before (Specialized Modules) | After (Override Path) | Improvement |
+|--------|-----------------------------|-----------------------|-------------|
+| Total shader modules | 859 (511 base + 348 specialized) | 490 (all base, 0 specialized) | 43% fewer modules |
+| Specialized modules | 348 (runtime naga conversion) | 0 | 100% eliminated |
+| Naga conversion time | ~6.7s cumulative | 0ms (precompiled table, 378 entries) | 6.7s eliminated |
+| Top shader module compile time | 526ms | 1.54ms | 340x faster |
+| Total base shader compile time | N/A | 28.8ms | -- |
+| All shader modules done | ~38s | 3.1s | 12x faster |
+| Render pipelines | 190 | 80 | 58% fewer |
+| Compute pipelines | 47 | 46 | ~same |
+| First visible frame | ~7s | ~3.2s | 2x faster |
+| FPS > 50 | ~18s | ~9.4s | 2x faster |
+| Steady-state FPS | 12-13 fps | 60 fps | 4.6x higher |
+| FPS drops to 0-1 after first frame | Multiple (waves 3-13) | Zero after 9.4s | Eliminated |
+| Locked 60fps duration | Never achieved | 50+ seconds continuous | -- |
+
+### Key Takeaways
+
+1. **Naga WASM is completely removed from the runtime.** All 378 precompiled WGSL entries are loaded from the build-time table. Zero bytes of SPIR-V are converted at runtime.
+
+2. **Shader module creation collapses from 38s to 3.1s.** The 490 base modules load from the precompiled table and compile in 28.8ms total, with the slowest single module at 1.54ms (vs 526ms before).
+
+3. **The compilation wave problem is solved.** Previously, 13+ waves of specialized shader compilation interrupted rendering over a 33-second window, causing repeated FPS crashes to 0-1. With override constants, all shader modules are done before the first frame, and pipeline creation with override constants is near-instant.
+
+4. **Steady-state FPS jumps from 12-13 to 60 fps.** This suggests the specialized module overhead was not just a startup cost -- the 348 extra shader modules and 190 render pipelines were also imposing ongoing runtime overhead (memory pressure, cache pollution, or Dawn/Metal pipeline switching costs). With 80 render pipelines instead of 190, the GPU has far fewer pipeline state changes per frame.
+
+5. **58% fewer render pipelines (190 to 80)** because multiple specialization variants that previously needed separate pipelines now share a single base shader module and differ only in pipeline constants.
