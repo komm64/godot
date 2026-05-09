@@ -61,7 +61,13 @@ const MIME_TYPES = {
 const ERROR_CAPTURE_SCRIPT = `
 <script>
 (function() {
-    window._webgpuDebug = { gpuErrors: [], allErrors: [], shaderFails: [], totalShaders: 0 };
+    window._webgpuDebug = { gpuErrors: [], allErrors: [], shaderFails: [], totalShaders: 0, consoleLogs: [] };
+    var origLog = console.log;
+    console.log = function() {
+        var msg = Array.prototype.join.call(arguments, ' ');
+        window._webgpuDebug.consoleLogs.push(msg.substring(0, 500));
+        origLog.apply(console, arguments);
+    };
     var origError = console.error;
     console.error = function() {
         var msg = Array.prototype.join.call(arguments, ' ');
@@ -235,6 +241,10 @@ async function runScenePlaywright(scene, browser, timeout) {
     let deviceLost = false;
     let engineStarted = false;
 
+    // Per-scene console output validation (e.g. [HEIGHTMAP-CHECK] PASS).
+    const passPatterns = scene.pass_patterns || [];
+    const matchedPatterns = new Set();
+
     page.on('console', (msg) => {
         const text = msg.text();
 
@@ -257,6 +267,12 @@ async function runScenePlaywright(scene, browser, timeout) {
         if (msg.type() === 'error' && !text.includes('installHook')) {
             consoleErrors.push(text.substring(0, 200));
         }
+
+        for (const pat of passPatterns) {
+            if (text.includes(pat)) {
+                matchedPatterns.add(pat);
+            }
+        }
     });
 
     page.on('pageerror', (err) => {
@@ -265,11 +281,12 @@ async function runScenePlaywright(scene, browser, timeout) {
 
     await page.goto(url);
 
-    // Wait for engine to start or timeout
+    // Wait for engine to start (and pass_patterns to match) or timeout
     const startTime = Date.now();
     while ((Date.now() - startTime) < timeout) {
         await new Promise(r => setTimeout(r, 500));
-        if (engineStarted && (Date.now() - startTime) > Math.min(timeout, 10000)) {
+        const patternsReady = passPatterns.length === 0 || matchedPatterns.size >= passPatterns.length;
+        if (engineStarted && patternsReady && (Date.now() - startTime) > Math.min(timeout, 10000)) {
             break;
         }
     }
@@ -319,7 +336,8 @@ async function runScenePlaywright(scene, browser, timeout) {
 
     const maxErrors = scene.max_errors || 0;
     const totalErrors = gpuErrors.length + shaderErrors.length + (deviceLost ? 1 : 0);
-    const passed = totalErrors <= maxErrors && !deviceLost && !blankCanvas;
+    const unmatchedPatterns = passPatterns.filter(p => !matchedPatterns.has(p));
+    const passed = totalErrors <= maxErrors && !deviceLost && !blankCanvas && unmatchedPatterns.length === 0;
 
     return {
         status: passed ? 'PASS' : 'FAIL',
@@ -329,6 +347,7 @@ async function runScenePlaywright(scene, browser, timeout) {
         consoleErrors: consoleErrors.length,
         deviceLost,
         blankCanvas,
+        unmatchedPatterns,
         totalErrors,
         maxErrors,
         details: [...gpuErrors.slice(0, 3), ...shaderErrors.slice(0, 3)],
@@ -435,6 +454,27 @@ async function runSceneSafari(scene, timeout) {
         }
     }
 
+    // Check pass_patterns against captured console logs.
+    // We check inside the eval to avoid pulling the entire (potentially huge)
+    // consoleLogs array through AppleScript's size-limited return value.
+    const passPatterns = scene.pass_patterns || [];
+    let unmatchedPatterns = [...passPatterns];
+    if (passPatterns.length > 0) {
+        const patsJson = JSON.stringify(passPatterns);
+        const matchedData = safariEval(`
+            (function() {
+                var d = window._webgpuDebug || {};
+                var logs = d.consoleLogs || [];
+                var pats = ${patsJson};
+                var matched = pats.filter(function(p) { return logs.some(function(l) { return l.indexOf(p) >= 0; }); });
+                return JSON.stringify(matched);
+            })()
+        `);
+        if (Array.isArray(matchedData)) {
+            unmatchedPatterns = passPatterns.filter(pat => !matchedData.includes(pat));
+        }
+    }
+
     // Note: blank canvas detection via drawImage doesn't work for WebGPU canvases
     // (the back buffer is cleared after presentation). Safari doesn't support
     // compositor-level screenshots via AppleScript, so we rely on error-based
@@ -464,7 +504,7 @@ async function runSceneSafari(scene, timeout) {
     const deviceLost = !!result.deviceLost;
     const maxErrors = scene.max_errors || 0;
     const totalErrors = result.gpuErrors + result.shaderFails + (deviceLost ? 1 : 0);
-    const passed = totalErrors <= maxErrors && !deviceLost && loaded && !hasFatalError && !blankCanvas;
+    const passed = totalErrors <= maxErrors && !deviceLost && loaded && !hasFatalError && !blankCanvas && unmatchedPatterns.length === 0;
 
     return {
         status: passed ? 'PASS' : 'FAIL',
@@ -474,6 +514,7 @@ async function runSceneSafari(scene, timeout) {
         consoleErrors: result.allErrors,
         deviceLost,
         blankCanvas,
+        unmatchedPatterns,
         totalErrors,
         maxErrors,
         details,
@@ -653,11 +694,19 @@ async function main() {
         for (const scene of scenes) {
             process.stdout.write(`  ${scene.id.padEnd(35)}`);
 
+            // Filter pass_patterns by browser if pass_patterns_browsers is set.
+            const filteredScene = { ...scene };
+            if (scene.pass_patterns && scene.pass_patterns_browsers) {
+                if (!scene.pass_patterns_browsers.includes(browserName)) {
+                    filteredScene.pass_patterns = [];
+                }
+            }
+
             let result;
             if (browserHandle.type === 'applescript') {
-                result = await runSceneSafari(scene, timeout);
+                result = await runSceneSafari(filteredScene, timeout);
             } else {
-                result = await runScenePlaywright(scene, browserHandle.browser, timeout);
+                result = await runScenePlaywright(filteredScene, browserHandle.browser, timeout);
             }
 
             allResults.push({ scene: scene.id, browser: browserName, ...result });
@@ -671,9 +720,15 @@ async function main() {
                 passed++;
             } else {
                 const blankNote = result.blankCanvas ? ', blank_canvas=true' : '';
-                console.log(`FAIL  (gpu=${result.gpuErrors}, shader=${result.shaderErrors}, device_lost=${result.deviceLost}${blankNote})`);
+                const patNote = result.unmatchedPatterns?.length ? ', missing_patterns=' + result.unmatchedPatterns.length : '';
+                console.log(`FAIL  (gpu=${result.gpuErrors}, shader=${result.shaderErrors}, device_lost=${result.deviceLost}${blankNote}${patNote})`);
                 if (result.blankCanvas) {
                     console.log(`         Canvas rendered but is blank/black`);
+                }
+                if (result.unmatchedPatterns?.length) {
+                    for (const p of result.unmatchedPatterns) {
+                        console.log(`         Missing required log: "${p}"`);
+                    }
                 }
                 if (result.details && result.details.length > 0) {
                     for (const d of result.details.slice(0, 2)) {

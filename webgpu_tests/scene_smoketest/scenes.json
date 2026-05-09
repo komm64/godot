@@ -115,7 +115,9 @@
       "path": "../../../godot-demo-projects/compute/heightmap",
       "preset": "Web",
       "max_errors": 0,
-      "description": "Compute shader heightmap"
+      "description": "Compute shader heightmap",
+      "pass_patterns": ["[HEIGHTMAP-CHECK] PASS"],
+      "pass_patterns_browsers": ["chrome", "firefox"]
     },
     {
       "id": "demo_compute_texture",

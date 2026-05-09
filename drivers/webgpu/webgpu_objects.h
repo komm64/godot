@@ -179,6 +179,12 @@ struct WGShader {
 	// The shadow binding receives a GPU copy of the texture at bind group creation time.
 	HashMap<uint32_t, uint32_t> rw_storage_splits;
 
+	// Read-only storage texture → sampled texture conversions.
+	// Set of (set << 16 | binding) keys. When readonly-and-readwrite-storage-textures
+	// is unavailable, read-only storage textures are converted to sampled textures
+	// in the WGSL and BGL so the shader compiles on Firefox/wgpu.
+	HashSet<uint32_t> read_storage_to_sampled;
+
 	// Pipeline layout gap indices — slots between set_count and pc_group that
 	// need empty bind groups bound before draw (Firefox/wgpu requirement).
 	LocalVector<uint32_t> gap_bind_group_indices;

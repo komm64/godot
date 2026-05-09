@@ -1881,7 +1881,6 @@ Ref<Image> TextureStorage::_validate_texture_format(const Ref<Image> &p_image, T
 				Vector<uint8_t> la_data = image->get_data();
 				const uint8_t *src = la_data.ptr();
 				Vector<uint8_t> rgba_data;
-				int pixel_count = w * h;
 				// Handle mipmaps: total pixel data size / 2 bytes per LA8 pixel.
 				int total_la_bytes = la_data.size();
 				int total_pixels = total_la_bytes / 2;
