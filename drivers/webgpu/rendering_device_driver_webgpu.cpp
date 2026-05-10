@@ -6413,7 +6413,14 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 		if (ref.attachment < rp->attachments.size()) {
 			const RDD::Attachment &attach_desc = rp->attachments[ref.attachment];
 			att.loadOp = map_load_op(attach_desc.load_op);
-			att.storeOp = map_store_op(attach_desc.store_op);
+			// WebGPU emulates Vulkan subpasses as separate render passes.
+			// For the first subpass in a multi-subpass pass, force Store to
+			// preserve MSAA data for subsequent subpasses (e.g. transparent pass).
+			if (rp->subpasses.size() > 1) {
+				att.storeOp = WGPUStoreOp_Store;
+			} else {
+				att.storeOp = map_store_op(attach_desc.store_op);
+			}
 
 			if (att.loadOp == WGPULoadOp_Clear && ref.attachment < p_clear_values.size()) {
 				const Color &c = p_clear_values[ref.attachment].color;
@@ -6451,7 +6458,12 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 
 			if (has_depth) {
 				ds_att.depthLoadOp = map_load_op(attach_desc.load_op);
-				ds_att.depthStoreOp = map_store_op(attach_desc.store_op);
+				// Force Store for multi-subpass passes (see color attachment comment).
+				if (rp->subpasses.size() > 1) {
+					ds_att.depthStoreOp = WGPUStoreOp_Store;
+				} else {
+					ds_att.depthStoreOp = map_store_op(attach_desc.store_op);
+				}
 				if (ds_att.depthLoadOp == WGPULoadOp_Clear && ds_ref.attachment < p_clear_values.size()) {
 					ds_att.depthClearValue = p_clear_values[ds_ref.attachment].depth;
 				} else {
@@ -6465,7 +6477,12 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 
 			if (has_stencil) {
 				ds_att.stencilLoadOp = map_load_op(attach_desc.stencil_load_op);
-				ds_att.stencilStoreOp = map_store_op(attach_desc.stencil_store_op);
+				// Force Store for multi-subpass passes (see color attachment comment).
+				if (rp->subpasses.size() > 1) {
+					ds_att.stencilStoreOp = WGPUStoreOp_Store;
+				} else {
+					ds_att.stencilStoreOp = map_store_op(attach_desc.stencil_store_op);
+				}
 				if (ds_att.stencilLoadOp == WGPULoadOp_Clear && ds_ref.attachment < p_clear_values.size()) {
 					ds_att.stencilClearValue = p_clear_values[ds_ref.attachment].stencil;
 				}
@@ -6566,16 +6583,6 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 void RenderingDeviceDriverWebGPU::command_next_render_subpass(CommandBufferID p_cmd_buffer, CommandBufferType p_cmd_buffer_type) {
 	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
 	ERR_FAIL_NULL(cmd);
-
-	// Temporary: log subpass transitions.
-	static int _sp_log = 0;
-	if (_sp_log < 10) {
-		WEBGPU_DIAG({ console.log('[SUBPASS] transition to subpass ' + $0 + ' size=' + $1 + 'x' + $2); },
-				cmd->render_state.current_subpass + 1,
-				cmd->render_state.render_area_width,
-				cmd->render_state.render_area_height);
-		_sp_log++;
-	}
 
 	// End current render pass encoder.
 	if (cmd->render_encoder) {
