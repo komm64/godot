@@ -55,7 +55,6 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	struct PerfCounters {
 		uint32_t draw_calls = 0;
 		uint32_t set_bind_group_calls = 0;
-		uint32_t set_bind_group_skipped = 0;
 		uint32_t push_constant_writes = 0;
 		uint32_t push_constant_skipped = 0;
 		uint32_t render_passes = 0;
@@ -64,12 +63,12 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 		uint32_t set_vertex_buffer_calls = 0;
 		uint32_t gap_bind_group_calls = 0;
 		uint32_t first_instance_draws = 0;
+		uint32_t ring_overflows = 0;
 		double last_log_time = 0;
 		uint32_t frames_since_log = 0;
 		void reset() {
 			draw_calls = 0;
 			set_bind_group_calls = 0;
-			set_bind_group_skipped = 0;
 			push_constant_writes = 0;
 			push_constant_skipped = 0;
 			render_passes = 0;
@@ -78,6 +77,7 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 			set_vertex_buffer_calls = 0;
 			gap_bind_group_calls = 0;
 			first_instance_draws = 0;
+			ring_overflows = 0;
 		}
 	} perf;
 
@@ -110,7 +110,7 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// --- Push Constant Emulation ---
 	// Ring buffer for push constant data. Each slot is 256-byte aligned.
 	WGPUBuffer push_constant_ring_buffer = nullptr;
-	static constexpr uint32_t PUSH_CONSTANT_RING_SIZE = 256 * 1024; // 256KB = 1024 draw calls at 256B/slot
+	static constexpr uint32_t PUSH_CONSTANT_RING_SIZE = 512 * 1024; // 512KB = 2048 draw calls at 256B/slot
 	static constexpr uint32_t PUSH_CONSTANT_SLOT_ALIGNMENT = 256;
 	// Binding slot used for the PC ring buffer inside group 3.
 	// Must match PC_RING_BUFFER_BINDING in tmp/naga-converter/src/lib.rs.
@@ -259,6 +259,7 @@ public:
 		uint8_t *shadow = nullptr;      ///< CPU-side shadow buffer.
 		uint64_t size = 0;              ///< Buffer size in bytes.
 		bool map_complete = false;      ///< Set by async map callback.
+		bool map_pending = false;       ///< True while mapAsync is in flight (not yet completed).
 		bool has_data = false;          ///< True after first successful readback.
 		bool cancelled = false;         ///< Source freed while map pending; callback will clean up.
 	};

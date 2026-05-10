@@ -45,7 +45,7 @@ Machine: Apple M3 Ultra, macOS, Chrome 136
 | B: PBR (10.4K spheres) | 3D materials | ~50 | ~35 | ~9 | 70% | **4x** |
 | C: Instances (18.7K cubes) | Unique materials, transforms | ~50 | ~34 | ~8 | 68% | **4x** |
 | D: Particles (2M) | GPU compute | ~29 | ~34 | ~7 | 117%* | **5x** |
-| E: Skeletons (3.4K) | GPU skinning | ~50 | bug | N/A | — | — |
+| E: Skeletons (3K) | GPU skinning | ~50 | ~47 | N/A | 94% | — |
 | F: PostFX (25 viewports) | SSAO/Bloom/SubViewport | ~50 | ~40 | N/A | 80% | — |
 | G: Shadows (13.5K + 22 lights) | Shadow maps | ~50 | ~30 | ~7 | 60% | **4x** |
 | H: Batching (35K, 10 mats) | Batched draws | ~50 | ~36 | ~22 | 72% | **1.6x** |
@@ -121,17 +121,18 @@ Each SubViewport renders a torus with its own SSAO + Glow. Main scene has proced
 - WebGPU reaches ~80% of native on this post-processing workload.
 - WebGL Compatibility renderer doesn't support SSAO/Bloom.
 
-### Scene E: Skeletal Animation (3,358 skeletons x 16 bones)
+### Scene E: Skeletal Animation (3,025 skeletons x 16 bones)
 
 GPU-skinned meshes with per-frame bone pose updates.
 
 | Backend | FPS |
 |---|---|
 | Native (Metal) | ~50 |
-| WebGPU (Chrome) | untested (color flicker bug) |
+| WebGPU (Chrome) | ~47 |
 | WebGL (Chrome) | N/A (not supported) |
 
-- WebGPU shows non-deterministic color flickering on skeleton materials at high counts. Works fine at low counts (~600). Needs investigation — likely a buffer synchronization issue.
+- **WebGPU reaches ~94% of native** on GPU skinning workloads.
+- Previous color flickering bug at high counts was caused by timestamp query readback buffer stuck in "mapping pending" state (emdawnwebgpu doesn't reliably cancel pending maps via `wgpuBufferUnmap`). Fixed by disabling GPU timestamp queries.
 - WebGL does not support GPU skinning (Compatibility renderer).
 
 ### Scene G: Shadow Stress (13,500 meshes, 22 omni shadow lights + 1 directional)

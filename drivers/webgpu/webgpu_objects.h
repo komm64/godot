@@ -348,6 +348,10 @@ struct WGCommandBuffer {
 	// Combined bind group for the PC group (includes both material resources and PC ring buffer).
 	// Updated by command_bind_render_uniform_sets when the PC group is bound.
 	WGPUBindGroup current_pc_bind_group = nullptr;
+	// Last PC ring offset successfully flushed by _flush_push_constants.
+	// Used by command_bind_render_uniform_sets to set the correct dynamic offset
+	// when rebinding the merged PC group (avoids stale offset=0 placeholder).
+	uint32_t last_flushed_pc_offset = 0;
 	// Task 7.5: When the PC group also contains material dynamic-offset UBOs,
 	// _flush_push_constants must preserve those offsets while patching in the new
 	// PC ring offset. Stored in binding order; the PC ring's own slot is appended
@@ -399,12 +403,24 @@ struct WGCommandBuffer {
 	WGPUBindGroup bound_bind_groups[MAX_BIND_GROUPS] = {};
 	WGShader *bound_shader = nullptr; // Shader whose BGL the bound groups were created for.
 
+	// Full bind group state for mid-pass restart (push constant ring overflow).
+	// Stores the resolved bind group + dynamic offsets for each slot so we can
+	// rebind everything after ending/restarting the render pass.
+	static constexpr uint32_t MAX_BIND_GROUP_DYN_OFFSETS = 9; // 8 material + 1 PC ring
+	struct BoundGroupState {
+		WGPUBindGroup group = nullptr;
+		uint32_t dynamic_offsets[MAX_BIND_GROUP_DYN_OFFSETS] = {};
+		uint32_t dynamic_offset_count = 0;
+	};
+	BoundGroupState last_bound_state[MAX_BIND_GROUPS] = {};
+
 	void invalidate_bind_groups() {
 		for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
 			bound_bind_groups[i] = nullptr;
 		}
 		bound_shader = nullptr;
 		current_pc_bind_group = nullptr;
+		last_flushed_pc_offset = 0;
 		pc_group_material_dyn_count = 0;
 	}
 
@@ -458,6 +474,7 @@ struct WGQueryPool {
 	// Shadow CPU buffer for async readback results.
 	uint64_t *cpu_results = nullptr;
 	bool readback_pending = false;
+	uint32_t map_generation = 0;    // Incremented each time mapAsync is issued; stale callbacks are ignored.
 	bool freed = false;             // Freed while readback pending; callback will clean up.
 };
 

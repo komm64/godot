@@ -23,7 +23,11 @@ var _primitives: PackedFloat64Array
 
 func _ready() -> void:
 	_vp_rid = get_viewport().get_viewport_rid()
-	RenderingServer.viewport_set_measure_render_time(_vp_rid, true)
+	# NOTE: On WebGPU, GPU timestamp queries cause "buffer used in submit while
+	# mapped" errors under heavy load (emdawnwebgpu async readback limitation).
+	# Only enable on non-web platforms where buffer mapping is synchronous.
+	if OS.get_name() != "Web":
+		RenderingServer.viewport_set_measure_render_time(_vp_rid, true)
 	_deltas.resize(COLLECT_FRAMES)
 	_render_cpu.resize(COLLECT_FRAMES)
 	_render_gpu.resize(COLLECT_FRAMES)

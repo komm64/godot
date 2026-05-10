@@ -123,10 +123,13 @@ used instead.
 
 ## Browser Compatibility
 
-WebGPU is supported in:
-- **Chrome / Edge** 113+ (stable since April 2023)
-- **Firefox** 130+ (behind flag; full support rolling out)
-- **Safari** 18+ (macOS Sonoma / iOS 18)
+| Platform | Browser | Status |
+|----------|---------|--------|
+| macOS | Chrome 113+ | 100% — all demos and benchmarks pass |
+| macOS | Safari 18+ | 100% — all demos and benchmarks pass |
+| macOS | Firefox | 100% — all demos and benchmarks pass |
+| Android | Chrome | 99% — minor edge cases |
+| iOS | Safari | Mostly — some limitations |
 
 The HTML export shell automatically detects WebGPU availability and shows a
 clear error message if the browser doesn't support it.

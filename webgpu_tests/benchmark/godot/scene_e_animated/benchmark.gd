@@ -10,8 +10,8 @@ var frame_count := 0
 var fps_label: Label
 var skeletons: Array[Skeleton3D] = []
 
-const ROWS := 4
-const COLS := 5
+const ROWS := 55
+const COLS := 55
 const NUM_BONES := 16   # bones per skeleton (chain)
 const SIDES := 8        # vertices per ring
 const RADIUS := 0.12    # cylinder radius

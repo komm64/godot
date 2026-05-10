@@ -687,9 +687,16 @@ void RenderingDeviceDriverWebGPU::_check_capabilities() {
 	}
 
 	// Check for timestamp query support.
-	timestamp_supported = wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery);
-	if (timestamp_supported) {
-		print_verbose("WebGPU: Timestamp query feature is available.");
+	// NOTE: Timestamp query readback is disabled for now. The async mapAsync
+	// on the readback buffer can get permanently stuck in "mapping pending" state
+	// when frames are slow (emdawnwebgpu does not reliably cancel pending maps via
+	// wgpuBufferUnmap). This causes "buffer used in submit while mapped" validation
+	// errors that corrupt rendering. GPU timestamp profiling is sacrificed — the
+	// profiler reports "gpu=N/A" — but rendering correctness is preserved.
+	// TODO: Re-enable once emdawnwebgpu properly implements unmap-cancels-pending-map.
+	timestamp_supported = false;
+	if (wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery)) {
+		print_verbose("WebGPU: Timestamp query feature is available (readback disabled due to buffer mapping issue).");
 	}
 
 	// float32-filterable: required for linear sampling of R32Float / RG32Float / RGBA32Float.
@@ -1343,6 +1350,7 @@ void RenderingDeviceDriverWebGPU::_readback_map_cb(WGPUMapAsyncStatus p_status, 
 		}
 		wgpuBufferUnmap(entry->staging);
 	}
+	entry->map_pending = false;
 	entry->map_complete = true;
 }
 
@@ -1364,6 +1372,7 @@ bool RenderingDeviceDriverWebGPU::buffer_get_data_direct(BufferID p_buffer, uint
 
 		// Initiate a new readback for this frame's data.
 		entry->map_complete = false;
+		entry->map_pending = true;
 		// Copy GPU buffer → persistent staging buffer.
 		WGPUCommandEncoderDescriptor enc_desc = {};
 		WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
@@ -1407,8 +1416,9 @@ bool RenderingDeviceDriverWebGPU::buffer_get_data_direct(BufferID p_buffer, uint
 		_readback_cache[key] = entry;
 	}
 
-	if (!entry->map_complete) {
+	if (!entry->map_complete && !entry->map_pending) {
 		// Copy GPU buffer → persistent staging buffer.
+		entry->map_pending = true;
 		WGPUCommandEncoderDescriptor enc_desc = {};
 		WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &enc_desc);
 		wgpuCommandEncoderCopyBufferToBuffer(encoder, buf->handle, 0, entry->staging, 0, entry->size);
@@ -1904,7 +1914,7 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 	// buffer's map state directly. emdawnwebgpu may have completed the map at
 	// the JS level even though the C callback hasn't been delivered yet (same
 	// trick as buffer_map). If mapped, copy data into shadow and mark complete.
-	if (entry && !entry->map_complete) {
+	if (entry && !entry->map_complete && entry->map_pending) {
 		WGPUInstance inst = context_driver ? context_driver->get_instance() : nullptr;
 		if (inst) wgpuInstanceProcessEvents(inst);
 		if (!entry->map_complete) {
@@ -1916,6 +1926,7 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 					entry->has_data = true;
 				}
 				wgpuBufferUnmap(entry->staging);
+				entry->map_pending = false;
 				entry->map_complete = true;
 			}
 		}
@@ -1990,6 +2001,7 @@ Vector<uint8_t> RenderingDeviceDriverWebGPU::texture_get_data(TextureID p_textur
 	// map_complete first — otherwise the next call's in-flight check would
 	// see stale state.
 	entry->map_complete = false;
+	entry->map_pending = true;
 	entry->has_data = false;
 
 	// Copy texture to staging buffer.
@@ -2755,11 +2767,18 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 			for (uint32_t j = 0; j < cmd->written_query_pools.size(); j++) {
 				WGQueryPool *pool = cmd->written_query_pools[j];
 				if (pool->readback_pending && pool->readback_buffer) {
+					// Only issue mapAsync if the buffer is actually in Unmapped state.
+					// If a previous map is still pending (GPU hasn't completed), skip.
+					WGPUBufferMapState state = wgpuBufferGetMapState(pool->readback_buffer);
+					if (state != WGPUBufferMapState_Unmapped) {
+						continue;
+					}
+					pool->map_generation++;
 					WGPUBufferMapCallbackInfo cb_info = {};
 					cb_info.mode = WGPUCallbackMode_AllowSpontaneous;
 					cb_info.callback = _timestamp_readback_callback;
 					cb_info.userdata1 = pool;
-					cb_info.userdata2 = nullptr;
+					cb_info.userdata2 = (void *)(uintptr_t)pool->map_generation;
 					wgpuBufferMapAsync(pool->readback_buffer, WGPUMapMode_Read, 0, sizeof(uint64_t) * pool->count, cb_info);
 				}
 			}
@@ -2827,12 +2846,39 @@ void RenderingDeviceDriverWebGPU::command_buffer_end(CommandBufferID p_cmd_buffe
 	// Resolve any query pools that had timestamps written during this command buffer.
 	for (uint32_t i = 0; i < cmd->written_query_pools.size(); i++) {
 		WGQueryPool *pool = cmd->written_query_pools[i];
-		// If a previous frame's mapAsync is still pending/mapped, cancel it so the
-		// buffer can be used as a copy destination (WebGPU validation requirement).
-		if (pool->readback_pending && pool->readback_buffer) {
-			wgpuBufferUnmap(pool->readback_buffer);
-			pool->readback_pending = false;
+		if (!pool->readback_buffer) {
+			continue;
 		}
+
+		// Ensure the readback buffer is in Unmapped state before encoding a copy to it.
+		// The previous frame's mapAsync may still be pending if the GPU hasn't completed.
+		// emdawnwebgpu does not reliably cancel pending maps via wgpuBufferUnmap, so we
+		// check the actual state and skip this frame's resolve+copy if the buffer is stuck.
+		WGPUBufferMapState map_state = wgpuBufferGetMapState(pool->readback_buffer);
+		if (map_state != WGPUBufferMapState_Unmapped) {
+			// Try to drain pending callbacks first.
+			WGPUInstance inst = context_driver ? context_driver->get_instance() : nullptr;
+			if (inst) {
+				wgpuInstanceProcessEvents(inst);
+			}
+			map_state = wgpuBufferGetMapState(pool->readback_buffer);
+
+			if (map_state != WGPUBufferMapState_Unmapped) {
+				wgpuBufferUnmap(pool->readback_buffer);
+				if (inst) {
+					wgpuInstanceProcessEvents(inst);
+				}
+				map_state = wgpuBufferGetMapState(pool->readback_buffer);
+			}
+
+			if (map_state != WGPUBufferMapState_Unmapped) {
+				// Buffer is permanently stuck — skip resolve+copy to avoid validation error.
+				pool->readback_pending = false;
+				continue;
+			}
+		}
+		pool->readback_pending = false;
+
 		wgpuCommandEncoderResolveQuerySet(cmd->encoder, pool->handle, 0, pool->count, pool->resolve_buffer, 0);
 		uint64_t byte_size = sizeof(uint64_t) * pool->count;
 		wgpuCommandEncoderCopyBufferToBuffer(cmd->encoder, pool->resolve_buffer, 0, pool->readback_buffer, 0, byte_size);
@@ -6154,7 +6200,16 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 	uint32_t aligned_size = (p_cmd_buf->push_constant_data_len + PUSH_CONSTANT_SLOT_ALIGNMENT - 1) & ~(PUSH_CONSTANT_SLOT_ALIGNMENT - 1);
 
 	if (push_constant_ring_offset + aligned_size > PUSH_CONSTANT_RING_SIZE) {
-		// Flush the accumulated shadow buffer before wrapping.
+		// Ring overflow: flush + submit to freeze all prior dispatches/draws' data, then reset.
+		// This guarantees earlier work in the submitted command buffer sees correct push
+		// constant values (wgpuQueueWriteBuffer is ordered-before submit).
+		perf.ring_overflows++;
+
+		// Remember which encoder type was active so we can restart the correct one.
+		const bool was_render = (p_cmd_buf->render_encoder != nullptr);
+		const bool was_compute = (p_cmd_buf->compute_encoder != nullptr);
+
+		// 1. Flush any dirty shadow data.
 		if (push_constant_shadow_dirty_start < push_constant_shadow_dirty_end) {
 			wgpuQueueWriteBuffer(queue, push_constant_ring_buffer, push_constant_shadow_dirty_start,
 					push_constant_shadow + push_constant_shadow_dirty_start,
@@ -6162,7 +6217,188 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 			push_constant_shadow_dirty_start = UINT32_MAX;
 			push_constant_shadow_dirty_end = 0;
 		}
-		push_constant_ring_offset = 0; // Wrap around.
+
+		// 2. End current pass (render or compute) before finishing encoder.
+		if (p_cmd_buf->render_encoder) {
+			wgpuRenderPassEncoderEnd(p_cmd_buf->render_encoder);
+			wgpuRenderPassEncoderRelease(p_cmd_buf->render_encoder);
+			p_cmd_buf->render_encoder = nullptr;
+		}
+		if (p_cmd_buf->compute_encoder) {
+			wgpuComputePassEncoderEnd(p_cmd_buf->compute_encoder);
+			wgpuComputePassEncoderRelease(p_cmd_buf->compute_encoder);
+			p_cmd_buf->compute_encoder = nullptr;
+		}
+
+		// 3. Finish + submit the current command buffer (non-blocking).
+		if (p_cmd_buf->encoder) {
+			WGPUCommandBuffer finished = wgpuCommandEncoderFinish(p_cmd_buf->encoder, nullptr);
+			if (finished) {
+				wgpuQueueSubmit(queue, 1, &finished);
+				wgpuCommandBufferRelease(finished);
+			}
+			wgpuCommandEncoderRelease(p_cmd_buf->encoder);
+			p_cmd_buf->encoder = nullptr;
+		}
+
+		// 4. Reset ring offset — submitted data is frozen by queue ordering.
+		push_constant_ring_offset = 0;
+
+		// 5. Create fresh encoder.
+		p_cmd_buf->encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+
+		if (was_compute) {
+			// 6a. Restart compute pass and rebind state.
+			WGPUComputePassDescriptor cp_desc = {};
+			p_cmd_buf->compute_encoder = wgpuCommandEncoderBeginComputePass(p_cmd_buf->encoder, &cp_desc);
+			p_cmd_buf->active_encoder = WGCommandBuffer::COMPUTE;
+
+			// Rebind compute pipeline.
+			WGPipelineWrapper *pw = p_cmd_buf->render_state.current_pipeline;
+			if (pw) {
+				wgpuComputePassEncoderSetPipeline(p_cmd_buf->compute_encoder, pw->compute_handle);
+				if (pw->shader) {
+					for (uint32_t gap_idx : pw->shader->gap_bind_group_indices) {
+						wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, gap_idx, empty_bind_group, 0, nullptr);
+					}
+				}
+			}
+
+			// Rebind all bind groups from saved state.
+			for (uint32_t i = 0; i < WGCommandBuffer::MAX_BIND_GROUPS; i++) {
+				const auto &bs = p_cmd_buf->last_bound_state[i];
+				if (bs.group) {
+					wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, i, bs.group, bs.dynamic_offset_count, bs.dynamic_offsets);
+				}
+			}
+
+			// Invalidate redundancy caches.
+			for (uint32_t i = 0; i < WGCommandBuffer::MAX_BIND_GROUPS; i++) {
+				p_cmd_buf->bound_bind_groups[i] = nullptr;
+			}
+		} else if (was_render) {
+			// 6b. Restart render pass with LoadOp::Load to preserve framebuffer content.
+			WGRenderPass *rp = p_cmd_buf->render_state.render_pass;
+			WGFramebuffer *fb = p_cmd_buf->render_state.framebuffer;
+			if (rp && fb) {
+				const WGRenderPass::SubpassInfo &subpass = rp->subpasses[p_cmd_buf->render_state.current_subpass];
+
+				LocalVector<WGPURenderPassColorAttachment> color_attachments;
+				for (uint32_t i = 0; i < subpass.color_references.size(); i++) {
+					const RDD::AttachmentReference &ref = subpass.color_references[i];
+					WGPURenderPassColorAttachment att = {};
+					att.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+
+					if (ref.attachment == RDD::AttachmentReference::UNUSED) {
+						att.view = nullptr;
+						att.loadOp = WGPULoadOp_Load;
+						att.storeOp = WGPUStoreOp_Discard;
+						color_attachments.push_back(att);
+						continue;
+					}
+
+					if (ref.attachment < fb->attachment_views.size()) {
+						att.view = fb->attachment_views[ref.attachment];
+					}
+					if (i < subpass.resolve_references.size()) {
+						const RDD::AttachmentReference &res_ref = subpass.resolve_references[i];
+						if (res_ref.attachment != RDD::AttachmentReference::UNUSED &&
+								res_ref.attachment < fb->attachment_views.size()) {
+							att.resolveTarget = fb->attachment_views[res_ref.attachment];
+						}
+					}
+					att.loadOp = WGPULoadOp_Load;
+					att.storeOp = WGPUStoreOp_Store;
+					color_attachments.push_back(att);
+				}
+
+				WGPURenderPassDepthStencilAttachment ds_att = {};
+				WGPURenderPassDepthStencilAttachment *ds_att_ptr = nullptr;
+				const RDD::AttachmentReference &ds_ref = subpass.depth_stencil_reference;
+				if (ds_ref.attachment != RDD::AttachmentReference::UNUSED &&
+						ds_ref.attachment < fb->attachment_views.size()) {
+					ds_att.view = fb->attachment_views[ds_ref.attachment];
+					if (ds_ref.attachment < rp->attachments.size()) {
+						WGPUTextureFormat wgpu_fmt = _data_format_to_wgpu(rp->attachments[ds_ref.attachment].format);
+						bool has_depth = is_depth_format_wgpu(wgpu_fmt);
+						bool has_stencil = has_stencil_wgpu(wgpu_fmt);
+						if (has_depth) {
+							ds_att.depthLoadOp = WGPULoadOp_Load;
+							ds_att.depthStoreOp = WGPUStoreOp_Store;
+						} else {
+							ds_att.depthLoadOp = WGPULoadOp_Undefined;
+							ds_att.depthStoreOp = WGPUStoreOp_Undefined;
+							ds_att.depthReadOnly = true;
+						}
+						if (has_stencil) {
+							ds_att.stencilLoadOp = WGPULoadOp_Load;
+							ds_att.stencilStoreOp = WGPUStoreOp_Store;
+						} else {
+							ds_att.stencilLoadOp = WGPULoadOp_Undefined;
+							ds_att.stencilStoreOp = WGPUStoreOp_Undefined;
+							ds_att.stencilReadOnly = true;
+						}
+					} else {
+						ds_att.depthLoadOp = WGPULoadOp_Load;
+						ds_att.depthStoreOp = WGPUStoreOp_Store;
+						ds_att.depthClearValue = 1.0f;
+						ds_att.stencilLoadOp = WGPULoadOp_Load;
+						ds_att.stencilStoreOp = WGPUStoreOp_Store;
+					}
+					ds_att_ptr = &ds_att;
+				}
+
+				WGPURenderPassDescriptor pass_desc = {};
+				pass_desc.colorAttachmentCount = color_attachments.size();
+				pass_desc.colorAttachments = color_attachments.ptr();
+				pass_desc.depthStencilAttachment = ds_att_ptr;
+
+				p_cmd_buf->render_encoder = wgpuCommandEncoderBeginRenderPass(p_cmd_buf->encoder, &pass_desc);
+				p_cmd_buf->active_encoder = WGCommandBuffer::RENDER;
+
+				// Rebind render pipeline.
+				WGPipelineWrapper *pw = p_cmd_buf->render_state.current_pipeline;
+				if (pw) {
+					wgpuRenderPassEncoderSetPipeline(p_cmd_buf->render_encoder, pw->render_handle);
+					wgpuRenderPassEncoderSetStencilReference(p_cmd_buf->render_encoder, pw->stencil_reference);
+					if (pw->shader) {
+						for (uint32_t gap_idx : pw->shader->gap_bind_group_indices) {
+							wgpuRenderPassEncoderSetBindGroup(p_cmd_buf->render_encoder, gap_idx, empty_bind_group, 0, nullptr);
+						}
+					}
+				}
+
+				// Rebind all bind groups from saved state.
+				for (uint32_t i = 0; i < WGCommandBuffer::MAX_BIND_GROUPS; i++) {
+					const auto &bs = p_cmd_buf->last_bound_state[i];
+					if (bs.group) {
+						wgpuRenderPassEncoderSetBindGroup(p_cmd_buf->render_encoder, i, bs.group, bs.dynamic_offset_count, bs.dynamic_offsets);
+					}
+				}
+
+				// Rebind vertex buffers.
+				for (uint32_t i = 0; i < WGCommandBuffer::RenderState::MAX_VERTEX_BINDINGS; i++) {
+					if (p_cmd_buf->render_state.current_vertex_buffers[i]) {
+						wgpuRenderPassEncoderSetVertexBuffer(p_cmd_buf->render_encoder, i,
+								p_cmd_buf->render_state.current_vertex_buffers[i],
+								p_cmd_buf->render_state.current_vertex_offsets[i], WGPU_WHOLE_SIZE);
+					}
+				}
+
+				// Rebind index buffer.
+				if (p_cmd_buf->render_state.current_index_buffer) {
+					wgpuRenderPassEncoderSetIndexBuffer(p_cmd_buf->render_encoder,
+							p_cmd_buf->render_state.current_index_buffer,
+							p_cmd_buf->render_state.current_index_format,
+							p_cmd_buf->render_state.current_index_offset, WGPU_WHOLE_SIZE);
+				}
+
+				// Invalidate redundancy caches (state was just rebound fresh).
+				for (uint32_t i = 0; i < WGCommandBuffer::MAX_BIND_GROUPS; i++) {
+					p_cmd_buf->bound_bind_groups[i] = nullptr;
+				}
+			}
+		}
 	}
 
 	memcpy(push_constant_shadow + push_constant_ring_offset, p_cmd_buf->push_constant_data, p_cmd_buf->push_constant_data_len);
@@ -6220,6 +6456,7 @@ void RenderingDeviceDriverWebGPU::_flush_push_constants(WGCommandBuffer *p_cmd_b
 		wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, p_shader->push_constant_bind_group, pc_bind_group_to_use, num_dyn_offsets, dyn_offsets);
 	}
 
+	p_cmd_buf->last_flushed_pc_offset = push_constant_ring_offset;
 	push_constant_ring_offset += aligned_size;
 	p_cmd_buf->push_constants_dirty = false;
 }
@@ -6876,14 +7113,24 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 				for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN; j++) {
 					cmd->pc_group_material_dyn_offsets[j] = set_dyn_offsets[j];
 				}
-				// Append PC ring offset (initial 0); _flush_push_constants will rebind.
+				// Append last-flushed PC ring offset so the draw is correct even if
+				// _flush_push_constants doesn't fire (e.g. firstInstance optimization).
 				if (num_dyn < MAX_DYNAMIC_BUFFERS) {
-					set_dyn_offsets[num_dyn] = 0;
+					set_dyn_offsets[num_dyn] = cmd->last_flushed_pc_offset;
 					num_dyn++;
 				}
 				cmd->current_pc_bind_group = bg_to_bind;
 				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, num_dyn, set_dyn_offsets);
 				perf.set_bind_group_calls++;
+				// Save full state for mid-pass restart.
+				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					auto &bs = cmd->last_bound_state[set_idx];
+					bs.group = bg_to_bind;
+					bs.dynamic_offset_count = num_dyn;
+					for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_BIND_GROUP_DYN_OFFSETS; j++) {
+						bs.dynamic_offsets[j] = set_dyn_offsets[j];
+					}
+				}
 				// PC group always rebinds per draw (via _flush_push_constants); don't cache.
 				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
 					cmd->bound_bind_groups[set_idx] = nullptr;
@@ -6895,7 +7142,14 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 				cmd->pc_group_material_dyn_count = 0;
 				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, num_dyn, num_dyn ? set_dyn_offsets : nullptr);
 				perf.set_bind_group_calls++;
+				// Save full state for mid-pass restart.
 				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					auto &bs = cmd->last_bound_state[set_idx];
+					bs.group = bg_to_bind;
+					bs.dynamic_offset_count = num_dyn;
+					for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_BIND_GROUP_DYN_OFFSETS; j++) {
+						bs.dynamic_offsets[j] = set_dyn_offsets[j];
+					}
 					cmd->bound_bind_groups[set_idx] = num_dyn > 0 ? nullptr : bg_to_bind;
 				}
 			} else if (num_dyn > 0) {
@@ -6903,18 +7157,28 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 				// the frame_idx rotates — bypass the redundant-bind cache.
 				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, num_dyn, set_dyn_offsets);
 				perf.set_bind_group_calls++;
+				// Save full state for mid-pass restart.
 				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					auto &bs = cmd->last_bound_state[set_idx];
+					bs.group = bg_to_bind;
+					bs.dynamic_offset_count = num_dyn;
+					for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_BIND_GROUP_DYN_OFFSETS; j++) {
+						bs.dynamic_offsets[j] = set_dyn_offsets[j];
+					}
 					cmd->bound_bind_groups[set_idx] = nullptr;
 				}
 			} else {
-				// Static non-PC set — skip redundant SetBindGroup calls.
+				// Static non-PC set — skip if already bound.
 				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS && cmd->bound_bind_groups[set_idx] == bg_to_bind) {
-					perf.set_bind_group_skipped++;
 					continue;
 				}
 				wgpuRenderPassEncoderSetBindGroup(cmd->render_encoder, set_idx, bg_to_bind, 0, nullptr);
 				perf.set_bind_group_calls++;
+				// Save full state for mid-pass restart.
 				if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+					auto &bs = cmd->last_bound_state[set_idx];
+					bs.group = bg_to_bind;
+					bs.dynamic_offset_count = 0;
 					cmd->bound_bind_groups[set_idx] = bg_to_bind;
 				}
 			}
@@ -7898,7 +8162,7 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_uniform_sets(CommandBuffe
 					cmd->pc_group_material_dyn_offsets[j] = set_dyn_offsets[j];
 				}
 				if (num_dyn < MAX_DYNAMIC_BUFFERS) {
-					set_dyn_offsets[num_dyn] = 0; // PC ring offset — _flush_push_constants will rebind.
+					set_dyn_offsets[num_dyn] = cmd->last_flushed_pc_offset;
 					num_dyn++;
 				}
 				cmd->current_pc_bind_group = bg_to_bind;
@@ -7910,6 +8174,15 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_uniform_sets(CommandBuffe
 				wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, num_dyn, num_dyn ? set_dyn_offsets : nullptr);
 			} else {
 				wgpuComputePassEncoderSetBindGroup(cmd->compute_encoder, set_idx, bg_to_bind, num_dyn, num_dyn ? set_dyn_offsets : nullptr);
+			}
+			// Save full state for mid-pass restart on ring overflow.
+			if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
+				auto &bs = cmd->last_bound_state[set_idx];
+				bs.group = bg_to_bind;
+				bs.dynamic_offset_count = num_dyn;
+				for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_BIND_GROUP_DYN_OFFSETS; j++) {
+					bs.dynamic_offsets[j] = set_dyn_offsets[j];
+				}
 			}
 		}
 	}
@@ -8149,14 +8422,25 @@ static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUString
 		return;
 	}
 
+	// Stale callback from a cancelled/superseded mapAsync — ignore.
+	uint32_t cb_generation = (uint32_t)(uintptr_t)p_userdata2;
+	if (cb_generation != pool->map_generation) {
+		if (p_status == WGPUMapAsyncStatus_Success) {
+			wgpuBufferUnmap(pool->readback_buffer);
+		}
+		return;
+	}
+
 	if (p_status == WGPUMapAsyncStatus_Success) {
 		const void *data = wgpuBufferGetConstMappedRange(pool->readback_buffer, 0, sizeof(uint64_t) * pool->count);
 		if (data) {
 			memcpy(pool->cpu_results, data, sizeof(uint64_t) * pool->count);
 		}
 		wgpuBufferUnmap(pool->readback_buffer);
+		pool->readback_pending = false;
 	}
-	pool->readback_pending = false;
+	// On failure/abort: do NOT clear readback_pending.
+	// command_buffer_end() handles cleanup and re-issue.
 }
 
 void RenderingDeviceDriverWebGPU::command_timestamp_write(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_index) {
@@ -8253,23 +8537,21 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 			console.log('[PERF] fps=' + $0 +
 				' draws/f=' + $1 +
 				' SetBG/f=' + $2 +
-				' SetBG_skip/f=' + $3 +
-				' PC/f=' + $4 +
-				' SetPipeline/f=' + $5 +
-				' SetVB/f=' + $6 +
-				' GapBG/f=' + $7 +
-				' RP/f=' + $8 +
-				' FI/f=' + $9);
-		}, fps, perf.draw_calls / f, perf.set_bind_group_calls / f, perf.set_bind_group_skipped / f,
-				perf.push_constant_writes / f, perf.set_pipeline_calls / f,
-				perf.set_vertex_buffer_calls / f, perf.gap_bind_group_calls / f,
-				perf.render_passes / f, perf.first_instance_draws / f);
+				' PC/f=' + $3 +
+				' RP/f=' + $4 +
+				' SetVB/f=' + $5 +
+				' FI/f=' + $6 +
+				' RingOF/f=' + $7);
+		}, fps, perf.draw_calls / f, perf.set_bind_group_calls / f,
+				perf.push_constant_writes / f, perf.render_passes / f,
+				perf.set_vertex_buffer_calls / f, perf.first_instance_draws / f,
+				perf.ring_overflows / f);
 		perf.reset();
 		perf.frames_since_log = 0;
 		perf.last_log_time = now;
 	}
 
-	// Reset push constant ring buffer offset and shadow buffer tracking at the start of each frame.
+	// Reset push constant ring buffer offset and shadow buffer tracking at the start of each segment.
 	push_constant_ring_offset = 0;
 	push_constant_shadow_dirty_start = UINT32_MAX;
 	push_constant_shadow_dirty_end = 0;
