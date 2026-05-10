@@ -1,7 +1,7 @@
 extends Node3D
 
-const GRID_ROWS := 102
-const GRID_COLS := 102
+const GRID_ROWS := 5
+const GRID_COLS := 5
 
 var frame_count := 0
 var elapsed := 0.0

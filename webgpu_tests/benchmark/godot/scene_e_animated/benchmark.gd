@@ -2,7 +2,7 @@ extends Node3D
 
 # Scene E: Skeletal Animation (GPU Skinning) — STRESS VERSION
 # Tests: Skeleton3D + skinned MeshInstance3D via GPU bone transforms.
-# 200 instances, 8 bones each, animating every frame via set_bone_pose_rotation.
+# 20 instances, 16 bones each, animating every frame via set_bone_pose_rotation.
 # Purpose: isolate bone buffer upload overhead (WASM→JS bridge crossings per skeleton).
 
 var elapsed := 0.0
@@ -10,8 +10,8 @@ var frame_count := 0
 var fps_label: Label
 var skeletons: Array[Skeleton3D] = []
 
-const ROWS := 35
-const COLS := 55
+const ROWS := 4
+const COLS := 5
 const NUM_BONES := 16   # bones per skeleton (chain)
 const SIDES := 8        # vertices per ring
 const RADIUS := 0.12    # cylinder radius

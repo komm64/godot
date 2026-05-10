@@ -8,7 +8,7 @@ var fps_label: Label
 var multimesh: MultiMesh
 var elapsed := 0.0
 
-const MESH_COUNT := 120000
+const MESH_COUNT := 60000
 const MATERIAL_COUNT := 10
 const COLS := 100
 

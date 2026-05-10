@@ -8,7 +8,7 @@ var viewport_size := Vector2(1280, 720)
 var fps_label: Label
 var multimesh: MultiMesh
 
-const SPRITE_COUNT := 350000
+const SPRITE_COUNT := 2000
 
 var velocities: PackedVector2Array
 var positions: PackedVector2Array

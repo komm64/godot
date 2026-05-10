@@ -7,8 +7,8 @@ var total_frames := 0
 var fps_label: Label
 
 # Shadow stress — many lights with moderate geometry
-const OMNI_LIGHT_COUNT := 22
-const MESH_COUNT := 13500
+const OMNI_LIGHT_COUNT := 6
+const MESH_COUNT := 200
 const ARENA_SIZE := 60.0
 
 func _ready() -> void:

@@ -7,7 +7,7 @@ var total_frames := 0
 var meshes: Array[MeshInstance3D] = []
 var fps_label: Label
 
-const MESH_COUNT := 35000
+const MESH_COUNT := 60000
 const MATERIAL_COUNT := 10  # Shared materials — creates large batchable groups
 
 func _ready() -> void:

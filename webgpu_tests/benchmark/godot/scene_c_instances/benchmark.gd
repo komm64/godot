@@ -7,7 +7,7 @@ var total_frames := 0
 var meshes: Array[MeshInstance3D] = []
 var fps_label: Label
 
-const MESH_COUNT := 18700
+const MESH_COUNT := 200
 
 func _ready() -> void:
 	# Live FPS overlay

@@ -4,56 +4,56 @@
   "scenes": [
     {
       "id": "benchmark_sprites",
-      "path": "../../tmp/benchmarks/scene_a_sprites",
+      "path": "../benchmark/godot/scene_a_sprites",
       "preset": "WebGPU",
       "max_errors": 0,
       "description": "2D sprites (2000 bouncing circles)"
     },
     {
       "id": "benchmark_pbr",
-      "path": "../../tmp/benchmarks/scene_b_pbr",
+      "path": "../benchmark/godot/scene_b_pbr",
       "preset": "WebGPU",
       "max_errors": 0,
       "description": "PBR materials (metallic/rough spheres)"
     },
     {
       "id": "benchmark_instances",
-      "path": "../../tmp/benchmarks/scene_c_instances",
+      "path": "../benchmark/godot/scene_c_instances",
       "preset": "WebGPU",
       "max_errors": 0,
-      "description": "3D instanced rendering (5k cubes)"
+      "description": "3D instanced rendering (5000 cubes)"
     },
     {
       "id": "benchmark_particles",
-      "path": "../../tmp/benchmarks/scene_d_particles",
+      "path": "../benchmark/godot/scene_d_particles",
       "preset": "WebGPU",
       "max_errors": 0,
-      "description": "GPU particles (500k particles)"
+      "description": "GPU particles (500000 particles)"
     },
     {
       "id": "benchmark_animated",
-      "path": "../../tmp/benchmarks/scene_e_animated",
+      "path": "../benchmark/godot/scene_e_animated",
       "preset": "WebGPU",
       "max_errors": 0,
       "description": "Skeletal animation (20 GPU-skinned meshes)"
     },
     {
       "id": "benchmark_postfx",
-      "path": "../../tmp/benchmarks/scene_f_postfx",
+      "path": "../benchmark/godot/scene_f_postfx",
       "preset": "WebGPU",
       "max_errors": 2,
       "description": "Post-processing (SubViewport + SSAO + Bloom) — known texture sync warning"
     },
     {
       "id": "benchmark_shadows",
-      "path": "../../tmp/benchmarks/scene_g_shadows",
+      "path": "../benchmark/godot/scene_g_shadows",
       "preset": "WebGPU",
       "max_errors": 0,
       "description": "Shadow rendering (directional + spot + omni)"
     },
     {
       "id": "benchmark_batching",
-      "path": "../../tmp/benchmarks/scene_h_batching",
+      "path": "../benchmark/godot/scene_h_batching",
       "preset": "WebGPU",
       "max_errors": 0,
       "description": "Render batching (60k instances, 10 materials)"
