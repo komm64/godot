@@ -173,14 +173,14 @@ Stress tests comparing WebGPU (Forward Mobile) vs WebGL (Compatibility) at high 
 
 Try all benchmarks live at **[godotwebgpu.com/#benchmarks](https://godotwebgpu.com/#benchmarks)**.
 
-| | Benchmark | Description | WebGPU FPS | WebGL FPS |
+| | Benchmark | Description | WebGPU vs Native FPS | WebGPU vs WebGL FPS |
 |---|-----------|-------------|:----------:|:---------:|
-| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_a_final.png" width="120"> | **20K Sprites** | 20,000 bouncing sprites with random colors | **60.1** | 8.8 |
-| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_b_final.png" width="120"> | **PBR Sphere** | High-poly PBR sphere with directional shadow | **60.1** | 60.0 |
-| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_c_final.png" width="120"> | **5K Cubes + 5 Lights** | 5,000 rotating cubes with 5 shadow-casting lights | **60.1** | 43.5 |
-| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_d_final.png" width="120"> | **500K GPU Particles** | 500,000 GPU particles with gradient colors | **60.2** | 32.3 |
-| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_e_final.png" width="120"> | **Skeletal Animation** | 20 GPU-skinned cylinders with bone animation | **60.2** | N/A |
-| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_f_final.png" width="120"> | **PostFX Stack** | SSAO + Bloom + SubViewport with 5 PBR cubes | **60.1** | N/A |
+| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_a_final.png" width="120"> | **20K Sprites** | 20,000 bouncing sprites with random colors | 80% as fast | 5x faster |
+| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_b_final.png" width="120"> | **PBR Sphere** | High-poly PBR sphere with directional shadow | 70% as fast | 4x faster |
+| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_c_final.png" width="120"> | **5K Cubes + 5 Lights** | 5,000 rotating cubes with 5 shadow-casting lights | 68% as fast | 4x faster |
+| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_d_final.png" width="120"> | **500K GPU Particles** | 500,000 GPU particles with gradient colors |   117% as fast! | 5x faster |
+| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_e_final.png" width="120"> | **Skeletal Animation** | 20 GPU-skinned cylinders with bone animation |   TODO | TODO |
+| <img src="https://godotwebgpu.com/screenshots/webgpu_scene_f_final.png" width="120"> | **PostFX Stack** | SSAO + Bloom + SubViewport with 5 PBR cubes | 80% as fast | n/a |
 
 ---
 
