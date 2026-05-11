@@ -7,7 +7,7 @@ var total_frames := 0
 var meshes: Array[MeshInstance3D] = []
 var fps_label: Label
 
-const MESH_COUNT := 200
+const MESH_COUNT := 196
 
 func _ready() -> void:
 	# Live FPS overlay
@@ -21,7 +21,7 @@ func _ready() -> void:
 
 	# Camera
 	var cam := Camera3D.new()
-	cam.transform.origin = Vector3(0, 40, 70)
+	cam.transform.origin = Vector3(0, 15, 25)
 	cam.transform = cam.transform.looking_at(Vector3.ZERO, Vector3.UP)
 	add_child(cam)
 
@@ -36,7 +36,7 @@ func _ready() -> void:
 	# 3000 mesh instances in a grid, each with unique material
 	var box := BoxMesh.new()
 	box.size = Vector3(1, 1, 1)
-	var cols := 60
+	var cols := 14  # 14x14 = 196 (square grid)
 	var rows := MESH_COUNT / cols
 	for i in MESH_COUNT:
 		var m := MeshInstance3D.new()

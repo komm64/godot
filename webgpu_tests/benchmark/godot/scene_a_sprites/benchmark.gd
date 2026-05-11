@@ -9,7 +9,7 @@ var velocities: Array[Vector2] = []
 var viewport_size := Vector2(1280, 720)
 var fps_label: Label
 
-const SPRITE_COUNT := 2000
+const SPRITE_COUNT := 1000
 
 func _ready() -> void:
 	# Live FPS overlay (updates every frame)

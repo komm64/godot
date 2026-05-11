@@ -6,7 +6,7 @@ var fps_samples: Array[float] = []
 var benchmark_duration := 10.0
 var fps_label: Label
 
-const PARTICLE_COUNT := 10000
+const PARTICLE_COUNT := 1000
 
 func _ready() -> void:
 	# Live FPS overlay

@@ -520,3 +520,78 @@ Logged to console every second via `EM_ASM` (always-on in current build).
 ### Device Lost Handler
 
 Attached at initialization via JS `device.lost.then(...)`. Logs reason and message. No automatic recovery (page reload required).
+
+---
+
+## 12. Codebase Size & Statistics
+
+155 commits on top of Godot 4.6.2-stable. All numbers below reflect the diff against that base.
+
+### Original Code We Wrote (~20K lines, 24 new files)
+
+24 new files added + modifications to 50 existing Godot engine files (including 15 .glsl shaders).
+
+The implementation is concentrated: just 3 new .cpp files (the largest being
+`rendering_device_driver_webgpu.cpp` at 8,783 lines) plus 5 headers. No new shader
+files — instead, 15 existing engine `.glsl` shaders are patched for WGSL compatibility.
+
+| Area | Lines Added | Lines Removed | Description |
+|------|------------:|--------------:|-------------|
+| drivers/webgpu (C++ driver) | 12,345 | 0 | WebGPU rendering device driver |
+| naga-converter/src (Rust) | 5,146 | 0 | Custom SPIR-V → WGSL translator |
+| servers/ (renderer fixes) | 1,170 | 179 | Forward Mobile renderer adaptations |
+| .github/workflows (CI) | 456 | 0 | WebGPU test workflow |
+| platform/web/ (web platform) | 391 | 12 | Display server, export, build integration |
+| misc/ (export templates) | 325 | 0 | HTML template for WebGPU exports |
+| other engine (main, core, scene) | 297 | 70 | Worker thread fix, assertions, etc. |
+| naga-converter/fuzz | 110 | 0 | Fuzz targets for translator |
+| **TOTAL** | **20,295** | **261** | **~20,034 net new lines** |
+
+### Original Code by File Type
+
+| Extension | Lines | What |
+|-----------|------:|------|
+| .cpp | 10,095 | WebGPU driver + renderer fixes |
+| .rs | 5,214 | naga-converter custom code + fuzz targets |
+| .h | 2,220 | Driver headers |
+| .py | 928 | Build scripts (detect.py, SCsub, wgsl_precompile) |
+| .yml | 456 | CI workflow |
+| .html | 325 | Web export template |
+| .js/.mjs | 436 | Engine JS glue (engine.js, config.js) |
+| .glsl | 124 | Shader compatibility fixes |
+| .wgsl | 144 | Prebuilt WGSL shaders |
+| other | 353 | Config, .toml, .gitignore, etc. |
+
+### Full Commit Breakdown (all lines added, including vendored)
+
+| Extension | Total | Engine | Original | Non-Engine |
+|-----------|------:|-------:|---------:|-----------:|
+| .rs | 115,495 | 115,495 | 5,214 | 0 |
+| .md | 22,079 | 1,450 | 409 | 20,629 |
+| .cpp | 12,164 | 10,095 | 10,095 | 2,069 |
+| .mjs | 8,479 | 172 | 172 | 8,307 |
+| .h | 3,731 | 2,220 | 2,220 | 1,511 |
+| .gd | 2,159 | 0 | 0 | 2,159 |
+| .html | 1,670 | 325 | 325 | 1,345 |
+| .js | 1,414 | 264 | 264 | 1,150 |
+| .py | 1,364 | 928 | 928 | 436 |
+| .glsl | 124 | 124 | 124 | 0 |
+| .wgsl | 144 | 144 | 144 | 0 |
+| .yml | 456 | 456 | 456 | 0 |
+| other | ~3,700 | ~2,400 | ~1,300 | ~1,300 |
+| **TOTAL** | **172,956** | **133,030** | **20,295** | **39,926** |
+
+**Column definitions:**
+- **Total** — all lines added across the 155 commits
+- **Engine** — code in upstreamable paths (drivers/, platform/, servers/, etc.)
+- **Original** — engine code we wrote, excluding vendored naga-patched (~112K lines of upstream Rust)
+- **Non-Engine** — notes, benchmarks, demos, test harnesses (webgpu_notes/, webgpu_tests/, webgpu_site/)
+
+### Vendored Dependencies
+
+| Dependency | Lines | Purpose |
+|------------|------:|---------|
+| naga-patched (Rust) | 111,932 | Patched copy of wgpu-naga v28.0.0 for SPIR-V→WGSL |
+| Cargo.lock files | 803 | Generated lockfiles |
+
+The naga-patched crate is a vendored+patched copy of the upstream [naga](https://github.com/gfx-rs/wgpu/tree/trunk/naga) shader translator. It is compiled to WASM separately and the prebuilt binary (`naga_wasm_bg.wasm`) is committed to the repo — no Rust toolchain needed for engine builds.

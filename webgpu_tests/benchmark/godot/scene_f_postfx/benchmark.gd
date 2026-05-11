@@ -15,8 +15,8 @@ var spinning_cubes: Array[MeshInstance3D] = []
 var torus_node: MeshInstance3D
 
 const CUBE_COUNT := 5
-const NUM_SUBVIEWPORTS := 25
-const SUBVIEWPORT_SIZE := 4096
+const NUM_SUBVIEWPORTS := 6
+const SUBVIEWPORT_SIZE := 512
 
 func _ready() -> void:
 	# FPS overlay

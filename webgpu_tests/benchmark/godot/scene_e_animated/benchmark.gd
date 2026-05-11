@@ -10,9 +10,9 @@ var frame_count := 0
 var fps_label: Label
 var skeletons: Array[Skeleton3D] = []
 
-const ROWS := 55
-const COLS := 55
-const NUM_BONES := 16   # bones per skeleton (chain)
+const ROWS := 5
+const COLS := 5
+const NUM_BONES := 4   # bones per skeleton (chain)
 const SIDES := 8        # vertices per ring
 const RADIUS := 0.12    # cylinder radius
 const SEG_LEN := 0.25   # length per bone segment
@@ -93,8 +93,8 @@ func _ready() -> void:
 
 	# Camera
 	var cam := Camera3D.new()
-	cam.transform.origin = Vector3(0, 2, 18)
-	cam.transform = cam.transform.looking_at(Vector3(0, 1, 0), Vector3.UP)
+	cam.transform.origin = Vector3(0, 1, 5)
+	cam.transform = cam.transform.looking_at(Vector3(0, 0.5, 0), Vector3.UP)
 	add_child(cam)
 
 	# Directional light with shadows
