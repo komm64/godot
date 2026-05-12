@@ -106,4 +106,10 @@ Vector<uint8_t> fix_nonfinite_literals(const Vector<uint8_t> &p_bytes);
 // Rewrites pointer types, removes access chains, and updates loads.
 Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes);
 
+// Infer read-only storage buffers by analyzing write operations.
+// Adds OpDecorate NonWritable to StorageBuffer variables that are never
+// written to (no OpStore, OpAtomicStore, OpCopyMemory, etc.). This allows
+// Tint to emit var<storage, read> instead of var<storage, read_write>.
+Vector<uint8_t> infer_readonly_storage(const Vector<uint8_t> &p_bytes);
+
 } // namespace spirv_preprocess

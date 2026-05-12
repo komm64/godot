@@ -84,6 +84,12 @@ static constexpr uint16_t OP_ENTRY_POINT = 15;
 static constexpr uint16_t OP_TYPE_ARRAY = 28;
 static constexpr uint16_t OP_TYPE_RUNTIME_ARRAY = 29;
 static constexpr uint16_t OP_IN_BOUNDS_ACCESS_CHAIN = 66;
+static constexpr uint16_t OP_PTR_ACCESS_CHAIN = 67;
+static constexpr uint16_t OP_COPY_MEMORY = 38;
+static constexpr uint16_t OP_COPY_MEMORY_SIZED = 39;
+static constexpr uint16_t OP_ATOMIC_STORE = 228;
+static constexpr uint16_t OP_IN_BOUNDS_PTR_ACCESS_CHAIN = 216;
+static constexpr uint16_t OP_DECORATION_GROUP = 73;
 
 // SPIR-V storage class values.
 static constexpr uint32_t SC_UNIFORM_CONSTANT = 0;
@@ -2410,6 +2416,256 @@ Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes) {
 		}
 
 		pos += wc;
+	}
+
+	return out;
+}
+
+// ---- infer_readonly_storage ----
+
+Vector<uint8_t> infer_readonly_storage(const Vector<uint8_t> &p_bytes) {
+	const uint8_t *data = p_bytes.ptr();
+	int64_t len = p_bytes.size();
+	if (len < 20 || (len % 4) != 0) {
+		return p_bytes;
+	}
+	uint32_t nwords = (uint32_t)(len / 4);
+
+	// Pass 1: Collect all OpVariable with StorageBuffer storage class (12).
+	HashSet<uint32_t> storage_vars;
+	{
+		uint32_t pos = 5;
+		while (pos < nwords) {
+			uint32_t word0 = read_word(data, len, pos);
+			uint32_t wc = (word0 >> 16) & 0xFFFF;
+			uint16_t op = word0 & 0xFFFF;
+			if (wc == 0 || pos + wc > nwords) {
+				break;
+			}
+			if (op == OP_VARIABLE && wc >= 4) {
+				uint32_t result_id = read_word(data, len, pos + 2);
+				uint32_t storage_class = read_word(data, len, pos + 3);
+				if (storage_class == SC_STORAGE_BUFFER) {
+					storage_vars.insert(result_id);
+				}
+			}
+			pos += wc;
+		}
+	}
+
+	if (storage_vars.is_empty()) {
+		return p_bytes;
+	}
+
+	// Pass 2: Track which storage vars are written to.
+	// Uses pointer-to-root mapping for access chain chaining.
+	// Multiple iterations handle nested access chains.
+	HashMap<uint32_t, uint32_t> ptr_to_root;
+	HashSet<uint32_t> written_vars;
+
+	for (int iter = 0; iter < 3; iter++) {
+		uint32_t pos = 5;
+		while (pos < nwords) {
+			uint32_t word0 = read_word(data, len, pos);
+			uint32_t wc = (word0 >> 16) & 0xFFFF;
+			uint16_t op = word0 & 0xFFFF;
+			if (wc == 0 || pos + wc > nwords) {
+				break;
+			}
+
+			switch (op) {
+				// OpAccessChain / OpInBoundsAccessChain: result_type result_id base indices...
+				case OP_ACCESS_CHAIN:
+				case OP_IN_BOUNDS_ACCESS_CHAIN: {
+					if (wc >= 4) {
+						uint32_t result_id = read_word(data, len, pos + 2);
+						uint32_t base_id = read_word(data, len, pos + 3);
+						if (storage_vars.has(base_id)) {
+							ptr_to_root.insert(result_id, base_id);
+						} else {
+							const uint32_t *root = ptr_to_root.getptr(base_id);
+							if (root) {
+								ptr_to_root.insert(result_id, *root);
+							}
+						}
+					}
+				} break;
+
+				// OpPtrAccessChain / OpInBoundsPtrAccessChain: result_type result_id base element indices...
+				case OP_PTR_ACCESS_CHAIN:
+				case OP_IN_BOUNDS_PTR_ACCESS_CHAIN: {
+					if (wc >= 5) {
+						uint32_t result_id = read_word(data, len, pos + 2);
+						uint32_t base_id = read_word(data, len, pos + 3);
+						if (storage_vars.has(base_id)) {
+							ptr_to_root.insert(result_id, base_id);
+						} else {
+							const uint32_t *root = ptr_to_root.getptr(base_id);
+							if (root) {
+								ptr_to_root.insert(result_id, *root);
+							}
+						}
+					}
+				} break;
+
+				// OpStore: pointer value [memory_access]
+				case OP_STORE: {
+					if (wc >= 3) {
+						uint32_t ptr_id = read_word(data, len, pos + 1);
+						if (storage_vars.has(ptr_id)) {
+							written_vars.insert(ptr_id);
+						} else {
+							const uint32_t *root = ptr_to_root.getptr(ptr_id);
+							if (root) {
+								written_vars.insert(*root);
+							}
+						}
+					}
+				} break;
+
+				// OpAtomicStore: pointer scope semantics value
+				case OP_ATOMIC_STORE: {
+					if (wc >= 5) {
+						uint32_t ptr_id = read_word(data, len, pos + 1);
+						if (storage_vars.has(ptr_id)) {
+							written_vars.insert(ptr_id);
+						} else {
+							const uint32_t *root = ptr_to_root.getptr(ptr_id);
+							if (root) {
+								written_vars.insert(*root);
+							}
+						}
+					}
+				} break;
+
+				// OpCopyMemory / OpCopyMemorySized: target is at pos+1
+				case OP_COPY_MEMORY:
+				case OP_COPY_MEMORY_SIZED: {
+					if (wc >= 3) {
+						uint32_t ptr_id = read_word(data, len, pos + 1);
+						if (storage_vars.has(ptr_id)) {
+							written_vars.insert(ptr_id);
+						} else {
+							const uint32_t *root = ptr_to_root.getptr(ptr_id);
+							if (root) {
+								written_vars.insert(*root);
+							}
+						}
+					}
+				} break;
+
+				// OpFunctionCall: result_type result_id function arg0 arg1 ...
+				// Conservatively mark any storage var passed as argument as writable.
+				case OP_FUNCTION_CALL: {
+					if (wc >= 4) {
+						for (uint32_t arg_pos = pos + 4; arg_pos < pos + wc; arg_pos++) {
+							uint32_t arg_id = read_word(data, len, arg_pos);
+							if (storage_vars.has(arg_id)) {
+								written_vars.insert(arg_id);
+							} else {
+								const uint32_t *root = ptr_to_root.getptr(arg_id);
+								if (root) {
+									written_vars.insert(*root);
+								}
+							}
+						}
+					}
+				} break;
+
+				default: {
+					// OpAtomicExchange(229) through OpAtomicXor(242):
+					// result_type result_id pointer scope ... — pointer at pos+3
+					if (op >= 229 && op <= 242 && wc >= 6) {
+						uint32_t ptr_id = read_word(data, len, pos + 3);
+						if (storage_vars.has(ptr_id)) {
+							written_vars.insert(ptr_id);
+						} else {
+							const uint32_t *root = ptr_to_root.getptr(ptr_id);
+							if (root) {
+								written_vars.insert(*root);
+							}
+						}
+					}
+				} break;
+			}
+
+			pos += wc;
+		}
+	}
+
+	// Pass 3: Find storage vars that already have NonWritable decoration.
+	HashSet<uint32_t> already_nonwritable;
+	{
+		uint32_t pos = 5;
+		while (pos < nwords) {
+			uint32_t word0 = read_word(data, len, pos);
+			uint32_t wc = (word0 >> 16) & 0xFFFF;
+			uint16_t op = word0 & 0xFFFF;
+			if (wc == 0 || pos + wc > nwords) {
+				break;
+			}
+			if (op == OP_DECORATE && wc >= 3) {
+				uint32_t target = read_word(data, len, pos + 1);
+				uint32_t deco = read_word(data, len, pos + 2);
+				if (deco == DECO_NON_WRITABLE) {
+					already_nonwritable.insert(target);
+				}
+			}
+			pos += wc;
+		}
+	}
+
+	// Determine which vars need NonWritable added.
+	Vector<uint32_t> to_add;
+	for (const uint32_t &var_id : storage_vars) {
+		if (!written_vars.has(var_id) && !already_nonwritable.has(var_id)) {
+			to_add.push_back(var_id);
+		}
+	}
+
+	if (to_add.is_empty()) {
+		return p_bytes;
+	}
+
+	// Build output: insert OpDecorate NonWritable before first annotation.
+	Vector<uint8_t> out;
+	out.resize(0);
+	append_bytes(out, data, 0, 20); // Copy header.
+
+	bool inserted = false;
+	uint32_t pos = 5;
+	while (pos < nwords) {
+		uint32_t word0 = read_word(data, len, pos);
+		uint32_t wc = (word0 >> 16) & 0xFFFF;
+		uint16_t op = word0 & 0xFFFF;
+		if (wc == 0) {
+			break;
+		}
+		if (pos + wc > nwords) {
+			append_bytes(out, data, pos * 4, len - pos * 4);
+			break;
+		}
+
+		if (!inserted && (op == OP_DECORATE || op == OP_MEMBER_DECORATE || op == OP_DECORATION_GROUP)) {
+			for (int64_t i = 0; i < to_add.size(); i++) {
+				push_word(out, (3u << 16) | OP_DECORATE);
+				push_word(out, to_add[i]);
+				push_word(out, DECO_NON_WRITABLE);
+			}
+			inserted = true;
+		}
+
+		append_bytes(out, data, pos * 4, wc * 4);
+		pos += wc;
+	}
+
+	if (!inserted) {
+		// Fallback: append at end.
+		for (int64_t i = 0; i < to_add.size(); i++) {
+			push_word(out, (3u << 16) | OP_DECORATE);
+			push_word(out, to_add[i]);
+			push_word(out, DECO_NON_WRITABLE);
+		}
 	}
 
 	return out;

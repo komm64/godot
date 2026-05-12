@@ -15,6 +15,7 @@ public:
 	bool has(const T &p_val) const { return _set.count(p_val) > 0; }
 	void clear() { _set.clear(); }
 	int64_t size() const { return (int64_t)_set.size(); }
+	bool is_empty() const { return _set.empty(); }
 
 	// Range-based for loop support.
 	typename std::unordered_set<T, H, E>::iterator begin() { return _set.begin(); }

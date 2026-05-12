@@ -65,6 +65,7 @@ static std::string convert_spirv_to_wgsl(const std::vector<uint8_t> &p_spv_bytes
 	spv = spirv_preprocess::strip_memory_barrier(spv);
 	spv = spirv_preprocess::fix_nonfinite_literals(spv);
 	spv = spirv_preprocess::flatten_binding_arrays(spv);
+	spv = spirv_preprocess::infer_readonly_storage(spv);
 
 	// Ensure SPIR-V version is at least 1.3 (0x00010300). The preprocessing
 	// passes produce constructs (StorageBuffer storage class) that require 1.3,

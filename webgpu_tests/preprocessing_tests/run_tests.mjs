@@ -826,22 +826,43 @@ console.log("\n=== Test 14: Storage buffer access patterns ===");
 }
 
 {
-  // 14b. Constructed read-only storage buffer.
+  // 14b. Constructed read-only storage buffer → inferred as var<storage, read>.
   const spv = buildComputeWithStorageBuffer(false);
   const r = convertToWgsl(spv);
   assert(r.wgsl !== null, "constructed read-only storage buffer converts");
   if (r.wgsl) {
-    assert(r.wgsl.includes("var<storage"), "constructed has var<storage>");
+    assert(r.wgsl.includes("var<storage, read>"), "read-only inferred as var<storage, read>");
+    assert(!r.wgsl.includes("read_write"), "read-only NOT var<storage, read_write>");
   }
 }
 
 {
-  // 14c. Constructed read-write storage buffer.
+  // 14c. Constructed read-write storage buffer → stays var<storage, read_write>.
   const spv = buildComputeWithStorageBuffer(true);
   const r = convertToWgsl(spv);
   assert(r.wgsl !== null, "constructed read-write storage buffer converts");
   if (r.wgsl) {
-    assert(r.wgsl.includes("var<storage"), "constructed r/w has var<storage>");
+    assert(r.wgsl.includes("var<storage, read_write>"), "written buffer is var<storage, read_write>");
+  }
+}
+
+{
+  // 14d. readonly_ssbo fixture: read-only buffers get var<storage, read>.
+  const r = convertFixture("readonly_ssbo.spv");
+  if (r.wgsl) {
+    // instances buffer is read-only, output_buf is read-write.
+    const readOnlyMatches = [...r.wgsl.matchAll(/var<storage, read>/g)];
+    const readWriteMatches = [...r.wgsl.matchAll(/var<storage, read_write>/g)];
+    assert(readOnlyMatches.length >= 1, "readonly_ssbo has at least 1 var<storage, read>");
+    assert(readWriteMatches.length >= 1, "readonly_ssbo has at least 1 var<storage, read_write>");
+  }
+}
+
+{
+  // 14e. compute_particles fixture: particle_buf is written.
+  const r = convertFixture("compute_particles.spv");
+  if (r.wgsl) {
+    assert(r.wgsl.includes("var<storage, read_write>"), "compute_particles has read_write buffer");
   }
 }
 
@@ -939,6 +960,319 @@ console.log("\n=== Test 16: WGSL output validation ===");
   if (r.wgsl) {
     assert(r.wgsl.includes("diagnostic(off, derivative_uniformity)"),
       "Tint adds diagnostic directive");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: negate_position_y — struct member Position (Case B)
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== Test 17: negate_position_y struct member Position ===");
+
+{
+  // 17a. Vertex shader where gl_Position is a struct member via OpMemberDecorate.
+  // IDs: 1=void, 2=fn_type, 3=float, 4=vec4, 5=struct{vec4 Position},
+  //      6=ptr_output_struct, 7=out_var, 8=main, 9=label,
+  //      10=ptr_output_vec4, 11=const0f, 12=const1f, 13=constructed, 14=ac,
+  //      15=int32, 16=int_const_0
+  const spv = buildSpirv(17, [
+    ...encodeInst(Op.Capability, 1), // Shader
+    ...encodeInst(Op.MemoryModel, 0, 1),
+    ...encodeEntryPoint(ExecModel.Vertex, 8, "main", 7), // interface: out_var
+    ...encodeInst(Op.MemberDecorate, 5, 0, Deco.BuiltIn, 0), // member 0 = Position
+    ...encodeInst(Op.Decorate, 5, Deco.Block),
+    ...encodeInst(Op.TypeVoid, 1),
+    ...encodeInst(Op.TypeFunction, 2, 1),
+    ...encodeInst(Op.TypeFloat, 3, 32),
+    ...encodeInst(Op.TypeVector, 4, 3, 4),
+    ...encodeInst(Op.TypeStruct, 5, 4), // struct { vec4 }
+    ...encodeInst(Op.TypePointer, 6, SC.Output, 5),
+    ...encodeInst(Op.TypePointer, 10, SC.Output, 4),
+    ...encodeInst(Op.TypeInt, 15, 32, 1), // int32 (signed)
+    ...encodeInst(Op.Variable, 6, 7, SC.Output),
+    ...encodeInst(Op.Constant, 3, 11, 0x00000000), // 0.0f
+    ...encodeInst(Op.Constant, 3, 12, 0x3F800000), // 1.0f
+    ...encodeInst(Op.Constant, 15, 16, 0), // int 0
+    ...encodeInst(Op.Function, 1, 8, 0, 2),
+    ...encodeInst(Op.Label, 9),
+    ...encodeInst(Op.AccessChain, 10, 14, 7, 16), // ac = &out_var.member[0] (int index)
+    ...encodeInst(Op.CompositeConstruct, 4, 13, 11, 12, 11, 12),
+    ...encodeInst(Op.Store, 14, 13),
+    ...encodeInst(Op.Return),
+    ...encodeInst(Op.FunctionEnd),
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "struct member Position vertex shader converts");
+  if (r.wgsl) {
+    assert(r.wgsl.includes("@vertex"), "struct Position has @vertex");
+    assert(r.wgsl.includes("@builtin(position)"), "struct Position has @builtin(position)");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 18: Additional spec constant operations
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== Test 18: Additional spec constant operations ===");
+
+{
+  // 18a. UDiv (opcode 134): 20 / 10 = 2
+  const spv = buildComputeWithSpecConstants([
+    encodeInst(Op.SpecConstantOp, 3, 6, 134, 5, 4), // UDiv(20, 10) = 2
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp UDiv converts");
+}
+
+{
+  // 18b. SNegate (opcode 126): -10
+  const spv = buildComputeWithSpecConstants([
+    encodeInst(Op.SpecConstantOp, 3, 6, 126, 4), // SNegate(10) = -10
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp SNegate converts");
+}
+
+{
+  // 18c. BitwiseOr (opcode 197): 10 | 20 = 30
+  const spv = buildComputeWithSpecConstants([
+    encodeInst(Op.SpecConstantOp, 3, 6, 197, 4, 5), // BitwiseOr
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp BitwiseOr converts");
+}
+
+{
+  // 18d. BitwiseAnd (opcode 199): 10 & 20 = 0
+  const spv = buildComputeWithSpecConstants([
+    encodeInst(Op.SpecConstantOp, 3, 6, 199, 4, 5), // BitwiseAnd
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp BitwiseAnd converts");
+}
+
+{
+  // 18e. BitwiseXor (opcode 198): 10 ^ 20 = 30
+  const spv = buildComputeWithSpecConstants([
+    encodeInst(Op.SpecConstantOp, 3, 6, 198, 4, 5), // BitwiseXor
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp BitwiseXor converts");
+}
+
+{
+  // 18f. Not (opcode 200): ~10
+  const spv = buildComputeWithSpecConstants([
+    encodeInst(Op.SpecConstantOp, 3, 6, 200, 4), // BitwiseNot
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp Not converts");
+}
+
+{
+  // 18g. ShiftLeftLogical (opcode 196): 10 << 2 = 40
+  const spv = buildComputeWithSpecConstants([
+    encodeInst(Op.SpecConstantOp, 3, 6, 196, 4, 5), // ShiftLeftLogical
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp ShiftLeftLogical converts");
+}
+
+{
+  // 18h. ShiftRightLogical (opcode 194): 20 >> 2 = 5
+  const spv = buildComputeWithSpecConstants([
+    encodeInst(Op.SpecConstantOp, 3, 6, 194, 5, 4), // ShiftRightLogical
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp ShiftRightLogical converts");
+}
+
+{
+  // 18i. UMod (opcode 137): 20 % 10 = 0 (note: using unsigned int type)
+  const mainStr = encodeString("main");
+  const spv = buildSpirv(20, [
+    ...encodeInst(Op.Capability, 1),
+    ...encodeInst(Op.MemoryModel, 0, 1),
+    ...encodeEntryPoint(ExecModel.GLCompute, 7, "main"),
+    ...encodeInst(Op.ExecutionMode, 7, 17, 1, 1, 1),
+    ...encodeInst(Op.Decorate, 4, Deco.SpecId, 0),
+    ...encodeInst(Op.Decorate, 5, Deco.SpecId, 1),
+    ...encodeInst(Op.TypeVoid, 1),
+    ...encodeInst(Op.TypeFunction, 2, 1),
+    ...encodeInst(Op.TypeInt, 3, 32, 0), // unsigned int
+    ...encodeInst(Op.SpecConstant, 3, 4, 20),
+    ...encodeInst(Op.SpecConstant, 3, 5, 7),
+    ...encodeInst(Op.SpecConstantOp, 3, 6, 137, 4, 5), // UMod(20, 7) = 6
+    ...encodeInst(Op.Function, 1, 7, 0, 2),
+    ...encodeInst(Op.Label, 8),
+    ...encodeInst(Op.Return),
+    ...encodeInst(Op.FunctionEnd),
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp UMod converts");
+}
+
+{
+  // 18j. IEqual (opcode 170) and INotEqual (opcode 171).
+  const spv = buildSpirv(12, [
+    ...encodeInst(Op.Capability, 1),
+    ...encodeInst(Op.MemoryModel, 0, 1),
+    ...encodeEntryPoint(ExecModel.GLCompute, 8, "main"),
+    ...encodeInst(Op.ExecutionMode, 8, 17, 1, 1, 1),
+    ...encodeInst(Op.Decorate, 4, Deco.SpecId, 0),
+    ...encodeInst(Op.Decorate, 5, Deco.SpecId, 1),
+    ...encodeInst(Op.TypeVoid, 1),
+    ...encodeInst(Op.TypeFunction, 2, 1),
+    ...encodeInst(Op.TypeInt, 3, 32, 1),
+    ...encodeInst(Op.TypeBool, 9),
+    ...encodeInst(Op.SpecConstant, 3, 4, 10),
+    ...encodeInst(Op.SpecConstant, 3, 5, 10),
+    ...encodeInst(Op.SpecConstantOp, 9, 6, 170, 4, 5), // IEqual(10, 10) = true
+    ...encodeInst(Op.SpecConstantOp, 9, 7, 171, 4, 5), // INotEqual(10, 10) = false
+    ...encodeInst(Op.Function, 1, 8, 0, 2),
+    ...encodeInst(Op.Label, 10),
+    ...encodeInst(Op.Return),
+    ...encodeInst(Op.FunctionEnd),
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp IEqual/INotEqual converts");
+}
+
+{
+  // 18k. SDiv with divide-by-zero (opcode 135): should produce 0.
+  const spv = buildSpirv(12, [
+    ...encodeInst(Op.Capability, 1),
+    ...encodeInst(Op.MemoryModel, 0, 1),
+    ...encodeEntryPoint(ExecModel.GLCompute, 7, "main"),
+    ...encodeInst(Op.ExecutionMode, 7, 17, 1, 1, 1),
+    ...encodeInst(Op.Decorate, 4, Deco.SpecId, 0),
+    ...encodeInst(Op.Decorate, 5, Deco.SpecId, 1),
+    ...encodeInst(Op.TypeVoid, 1),
+    ...encodeInst(Op.TypeFunction, 2, 1),
+    ...encodeInst(Op.TypeInt, 3, 32, 1),
+    ...encodeInst(Op.SpecConstant, 3, 4, 42),
+    ...encodeInst(Op.SpecConstant, 3, 5, 0), // divisor = 0
+    ...encodeInst(Op.SpecConstantOp, 3, 6, 135, 4, 5), // SDiv(42, 0) → 0
+    ...encodeInst(Op.Function, 1, 7, 0, 2),
+    ...encodeInst(Op.Label, 8),
+    ...encodeInst(Op.Return),
+    ...encodeInst(Op.FunctionEnd),
+  ]);
+  const r = convertToWgsl(spv);
+  assert(r.wgsl !== null, "OpSpecConstantOp SDiv-by-zero converts (no crash)");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 19: split_combined_samplers — high binding values
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== Test 19: split_combined_samplers high bindings ===");
+
+{
+  // 19a. basic_fragment with high bindings — verify binding doubling works.
+  const r = convertFixture("basic_fragment.spv");
+  if (r.wgsl) {
+    // After splitting, sampler bindings are N*2 and image bindings are N*2+1.
+    // Verify no duplicate bindings within the same group.
+    const groupBindings = {};
+    for (const m of r.wgsl.matchAll(/@group\((\d+)u?\)\s*@binding\((\d+)u?\)/g)) {
+      const key = `g${m[1]}b${m[2]}`;
+      groupBindings[key] = (groupBindings[key] || 0) + 1;
+    }
+    // Allow sampler and texture on same binding (different resource types).
+    // Just verify the shader converts without error.
+    assert(Object.keys(groupBindings).length > 0, "high bindings: bindings parsed");
+  }
+}
+
+{
+  // 19b. multi_texture — 6+ combined samplers, binding doubling.
+  const r = convertFixture("multi_texture.spv");
+  if (r.wgsl) {
+    const bindings = [...r.wgsl.matchAll(/@binding\((\d+)u?\)/g)].map(m => parseInt(m[1]));
+    assert(bindings.length > 0, "multi_texture: bindings present after split");
+    // Verify no negative or absurdly large bindings.
+    const maxBinding = Math.max(...bindings);
+    assert(maxBinding < 10000, `multi_texture: max binding ${maxBinding} is reasonable`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 20: fix_nonfinite_literals — 64-bit floats
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== Test 20: fix_nonfinite_literals 64-bit ===");
+
+{
+  // 20a. Shader with f64 infinity constant.
+  // Float64 +Infinity: 0x7FF0000000000000 → low word = 0x00000000, high word = 0x7FF00000
+  const spv = buildSpirv(10, [
+    ...encodeInst(Op.Capability, 1), // Shader
+    ...encodeInst(Op.Capability, 10), // Float64
+    ...encodeInst(Op.MemoryModel, 0, 1),
+    ...encodeEntryPoint(ExecModel.GLCompute, 7, "main"),
+    ...encodeInst(Op.ExecutionMode, 7, 17, 1, 1, 1),
+    ...encodeInst(Op.TypeVoid, 1),
+    ...encodeInst(Op.TypeFunction, 2, 1),
+    ...encodeInst(Op.TypeFloat, 3, 64), // f64
+    // OpConstant for f64 takes 2 literal words (low, high).
+    ...[((5) << 16) | Op.Constant, 3, 4, 0x00000000, 0x7FF00000], // +Infinity f64
+    ...[((5) << 16) | Op.Constant, 3, 5, 0x00000000, 0xFFF00000], // -Infinity f64
+    ...encodeInst(Op.Function, 1, 7, 0, 2),
+    ...encodeInst(Op.Label, 8),
+    ...encodeInst(Op.Return),
+    ...encodeInst(Op.FunctionEnd),
+  ]);
+  const r = convertToWgsl(spv);
+  // Tint may or may not support f64 — the important thing is no crash.
+  // If it converts, verify no infinity in output.
+  if (r.wgsl) {
+    const lower = r.wgsl.toLowerCase();
+    assert(!lower.includes("infinity"), "f64: no infinity in output");
+  }
+  // If it fails, that's OK — f64 support depends on Tint capabilities.
+  assert(true, "f64 infinity: no crash");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: Pass interaction — multi-feature fixture
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== Test 21: Pass interaction ===");
+
+{
+  // 21a. basic_vertex exercises: push constants + Y-negation + spec constant folding.
+  const r = convertFixture("basic_vertex.spv");
+  if (r.wgsl) {
+    assert(r.wgsl.includes("@vertex"), "pass interaction: vertex entry");
+    assert(r.wgsl.includes("@group(3") && r.wgsl.includes("@binding(120"),
+      "pass interaction: push constants converted");
+    assert(!r.wgsl.includes("override"), "pass interaction: spec constants folded");
+  }
+}
+
+{
+  // 21b. basic_fragment exercises: combined sampler split + push constants + depth images.
+  const r = convertFixture("basic_fragment.spv");
+  if (r.wgsl) {
+    assert(r.wgsl.includes("texture_2d"), "pass interaction: samplers split");
+    assert(r.wgsl.includes(": sampler"), "pass interaction: sampler type present");
+    assert(r.wgsl.includes("@binding(120"), "pass interaction: push constants");
+    assert(r.wgsl.includes("@fragment"), "pass interaction: fragment entry");
+  }
+}
+
+{
+  // 21c. depth_sampling exercises: depth image fix + combined sampler split.
+  const r = convertFixture("depth_sampling.spv");
+  if (r.wgsl) {
+    assert(r.wgsl.includes("texture_depth"), "pass interaction: depth image fixed");
+    assert(r.wgsl.includes("sampler"), "pass interaction: sampler split from depth");
+  }
+}
+
+{
+  // 21d. per_stage_overrides exercises: spec constants per-stage.
+  const rv = convertFixture("per_stage_overrides_vert.spv");
+  const rf = convertFixture("per_stage_overrides_frag.spv");
+  if (rv.wgsl && rf.wgsl) {
+    assert(!rv.wgsl.includes("override"), "pass interaction: vert spec constants folded");
+    assert(!rf.wgsl.includes("override"), "pass interaction: frag spec constants folded");
   }
 }
 

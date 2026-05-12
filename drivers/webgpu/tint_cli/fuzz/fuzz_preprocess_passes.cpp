@@ -34,6 +34,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 	spv = spirv_preprocess::strip_memory_barrier(spv);
 	spv = spirv_preprocess::fix_nonfinite_literals(spv);
 	spv = spirv_preprocess::flatten_binding_arrays(spv);
+	spv = spirv_preprocess::infer_readonly_storage(spv);
 
 	return 0;
 }

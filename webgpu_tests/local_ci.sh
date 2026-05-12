@@ -182,7 +182,7 @@ run_test "Driver unit tests (305)" \
     "$SCRIPT_DIR/driver_unit_tests" \
     node run_tests.mjs
 
-run_test "SPIR-V preprocessing tests (157)" \
+run_test "SPIR-V preprocessing tests (191)" \
     "$SCRIPT_DIR/preprocessing_tests" \
     node run_tests.mjs
 
