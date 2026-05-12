@@ -671,9 +671,8 @@ def convert_spirv_batch(spv_files, tint_cli_path):
             timeout=120,
         )
     except FileNotFoundError:
-        print(f"[WGSL Precompile] Tint CLI not found at: {tint_cli_path}", file=sys.stderr)
-        print(f"[WGSL Precompile] Generating empty precompiled table (runtime Tint will handle all shaders).", file=sys.stderr)
-        return {}
+        print(f"[WGSL Precompile] ERROR: Tint CLI not found at: {tint_cli_path}", file=sys.stderr)
+        sys.exit(1)
 
     if result.returncode != 0:
         print(f"Tint batch conversion failed: {result.stderr}", file=sys.stderr)
@@ -748,14 +747,12 @@ def precompile_wgsl(repo_root, output_path, glslang_path="glslangValidator"):
     Returns:
         Number of successfully precompiled entries.
     """
-    # Look for the Tint CLI tool in common locations.
-    # The tool is built by SCons as a host binary during the build process.
+    # Find the tint_convert_cli binary (built by build.sh → bin/tint_convert_cli).
     tint_cli = os.path.join(repo_root, "bin", "tint_convert_cli")
-    if not os.path.exists(tint_cli):
-        tint_cli = os.path.join(repo_root, "drivers", "webgpu", "tint_convert_cli")
-    if not os.path.exists(tint_cli):
-        # Try system PATH.
-        tint_cli = "tint_convert_cli"
+    if not os.path.isfile(tint_cli):
+        print("[WGSL Precompile] ERROR: bin/tint_convert_cli not found.", file=sys.stderr)
+        print("[WGSL Precompile] Run: ./drivers/webgpu/tint_cli/build.sh", file=sys.stderr)
+        sys.exit(1)
 
     total = 0
     compiled = 0
@@ -851,30 +848,29 @@ def precompile_wgsl(repo_root, output_path, glslang_path="glslangValidator"):
 def build_wgsl_precompiled(target, source, env):
     """scons builder action for WGSL precompilation.
 
-    If wgsl_precompiled.gen.h already exists with entries (e.g. from
-    capture_runtime_wgsl.mjs), it is preserved. The capture script
-    produces correct hashes because it uses Godot's built-in glslang,
-    whereas the Python builder uses the system glslangValidator which
-    may produce different SPIR-V.
-
-    If no .gen.h exists, falls back to the Python GLSL compilation
-    pipeline. If the Tint CLI tool is not available, generates an empty
-    table (runtime Tint handles all shader conversions).
+    Builds the tint_convert_cli host tool (if needed), then runs the full
+    GLSL → SPIR-V → WGSL precompilation pipeline to generate
+    wgsl_precompiled.gen.h.
     """
     output = str(target[0])
-
-    # Preserve existing capture-generated header.
-    if os.path.exists(output):
-        try:
-            with open(output, "r", encoding="utf-8") as f:
-                content = f.read()
-            if "_wgsl_precompiled_count" in content and "capture_runtime_wgsl" in content:
-                print("[WGSL Precompile] Preserving capture-generated header (use capture_runtime_wgsl.mjs to regenerate)")
-                return
-        except (IOError, OSError):
-            pass
-
     repo_root = str(env.Dir("#"))
+
+    # Build tint_convert_cli (native host tool) via build.sh.
+    build_script = os.path.join(repo_root, "drivers", "webgpu", "tint_cli", "build.sh")
+    if not os.path.isfile(build_script):
+        print("[WGSL Precompile] ERROR: tint_cli/build.sh not found", file=sys.stderr)
+        sys.exit(1)
+
+    print("[WGSL Precompile] Building tint_convert_cli...")
+    result = subprocess.run(
+        ["bash", build_script],
+        cwd=repo_root,
+        timeout=600,
+    )
+    if result.returncode != 0:
+        print("[WGSL Precompile] ERROR: tint_convert_cli build failed", file=sys.stderr)
+        sys.exit(1)
+
     glslang = env.get("GLSLANG", "glslangValidator")
     precompile_wgsl(repo_root, output, glslang)
 
