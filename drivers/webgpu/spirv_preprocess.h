@@ -87,9 +87,9 @@ DepthImageFixResult fix_depth2_images(const Vector<uint8_t> &p_bytes);
 // so this is done as a SPIR-V preprocessing pass instead.
 Vector<uint8_t> negate_position_y(const Vector<uint8_t> &p_bytes);
 
-// Strip OpDecorate/OpMemberDecorate Restrict (decoration 19).
-// Tint does not handle the Restrict decoration; it's a memory hint
-// from glslang that has no WGSL equivalent.
+// Strip OpDecorate/OpMemberDecorate for decorations unsupported by Tint:
+// Restrict (19) — memory hint from glslang, no WGSL equivalent.
+// InputAttachmentIndex (43) — Vulkan subpass inputs, no WebGPU equivalent.
 Vector<uint8_t> strip_restrict_decoration(const Vector<uint8_t> &p_bytes);
 
 // Replace OpMemoryBarrier with OpNop. Tint does not support

@@ -619,8 +619,6 @@ def compile_glsl_to_spirv(glsl_source, stage, glslang_path="glslangValidator"):
             [
                 glslang_path,
                 "-V",
-                "--target-env", "vulkan1.1",
-                "--target-env", "spirv1.3",
                 "-S", stage,
                 "-o", spv_path,
                 glsl_path,

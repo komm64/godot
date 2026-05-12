@@ -1880,8 +1880,14 @@ Vector<uint8_t> strip_restrict_decoration(const Vector<uint8_t> &p_bytes) {
 
 	const uint8_t *data = p_bytes.ptr();
 	static constexpr uint32_t DECO_RESTRICT = 19;
+	static constexpr uint32_t DECO_INPUT_ATTACHMENT_INDEX = 43;
 
-	// Quick scan: any Restrict decoration present?
+	// Helper: is this a decoration we need to strip?
+	auto is_stripped_deco = [](uint32_t d) {
+		return d == DECO_RESTRICT || d == DECO_INPUT_ATTACHMENT_INDEX;
+	};
+
+	// Quick scan: any stripped decoration present?
 	bool found = false;
 	uint32_t pos = 5;
 	while (pos < total_words) {
@@ -1891,11 +1897,11 @@ Vector<uint8_t> strip_restrict_decoration(const Vector<uint8_t> &p_bytes) {
 		if (wc == 0 || pos + wc > total_words) {
 			break;
 		}
-		if (op == OP_DECORATE && wc >= 3 && read_word(data, len, pos + 2) == DECO_RESTRICT) {
+		if (op == OP_DECORATE && wc >= 3 && is_stripped_deco(read_word(data, len, pos + 2))) {
 			found = true;
 			break;
 		}
-		if (op == OP_MEMBER_DECORATE && wc >= 4 && read_word(data, len, pos + 3) == DECO_RESTRICT) {
+		if (op == OP_MEMBER_DECORATE && wc >= 4 && is_stripped_deco(read_word(data, len, pos + 3))) {
 			found = true;
 			break;
 		}
@@ -1906,7 +1912,7 @@ Vector<uint8_t> strip_restrict_decoration(const Vector<uint8_t> &p_bytes) {
 		return p_bytes;
 	}
 
-	// Strip all OpDecorate/OpMemberDecorate with Restrict.
+	// Strip all OpDecorate/OpMemberDecorate with stripped decorations.
 	Vector<uint8_t> out;
 	append_bytes(out, data, 0, 20);
 
@@ -1920,10 +1926,10 @@ Vector<uint8_t> strip_restrict_decoration(const Vector<uint8_t> &p_bytes) {
 		}
 
 		bool skip = false;
-		if (op == OP_DECORATE && wc >= 3 && read_word(data, len, pos + 2) == DECO_RESTRICT) {
+		if (op == OP_DECORATE && wc >= 3 && is_stripped_deco(read_word(data, len, pos + 2))) {
 			skip = true;
 		}
-		if (op == OP_MEMBER_DECORATE && wc >= 4 && read_word(data, len, pos + 3) == DECO_RESTRICT) {
+		if (op == OP_MEMBER_DECORATE && wc >= 4 && is_stripped_deco(read_word(data, len, pos + 3))) {
 			skip = true;
 		}
 

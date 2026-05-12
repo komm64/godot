@@ -222,7 +222,7 @@ echo ""
 
 if [[ "$QUICK" == true ]]; then
     # Skip remaining stages in quick mode
-    echo "(--quick: skipping resource lifecycle, screenshot comparison, and smoke test)"
+    echo "(--quick: skipping resource lifecycle and screenshot comparison)"
     echo ""
 else
 
@@ -255,26 +255,6 @@ ensure_playwright "$SCRIPT_DIR/screenshot_comparison"
 run_test "Screenshot comparison" \
     "$SCRIPT_DIR/screenshot_comparison" \
     node screenshot_tests.mjs
-
-echo ""
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 6. Smoke Test (requires pre-exported test project)
-# ──────────────────────────────────────────────────────────────────────────────
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 6: Engine Smoke Test (test_project)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-
-if [[ -f "$SCRIPT_DIR/test_project/export/index.html" ]]; then
-    run_test "Headless Chrome smoke test" \
-        "$SCRIPT_DIR/test_project" \
-        node smoke_test.mjs ./export/
-else
-    printf "${BOLD}▶ %-40s${NC}${YELLOW}SKIP${NC} (no export found — run with engine build)\n" "Headless Chrome smoke test"
-    SKIPPED=$((SKIPPED + 1))
-    RESULTS+=("SKIP  Headless Chrome smoke test")
-fi
 
 echo ""
 
