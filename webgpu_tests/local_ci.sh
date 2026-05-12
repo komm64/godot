@@ -3,9 +3,11 @@
 # local_ci.sh — Run the full WebGPU test suite locally (mirrors CI + Safari)
 #
 # Usage:
-#   ./webgpu_tests/local_ci.sh              # Run all tests (Chrome + Firefox + Safari)
+#   ./webgpu_tests/local_ci.sh              # Rebuild engine + run all tests
+#   ./webgpu_tests/local_ci.sh --no-rebuild # Run all tests without rebuilding
 #   ./webgpu_tests/local_ci.sh --no-safari  # Skip Safari (faster, no AppleScript needed)
-#   ./webgpu_tests/local_ci.sh --quick      # Shader corpus + scene smoketest only
+#   ./webgpu_tests/local_ci.sh --quick      # Shader corpus + scene smoketest only (no rebuild)
+#   ./webgpu_tests/local_ci.sh --quick --rebuild  # Rebuild + quick tests only
 #
 # Prerequisites:
 #   - Node.js 20+
@@ -22,13 +24,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Defaults
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
 # Parse args
 NO_SAFARI=false
 QUICK=false
+REBUILD_EXPLICIT=""  # "", "yes", or "no"
 for arg in "$@"; do
     [[ "$arg" == "--no-safari" ]] && NO_SAFARI=true
     [[ "$arg" == "--quick" ]] && QUICK=true
+    [[ "$arg" == "--rebuild" ]] && REBUILD_EXPLICIT="yes"
+    [[ "$arg" == "--no-rebuild" ]] && REBUILD_EXPLICIT="no"
 done
+
+# Rebuild logic: full mode rebuilds by default, --quick does not.
+# --rebuild/--no-rebuild always override.
+if [[ "$REBUILD_EXPLICIT" == "yes" ]]; then
+    DO_REBUILD=true
+elif [[ "$REBUILD_EXPLICIT" == "no" ]]; then
+    DO_REBUILD=false
+elif [[ "$QUICK" == true ]]; then
+    DO_REBUILD=false
+else
+    DO_REBUILD=true
+fi
 
 # Colors
 RED='\033[0;31m'
@@ -94,10 +115,42 @@ if [[ "$QUICK" == true ]]; then
 else
     echo "  Mode: full"
 fi
+if [[ "$DO_REBUILD" == true ]]; then
+    echo "  Rebuild: yes (-j$JOBS)"
+else
+    echo "  Rebuild: no"
+fi
 if [[ "$NO_SAFARI" == true ]]; then
     echo "  Safari: skipped (--no-safari)"
 fi
 echo ""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 0. Engine Rebuild
+# ──────────────────────────────────────────────────────────────────────────────
+if [[ "$DO_REBUILD" == true ]]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Stage 0: Engine Rebuild (web export template)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    printf "${BOLD}▶ %-40s${NC}" "scons web template (release)"
+    if output=$(cd "$REPO_ROOT" && scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no -j"$JOBS" 2>&1); then
+        printf "${GREEN}PASS${NC}\n"
+        PASSED=$((PASSED + 1))
+        RESULTS+=("PASS  scons web template (release)")
+    else
+        printf "${RED}FAIL${NC}\n"
+        echo "$output" | tail -20 | sed 's/^/    /'
+        FAILED=$((FAILED + 1))
+        RESULTS+=("FAIL  scons web template (release)")
+        echo ""
+        echo "Build failed — aborting."
+        exit 1
+    fi
+
+    echo ""
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. Shader Corpus
@@ -118,16 +171,12 @@ run_test "SPIR-V → WGSL validation" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Unit Tests (naga-converter + driver)
+# 2. Unit Tests (driver)
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Stage 2: Unit Tests"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-
-run_test "Naga-converter Rust unit tests (71)" \
-    "$SCRIPT_DIR/../drivers/webgpu/naga-converter" \
-    cargo test --lib
 
 run_test "Driver unit tests (305)" \
     "$SCRIPT_DIR/driver_unit_tests" \
@@ -144,38 +193,10 @@ run_test "WGSL precompile JS tests" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. Fuzz Tests (naga-converter, requires Rust nightly + cargo-fuzz)
+# 3. Scene Smoketest (multi-browser)
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 3: Fuzz Tests (3 targets × 60s each)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-
-NAGA_DIR="$SCRIPT_DIR/../drivers/webgpu/naga-converter"
-if command -v cargo >/dev/null 2>&1 && rustup toolchain list 2>/dev/null | grep -q nightly; then
-    if ! command -v cargo-fuzz >/dev/null 2>&1; then
-        echo "  [setup] Installing cargo-fuzz..."
-        cargo install cargo-fuzz > /dev/null 2>&1
-    fi
-
-    for target in spirv_to_wgsl preprocess_passes split_samplers; do
-        run_test "Fuzz $target (60s)" \
-            "$NAGA_DIR" \
-            cargo +nightly fuzz run "$target" -- -max_total_time=60 -max_len=4096
-    done
-else
-    printf "${BOLD}▶ %-40s${NC}${YELLOW}SKIP${NC} (Rust nightly not installed)\n" "Fuzz tests (3 targets)"
-    SKIPPED=$((SKIPPED + 1))
-    RESULTS+=("SKIP  Fuzz tests (Rust nightly not installed)")
-fi
-
-echo ""
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 4. Scene Smoketest (multi-browser)
-# ──────────────────────────────────────────────────────────────────────────────
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 4: Scene Smoketest (19 scenes x browsers)"
+echo "  Stage 3: Scene Smoketest (19 scenes x browsers)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -206,10 +227,10 @@ if [[ "$QUICK" == true ]]; then
 else
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Resource Lifecycle
+# 4. Resource Lifecycle
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 5: Resource Lifecycle Stress Test"
+echo "  Stage 4: Resource Lifecycle Stress Test"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -222,10 +243,10 @@ run_test "Resource lifecycle stress tests" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. Screenshot Comparison
+# 5. Screenshot Comparison
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 6: Screenshot Comparison (Chrome + Firefox)"
+echo "  Stage 5: Screenshot Comparison (Chrome + Firefox)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -238,10 +259,10 @@ run_test "Screenshot comparison" \
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 7. Smoke Test (requires pre-exported test project)
+# 6. Smoke Test (requires pre-exported test project)
 # ──────────────────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Stage 7: Engine Smoke Test (test_project)"
+echo "  Stage 6: Engine Smoke Test (test_project)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 

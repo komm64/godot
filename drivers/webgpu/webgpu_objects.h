@@ -194,7 +194,7 @@ struct WGShader {
 	// True if the base shader modules were compiled with WGSL override
 	// declarations (spirv_to_wgsl_with_overrides). When set, specialization
 	// constants are passed as WGPUConstantEntry at pipeline creation time
-	// instead of patching SPIR-V + runtime naga conversion.
+	// instead of patching SPIR-V + runtime Tint conversion.
 	bool has_override_declarations = false;
 
 	// Per-stage set of override constant IDs found in the WGSL output.

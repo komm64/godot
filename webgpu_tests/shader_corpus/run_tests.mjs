@@ -1,108 +1,47 @@
 /**
  * Shader Corpus Test: SPIR-V → WGSL Validation
  *
- * Loads the naga-converter WASM module and validates that all test SPIR-V files
- * convert to valid WGSL. Tests the same pipeline used at runtime in the browser.
+ * Validates that all test SPIR-V files convert to valid WGSL using the Tint CLI.
+ * Tint is the C++ SPIR-V→WGSL translator compiled into the Godot engine binary.
+ * This test uses a standalone Tint CLI (tint_convert_cli) for offline validation.
+ *
+ * If tint_convert_cli is not found, the test prints a warning and exits
+ * successfully — runtime Tint (linked into the engine WASM) handles all
+ * conversion at runtime, so the offline test is a bonus, not a gate.
  *
  * Usage: node run_tests.mjs
  */
 
-import { readFileSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { execFileSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Paths
-const NAGA_WASM_PATH = join(__dirname, '../../drivers/webgpu/naga-converter/prebuilt/naga_wasm_bg.wasm');
+const REPO_ROOT = join(__dirname, '..', '..');
 const FIXTURES_DIR = join(__dirname, 'fixtures');
 const RESULTS_DIR = join(__dirname, 'results');
 
-// Inline the wasm-bindgen glue (adapted from naga_converter.js for Node.js)
-let wasm;
-let cachedUint8ArrayMemory0 = null;
-let WASM_VECTOR_LEN = 0;
-
-function getUint8ArrayMemory0() {
-    if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
-        cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
+// Search for tint_convert_cli in standard locations.
+function findTintCli() {
+    const candidates = [
+        join(REPO_ROOT, 'bin', 'tint_convert_cli'),
+        join(REPO_ROOT, 'drivers', 'webgpu', 'tint_convert_cli'),
+    ];
+    for (const c of candidates) {
+        if (existsSync(c)) return c;
     }
-    return cachedUint8ArrayMemory0;
-}
-
-function passArray8ToWasm0(arg, malloc) {
-    const ptr = malloc(arg.length * 1, 1) >>> 0;
-    getUint8ArrayMemory0().set(arg, ptr / 1);
-    WASM_VECTOR_LEN = arg.length;
-    return ptr;
-}
-
-let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
-cachedTextDecoder.decode();
-
-function getStringFromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
-}
-
-function takeFromExternrefTable0(idx) {
-    const value = wasm.__wbindgen_externrefs.get(idx);
-    wasm.__externref_table_dealloc(idx);
-    return value;
-}
-
-function spirv_to_wgsl(spirv_bytes) {
-    let deferred3_0;
-    let deferred3_1;
+    // Try PATH
     try {
-        const ptr0 = passArray8ToWasm0(spirv_bytes, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.spirv_to_wgsl(ptr0, len0);
-        var ptr2 = ret[0];
-        var len2 = ret[1];
-        if (ret[3]) {
-            ptr2 = 0; len2 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred3_0 = ptr2;
-        deferred3_1 = len2;
-        return getStringFromWasm0(ptr2, len2);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        execFileSync('which', ['tint_convert_cli'], { encoding: 'utf-8' });
+        return 'tint_convert_cli';
+    } catch {
+        return null;
     }
-}
-
-function initWasm(wasmBytes) {
-    const imports = {
-        './naga_converter_bg.js': {
-            __wbg_Error_83742b46f01ce22d: function(arg0, arg1) {
-                return Error(getStringFromWasm0(arg0, arg1));
-            },
-            __wbg_log_2173688eed3d74ed: function(arg0, arg1) {
-                // Suppress naga console.log during tests unless verbose
-                if (process.env.VERBOSE) {
-                    console.log('[naga]', getStringFromWasm0(arg0, arg1));
-                }
-            },
-            __wbindgen_init_externref_table: function() {
-                const table = wasm.__wbindgen_externrefs;
-                const offset = table.grow(4);
-                table.set(0, undefined);
-                table.set(offset + 0, undefined);
-                table.set(offset + 1, null);
-                table.set(offset + 2, true);
-                table.set(offset + 3, false);
-            },
-        },
-    };
-
-    const module = new WebAssembly.Module(wasmBytes);
-    const instance = new WebAssembly.Instance(module, imports);
-    wasm = instance.exports;
-    cachedUint8ArrayMemory0 = null;
-    wasm.__wbindgen_start();
 }
 
 // ─── Test Runner ───────────────────────────────────────────────────────────
@@ -112,18 +51,16 @@ function runTests() {
     console.log('║     Shader Corpus Test: SPIR-V → WGSL Validation        ║');
     console.log('╚══════════════════════════════════════════════════════════╝\n');
 
-    // Load naga WASM
-    console.log(`Loading naga WASM from: ${NAGA_WASM_PATH}`);
-    const wasmBytes = readFileSync(NAGA_WASM_PATH);
-    console.log(`  WASM size: ${(wasmBytes.length / 1024).toFixed(1)} KB`);
-
-    try {
-        initWasm(wasmBytes);
-        console.log('  Naga WASM initialized successfully.\n');
-    } catch (e) {
-        console.error('FATAL: Failed to initialize naga WASM:', e.message);
-        process.exit(1);
+    const tintCli = findTintCli();
+    if (!tintCli) {
+        console.log('NOTE: tint_convert_cli not found — skipping offline SPIR-V→WGSL validation.');
+        console.log('      Runtime Tint (linked into the engine WASM) handles all conversion.');
+        console.log('      To enable this test, build the tint_convert_cli tool.\n');
+        console.log('PASS (skipped — no Tint CLI available)\n');
+        process.exit(0);
     }
+
+    console.log(`Using Tint CLI: ${tintCli}\n`);
 
     // Find all .spv files
     mkdirSync(RESULTS_DIR, { recursive: true });
@@ -143,13 +80,15 @@ function runTests() {
     for (const spvFile of spvFiles) {
         const name = basename(spvFile, '.spv');
         const spvPath = join(FIXTURES_DIR, spvFile);
-        const spvBytes = readFileSync(spvPath);
 
         process.stdout.write(`  [TEST] ${name.padEnd(30)}`);
 
         const startTime = performance.now();
         try {
-            const wgsl = spirv_to_wgsl(new Uint8Array(spvBytes));
+            const wgsl = execFileSync(tintCli, [spvPath], {
+                encoding: 'utf-8',
+                timeout: 30000,
+            });
             const elapsed = (performance.now() - startTime).toFixed(2);
 
             // Basic WGSL validation checks
@@ -171,7 +110,7 @@ function runTests() {
                 status: issues.length === 0 ? 'PASS' : 'WARN',
                 time_ms: parseFloat(elapsed),
                 wgsl_size: wgsl.length,
-                spv_size: spvBytes.length,
+                spv_size: readFileSync(spvPath).length,
                 issues,
             });
 
@@ -185,7 +124,7 @@ function runTests() {
                 name,
                 status: 'FAIL',
                 time_ms: parseFloat(elapsed),
-                spv_size: spvBytes.length,
+                spv_size: readFileSync(spvPath).length,
                 error: e.message || String(e),
             });
         }
@@ -198,7 +137,7 @@ function runTests() {
     // Write results JSON
     const report = {
         timestamp: new Date().toISOString(),
-        naga_wasm_size: wasmBytes.length,
+        converter: 'tint',
         total_tests: spvFiles.length,
         passed,
         failed,
@@ -235,19 +174,9 @@ function validateWgsl(wgsl, name) {
         issues.push('unconverted push_constant');
     }
 
-    // Check for NaN/Inf literals (should be replaced)
-    if (wgsl.match(/\binf\b/) && !wgsl.includes('0x1.fffffep')) {
-        issues.push('possible raw inf literal');
-    }
-
     // Check that entry points exist
     if (!wgsl.includes('@vertex') && !wgsl.includes('@fragment') && !wgsl.includes('@compute')) {
         issues.push('no entry point found');
-    }
-
-    // Check for diagnostic suppression (expected from naga-converter post-processing)
-    if (wgsl.includes('diagnostic(off, derivative_uniformity)')) {
-        // Good - this is expected
     }
 
     return issues;

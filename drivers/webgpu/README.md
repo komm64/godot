@@ -15,7 +15,7 @@ Forward+ and Mobile renderers to run in the browser.
 │    • Buffers, Textures, Samplers, Pipelines, Draw calls │
 │    • Push constant ring buffer emulation (group 3)      │
 │    • Subpass flattening (each subpass → render pass)     │
-│    • SPIR-V → WGSL translation (Naga WASM)             │
+│    • SPIR-V → WGSL translation (Tint, linked in)        │
 ├─────────────────────────────────────────────────────────┤
 │  RenderingContextDriverWebGPU                           │
 │    • Device import from JS pre-initialized GPUDevice    │
@@ -33,8 +33,10 @@ Forward+ and Mobile renderers to run in the browser.
 |------|-------|---------|
 | `rendering_device_driver_webgpu.cpp/h` | ~5250 | Main driver: buffers, textures, pipelines, draw, compute |
 | `rendering_context_driver_webgpu.cpp/h` | ~290 | Device bootstrap, surface/swap chain management |
-| `rendering_shader_container_webgpu.cpp/h` | ~210 | Shader container format (SPIR-V storage + Naga WGSL conversion) |
+| `rendering_shader_container_webgpu.cpp/h` | ~210 | Shader container format (SPIR-V storage + Tint WGSL conversion) |
 | `webgpu_objects.h` | ~320 | GPU object wrappers (WGBuffer, WGTexture, WGShader, etc.) |
+| `spirv_preprocess.cpp/h` | ~1700 | SPIR-V preprocessing passes before Tint conversion |
+| `tint_wrapper.cpp/h` | ~55 | C++20 isolation wrapper for Tint API |
 | `pixel_formats_webgpu.h` | ~710 | Godot DataFormat → WGPUTextureFormat mapping table |
 
 ## Key Design Decisions
@@ -51,10 +53,13 @@ WebGPU has no subpasses. Each Godot subpass becomes a separate
 Godot's subpass configuration.
 
 ### Shader Translation
-GLSL → SPIR-V (glslang, at build time) → WGSL (Naga v28, at runtime via WASM).
-Naga is patched to handle Godot-specific patterns: combined image-samplers are
-split into separate texture + sampler bindings, push constant blocks are
-rewritten to storage buffer references at binding 120.
+GLSL → SPIR-V (glslang, at build time) → WGSL (Tint, linked in as C++).
+SPIR-V is preprocessed in C++ before Tint conversion: combined image-samplers
+are split into separate texture + sampler bindings, push constant blocks are
+rewritten to storage buffer references at binding 120, and various other
+fixups (depth image flags, position Y negation, point size stripping) are
+applied. Tint is compiled as a thirdparty C++20 library via a thin wrapper
+(`tint_wrapper.cpp`) that isolates its C++20 headers from the Godot build.
 
 ### Barrier No-ops
 WebGPU tracks resource hazards automatically. All barrier/sync commands are
@@ -94,13 +99,13 @@ prevents redundant re-creation.
 source /path/to/emsdk/emsdk_env.sh
 
 # Build web template (debug, no threads, WebGPU only)
-scons platform=web target=template_debug webgpu=yes opengl3=no threads=no -j$(nproc)
+scons platform=web target=template_debug dlink_enabled=yes webgpu=yes opengl3=no threads=no -j$(nproc)
 
 # Build web template (release)
-scons platform=web target=template_release webgpu=yes opengl3=no threads=no -j$(nproc)
+scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no -j$(nproc)
 
 # Build with both WebGPU and WebGL2 support
-scons platform=web target=template_debug webgpu=yes opengl3=yes threads=no -j$(nproc)
+scons platform=web target=template_debug dlink_enabled=yes webgpu=yes opengl3=yes threads=no -j$(nproc)
 
 # Build macOS editor (does not include WebGPU driver, for reference)
 scons platform=macos target=editor -j$(nproc)

@@ -66,7 +66,7 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		// Convention: push constants use bind group 3, binding PUSH_CONSTANT_RING_BINDING (120).
 		// Chosen high enough to avoid collision with split combined-sampler bindings
 		// (original binding N → sampler@N*2, image@N*2+1; max reasonable N ~20 → max~41).
-		// Must match PC_RING_BUFFER_BINDING in tmp/naga-converter/src/lib.rs
+		// Must match the binding in spirv_preprocess::convert_push_constants_to_uniforms()
 		// and PUSH_CONSTANT_RING_BINDING in rendering_device_driver_webgpu.h.
 		header_data.push_constant_bind_group = 3;
 		header_data.push_constant_binding = 120; // PUSH_CONSTANT_RING_BINDING

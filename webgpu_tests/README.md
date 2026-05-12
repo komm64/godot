@@ -6,8 +6,8 @@ Automated tests for the Godot WebGPU rendering backend. Validates the full shade
 
 | Test | What it validates | Runtime | Needs engine build? |
 |------|------------------|---------|---------------------|
-| [Shader Corpus](shader_corpus/) | SPIR-V → WGSL conversion via naga-converter WASM | ~1s | No |
-| [SPIR-V Validation](shader_corpus/validate_spirv_dump.mjs) | ALL engine-compiled SPIR-V through naga | ~5s | Yes (editor) |
+| [Shader Corpus](shader_corpus/) | SPIR-V → WGSL conversion via Tint CLI | ~1s | No (needs Tint CLI) |
+| [SPIR-V Validation](shader_corpus/validate_spirv_dump.mjs) | ALL engine-compiled SPIR-V through Tint | ~5s | Yes (editor) |
 | [Smoke Test](test_project/smoke_test.mjs) | Full runtime in headless Chrome — no shader errors, no device lost | ~60s | Yes (editor + web template) |
 | [Scene Smoketest](scene_smoketest/) | 18 demo/benchmark scenes across Chrome, Firefox, and Safari | ~8min | Yes (pre-exported) |
 | [Resource Lifecycle](resource_lifecycle/) | Rapid create/destroy of buffers, textures, pipelines | ~30s | No (standalone) |
@@ -19,12 +19,12 @@ The WebGPU shader pipeline is:
 
 ```
 GLSL → SPIR-V (glslang, at editor build time)
-     → 5 binary rewriting passes (naga-converter, at browser runtime)
-     → WGSL (naga parse + validate + emit, at browser runtime)
+     → 7 binary rewriting passes (C++ spirv_preprocess, at runtime)
+     → WGSL (Tint C++ library, linked into engine, at runtime)
      → GPU (browser's WebGPU implementation)
 ```
 
-The naga-converter SPIR-V preprocessing passes:
+The SPIR-V preprocessing passes (C++):
 1. **freeze_spec_constant_ops** — Evaluates `OpSpecConstantOp` into plain constants
 2. **rewrite_copy_logical** — `OpCopyLogical` → `OpCopyObject` (SPIR-V 1.4+ struct copy)
 3. **rewrite_terminate_invocation** — `OpTerminateInvocation` → `OpKill` (modern discard)
@@ -42,21 +42,20 @@ The naga-converter SPIR-V preprocessing passes:
 - **Playwright** — Browser-based tests (`npm install playwright`)
 - **Emscripten 4.0.11** — Web template build (`~/emsdk`)
 - **SCons + Python** — Godot build system
-- **Rust + wasm-pack** — Only if rebuilding naga-converter WASM
 
 ### 1. Shader Corpus (fast, no build needed)
 
-Tests 9 hand-crafted GLSL fixtures through the naga-converter WASM:
+Tests 9 hand-crafted GLSL fixtures through the Tint CLI (if available):
 
 ```bash
 cd webgpu_tests/shader_corpus
 ./compile_fixtures.sh    # GLSL → SPIR-V (requires glslangValidator)
-node run_tests.mjs       # SPIR-V → WGSL validation
+node run_tests.mjs       # SPIR-V → WGSL validation (skips gracefully if no Tint CLI)
 ```
 
 ### 2. SPIR-V Dump Validation (requires editor build)
 
-Validates all 300+ engine-compiled shaders through naga-converter offline:
+Validates all 300+ engine-compiled shaders through Tint offline:
 
 ```bash
 # Build the editor (macOS example)
@@ -84,11 +83,11 @@ End-to-end validation: exports the test project, serves it in headless Chrome, v
 ```bash
 # Build the web template
 source ~/emsdk/emsdk_env.sh
-scons platform=web target=template_release webgpu=yes opengl3=no threads=no -j$(sysctl -n hw.ncpu)
+scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=no threads=no -j$(sysctl -n hw.ncpu)
 
 # Install template (macOS — adjust path for Linux)
 mkdir -p ~/Library/Application\ Support/Godot/export_templates/4.6.2.stable
-cp bin/godot.web.template_release.wasm32.nothreads.zip \
+cp bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
    ~/Library/Application\ Support/Godot/export_templates/4.6.2.stable/web_nothreads_release.zip
 
 # Export
@@ -181,7 +180,7 @@ Defined in `.github/workflows/webgpu_tests.yml`. Runs on push/PR to `webgpu-4.6.
 │  ┌────────────────┐  ┌──────────────┐                           │
 │  │ validate-spirv │  │ smoke-test   │                           │
 │  │ All SPIR-V     │  │ Headless     │                           │
-│  │ through naga   │  │ Chrome run   │                           │
+│  │ through Tint   │  │ Chrome run   │                           │
 │  └────────────────┘  └──────────────┘                           │
 │                                                                 │
 │  ┌─────────────────────────────────────────────────────┐        │
@@ -241,7 +240,7 @@ See [test_project/README.md](test_project/README.md) for the full shader list.
 
 ## Expected Failures
 
-`shader_corpus/expected_failures.json` tracks 32 shader variants that fail naga validation offline but work at runtime. These are Vulkan-only variants the WebGPU path never uses:
+`shader_corpus/expected_failures.json` tracks shader variants that fail Tint validation offline but work at runtime. These are Vulkan-only variants the WebGPU path never uses:
 
 | Category | Count | Reason |
 |----------|-------|--------|
@@ -259,29 +258,13 @@ The validator **passes** as long as no new failures appear beyond this baseline.
 node webgpu_tests/shader_corpus/validate_spirv_dump.mjs /tmp/spirv_dump/ --update-baseline
 ```
 
-## Rebuilding naga-converter WASM
-
-If you modify `drivers/webgpu/naga-converter/src/lib.rs`:
-
-```bash
-cd drivers/webgpu/naga-converter
-wasm-pack build --target web --release
-cp pkg/naga_converter_bg.wasm prebuilt/naga_wasm_bg.wasm
-```
-
-Then rebuild the web template to pick up the new WASM in the export zip:
-```bash
-source ~/emsdk/emsdk_env.sh
-scons platform=web target=template_release webgpu=yes opengl3=no threads=no -j$(nproc)
-```
-
 ## Troubleshooting
 
 **"No .spv files found"** — You ran with `--headless`. Use `--quit-after 10` instead (shaders need rendering to compile).
 
-**"FATAL: Failed to initialize naga WASM"** — The WASM binary format may have changed after a rebuild. Make sure `run_tests.mjs` and `validate_spirv_dump.mjs` point to the correct WASM (currently `prebuilt/naga_wasm_bg.wasm`).
+**"tint_convert_cli not found"** — The shader corpus and SPIR-V dump validator use a standalone Tint CLI for offline validation. If it's not available, the tests skip gracefully — runtime Tint (linked into the engine WASM) handles all conversion.
 
-**New shader failures after engine changes** — Run validation, review the new errors. If they're Vulkan-only variants, update the baseline. If they affect WebGPU runtime, fix the naga-converter or the GLSL.
+**New shader failures after engine changes** — Run validation, review the new errors. If they're Vulkan-only variants, update the baseline. If they affect WebGPU runtime, fix the GLSL or SPIR-V preprocessing.
 
 **Smoke test timeout** — The engine has 2 minutes to start and report PASS. If it hangs, check Chrome console output with `VERBOSE=1 node smoke_test.mjs ./export/`.
 

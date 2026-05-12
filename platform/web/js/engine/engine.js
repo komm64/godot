@@ -205,15 +205,13 @@ const Engine = (function () {
 				// If WebGPU rendering is requested, pre-initialize a GPUDevice
 				// before the WASM module starts (the C++ side expects it in
 				// Module.preinitializedWebGPUDevice).
-				// Also load the naga SPIR-V→WGSL converter (WASM module).
+				// SPIR-V→WGSL conversion is handled by Tint, compiled directly
+				// into the engine WASM — no separate translator module needed.
 				let webgpuReady = Promise.resolve();
 				if (me.config.renderingDriver === 'webgpu' && !me.config.preinitializedWebGPUDevice) {
-					webgpuReady = Promise.all([
-						Engine.requestWebGPUDevice().then(function (device) {
-							me.config.preinitializedWebGPUDevice = device;
-						}),
-						Engine.loadNagaSpirvToWgsl(exe),
-					]);
+					webgpuReady = Engine.requestWebGPUDevice().then(function (device) {
+						me.config.preinitializedWebGPUDevice = device;
+					});
 				}
 
 				return webgpuReady.then(function () {
@@ -282,119 +280,6 @@ const Engine = (function () {
 		Engine.prototype['unload'] = Engine.unload;
 		return new Engine(initConfig);
 	}
-
-	/**
-	 * Load the naga SPIR-V → WGSL converter WASM module and expose
-	 * ``window.nagaSpirvToWgsl(Uint8Array) → string`` for the C++ engine.
-	 * The ``.wasm`` file is expected at ``naga_wasm_bg.wasm`` next to the
-	 * engine executable.
-	 *
-	 * @param {string} exeBase Base name of the engine executable (used to
-	 *   resolve the naga WASM path relative to the engine).
-	 * @returns {Promise} Resolves when naga is ready.
-	 * @function Engine.loadNagaSpirvToWgsl
-	 */
-	Engine.loadNagaSpirvToWgsl = function (exeBase) {
-		if (typeof window !== 'undefined' && typeof window.nagaSpirvToWgsl === 'function') {
-			return Promise.resolve(); // Already loaded.
-		}
-		// Derive the URL relative to the engine executable.
-		let base = '';
-		if (exeBase) {
-			const idx = exeBase.lastIndexOf('/');
-			if (idx >= 0) {
-				base = exeBase.substring(0, idx + 1);
-			}
-		}
-		const wasmUrl = base + 'naga_wasm_bg.wasm';
-		return fetch(wasmUrl).then(function (resp) {
-			if (!resp.ok) {
-				throw new Error('Failed to fetch naga WASM: ' + resp.statusText);
-			}
-			return resp.arrayBuffer();
-		}).then(function (buf) {
-			// Inline mini-runtime for the naga wasm-bindgen module.
-			// This mirrors the generated naga_wasm.js helpers but avoids
-			// ES module syntax so it works in classic-script contexts.
-			var nagaWasm = null;
-			var cachedMem = null;
-
-			function mem() {
-				if (cachedMem === null || cachedMem.byteLength === 0) {
-					cachedMem = new Uint8Array(nagaWasm.memory.buffer);
-				}
-				return cachedMem;
-			}
-
-			var WASM_VEC_LEN = 0;
-			function passArray8(arg) {
-				var ptr = nagaWasm.__wbindgen_malloc(arg.length, 1) >>> 0;
-				mem().set(arg, ptr);
-				WASM_VEC_LEN = arg.length;
-				return ptr;
-			}
-
-			var cachedDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
-			cachedDecoder.decode();
-			function getString(ptr, len) {
-				ptr = ptr >>> 0;
-				return cachedDecoder.decode(mem().subarray(ptr, ptr + len));
-			}
-
-			function takeFromTable(idx) {
-				var val = nagaWasm.__wbindgen_externrefs.get(idx);
-				nagaWasm.__externref_table_dealloc(idx);
-				return val;
-			}
-
-			// Build the import object expected by wasm-bindgen output.
-			var imports = {
-				'./naga_converter_bg.js': {
-					__wbg_Error_83742b46f01ce22d: function (arg0, arg1) {
-						return new Error(getString(arg0, arg1));
-					},
-					__wbg_log_2173688eed3d74ed: function (arg0, arg1) {
-						console.log(getString(arg0, arg1));
-					},
-					__wbindgen_init_externref_table: function () {
-						var table = nagaWasm.__wbindgen_externrefs;
-						var offset = table.grow(4);
-						table.set(0, undefined);
-						table.set(offset + 0, undefined);
-						table.set(offset + 1, null);
-						table.set(offset + 2, true);
-						table.set(offset + 3, false);
-					},
-				},
-			};
-
-			var mod = new WebAssembly.Module(buf);
-			var inst = new WebAssembly.Instance(mod, imports);
-			nagaWasm = inst.exports;
-			cachedMem = null;
-			nagaWasm.__wbindgen_start();
-
-			// Expose the converter globally for the C++ EM_ASM call.
-			// Uses the override pipeline so specialization constants become
-			// WGSL `@id(N) override` declarations instead of folded constants.
-			// For shaders without spec constants, output is identical.
-			window.nagaSpirvToWgsl = function (spirvBytes) {
-				var ptr0 = passArray8(spirvBytes);
-				var len0 = WASM_VEC_LEN;
-				var ret = nagaWasm.spirv_to_wgsl_with_overrides(ptr0, len0);
-				var ptr2 = ret[0];
-				var len2 = ret[1];
-				if (ret[3]) {
-					var err = takeFromTable(ret[2]);
-					throw new Error('SPIR-V→WGSL: ' + (err && err.message ? err.message : err));
-				}
-				var result = getString(ptr2, len2);
-				nagaWasm.__wbindgen_free(ptr2, len2, 1);
-				return result;
-			};
-			console.log('[Godot] naga SPIR-V→WGSL converter loaded (override mode).');
-		});
-	};
 
 	/**
 	 * Request a WebGPU device from the browser. Returns a Promise that resolves
@@ -500,7 +385,6 @@ const Engine = (function () {
 	SafeEngine['load'] = Engine.load;
 	SafeEngine['unload'] = Engine.unload;
 	SafeEngine['requestWebGPUDevice'] = Engine.requestWebGPUDevice;
-	SafeEngine['loadNagaSpirvToWgsl'] = Engine.loadNagaSpirvToWgsl;
 
 	// Feature-detection utilities.
 	SafeEngine['isWebGLAvailable'] = Features.isWebGLAvailable;

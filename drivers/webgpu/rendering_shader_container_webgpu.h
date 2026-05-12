@@ -95,7 +95,7 @@ public:
 	virtual ShaderSpirvVersion get_shader_spirv_version() const override {
 		// SPIR-V 1.3 — required so glslang emits SSBOs as StorageClass::StorageBuffer
 		// (not the old-style StorageClass::Uniform + BufferBlock used in SPIR-V 1.0).
-		// NAGA correctly converts StorageClass::StorageBuffer → var<storage, read/read_write>.
+		// Tint correctly converts StorageClass::StorageBuffer → var<storage, read/read_write>.
 		// SPIR-V 1.3 requires Vulkan 1.1 client, which matches our language version.
 		return SHADER_SPIRV_VERSION_1_3;
 	}

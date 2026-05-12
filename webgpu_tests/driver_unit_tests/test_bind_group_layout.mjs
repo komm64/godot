@@ -149,7 +149,7 @@ function uniformTypeToLayoutEntry(uniformType, binding, visibility, options = {}
  * Split a combined image-sampler into separate texture + sampler entries.
  * This is the core transform needed for WebGPU (which doesn't support combined samplers).
  *
- * naga-converter remaps: original binding N -> sampler at N*2, texture at N*2+1
+ * SPIR-V preprocessing remaps: original binding N -> sampler at N*2, texture at N*2+1
  */
 function splitCombinedSampler(binding, visibility, options = {}) {
     const samplerBinding = binding * 2;

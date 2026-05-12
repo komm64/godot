@@ -113,7 +113,7 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	static constexpr uint32_t PUSH_CONSTANT_RING_SIZE = 512 * 1024; // 512KB = 2048 draw calls at 256B/slot
 	static constexpr uint32_t PUSH_CONSTANT_SLOT_ALIGNMENT = 256;
 	// Binding slot used for the PC ring buffer inside group 3.
-	// Must match PC_RING_BUFFER_BINDING in tmp/naga-converter/src/lib.rs.
+	// Must match the binding used in spirv_preprocess::convert_push_constants_to_uniforms().
 	// Chosen high enough to avoid collision with split combined-sampler bindings
 	// (original binding N → sampler@N*2, image@N*2+1; max original ~20 → max split ~41).
 	static constexpr uint32_t PUSH_CONSTANT_RING_BINDING = 120;
@@ -410,7 +410,7 @@ public:
 	// SHADER
 	// -----------------------------------------------------------------------
 
-	/// Create a shader from a container (SPIR-V). Translates SPIR-V → WGSL via Naga
+	/// Create a shader from a container (SPIR-V). Translates SPIR-V → WGSL via Tint
 	/// at runtime, splits combined image-samplers, and remaps push constants to storage buffer.
 	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override final;
 	/// Get the layout hash for a shader (used for pipeline cache keying).

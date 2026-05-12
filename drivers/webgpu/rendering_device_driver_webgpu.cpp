@@ -34,13 +34,18 @@
 #include "rendering_context_driver_webgpu.h"
 #include "rendering_shader_container_webgpu.h"
 #include "pixel_formats_webgpu.h"
+#include "spirv_preprocess.h"
 
 #include "core/templates/hash_map.h"
 #include "core/templates/hashfuncs.h"
 
+#include "tint_wrapper.h"
+
 #include <webgpu/webgpu.h>
 #include <emscripten/emscripten.h>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 // Define WEBGPU_VERBOSE to enable diagnostic console.log prints in the browser.
 // These are disabled by default for production builds.
@@ -75,17 +80,56 @@ static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_
 	fence->signaled = true;
 }
 
+// Parse "@group(G[u]) @binding(B[u])" from a WGSL string.
+// Handles the optional 'u'/'i' suffix that Tint emits for integer literals.
+// Returns true and sets r_grp/r_bnd on success.
+static bool parse_group_binding(const char *p, unsigned int &r_grp, unsigned int &r_bnd) {
+	if (strncmp(p, "@group(", 7) != 0) {
+		return false;
+	}
+	const char *g = p + 7;
+	char *end = nullptr;
+	unsigned long grp = strtoul(g, &end, 10);
+	if (end == g) {
+		return false;
+	}
+	if (*end == 'u' || *end == 'i') {
+		end++;
+	}
+	if (*end != ')') {
+		return false;
+	}
+	end++; // skip ')'
+	while (*end == ' ') {
+		end++;
+	}
+	if (strncmp(end, "@binding(", 9) != 0) {
+		return false;
+	}
+	const char *b = end + 9;
+	unsigned long bnd = strtoul(b, &end, 10);
+	if (end == b) {
+		return false;
+	}
+	if (*end == 'u' || *end == 'i') {
+		end++;
+	}
+	if (*end != ')') {
+		return false;
+	}
+	r_grp = (unsigned int)grp;
+	r_bnd = (unsigned int)bnd;
+	return true;
+}
+
 // =============================================================================
-// SPIR-V → WGSL conversion cache
+// SPIR-V → WGSL conversion (Tint + SPIR-V preprocessing)
 // =============================================================================
 //
 // emdawnwebgpu only accepts WGSL, so every shader stage must be converted from
-// SPIR-V via naga (Rust→WASM, exposed as window.nagaSpirvToWgsl). naga is the
-// dominant cost at startup (~40 ms × ~383 stages ≈ 15 s) and is serialized on
-// the main thread. Many shader stages share SPIR-V bytes (specialization
-// variants of the same base), so cache the post-naga WGSL keyed on a hash of
-// the SPIR-V bytes. The caller still owns the returned buffer (must `free()`),
-// so on a cache hit we malloc + memcpy a fresh copy.
+// SPIR-V. Previously this used naga (Rust→WASM); now it uses Tint (C++, linked
+// directly). SPIR-V preprocessing (push constant rewriting, sampler splitting,
+// Y-flip, etc.) runs before Tint's SpirvToWgsl.
 //
 // Cache lives for process lifetime — the SPIR-V → WGSL mapping is independent
 // of the WebGPU device, and a single process never creates more than ~1k
@@ -121,8 +165,62 @@ static const char *_lookup_precompiled_wgsl(uint64_t p_spv_hash) {
 	return nullptr;
 }
 
+// Run SPIR-V preprocessing passes and translate to WGSL via Tint.
+// Returns a malloc'd null-terminated WGSL string, or nullptr on failure.
+static char *_translate_spirv_to_wgsl(const uint8_t *p_spv_ptr, int p_spv_size) {
+	if (p_spv_size < 20 || (p_spv_size % 4) != 0) {
+		return nullptr;
+	}
+
+	// Wrap raw bytes in a Vector for the preprocessing API.
+	Vector<uint8_t> spv;
+	spv.resize(p_spv_size);
+	memcpy(spv.ptrw(), p_spv_ptr, p_spv_size);
+
+	// SPIR-V preprocessing pipeline:
+	spv = spirv_preprocess::freeze_spec_constant_ops(spv);
+	spv = spirv_preprocess::rewrite_copy_logical(spv);
+	spv = spirv_preprocess::rewrite_terminate_invocation(spv);
+	spv = spirv_preprocess::convert_push_constants_to_uniforms(spv);
+	spv = spirv_preprocess::split_combined_samplers(spv);
+	auto depth_result = spirv_preprocess::fix_depth2_images(spv);
+	spv = depth_result.bytes;
+	spv = spirv_preprocess::negate_position_y(spv);
+	spv = spirv_preprocess::strip_restrict_decoration(spv);
+	spv = spirv_preprocess::strip_memory_barrier(spv);
+	spv = spirv_preprocess::fix_nonfinite_literals(spv);
+	spv = spirv_preprocess::flatten_binding_arrays(spv);
+
+	// Convert to uint32_t words for Tint.
+	int word_count = spv.size() / 4;
+	std::vector<uint32_t> spirv_words(word_count);
+	memcpy(spirv_words.data(), spv.ptr(), spv.size());
+
+	// Call Tint SPIR-V → WGSL via the wrapper (isolates C++20 from Godot's build).
+	char *error_msg = nullptr;
+	char *out = tint_wrapper_spirv_to_wgsl(spirv_words.data(), spirv_words.size(), &error_msg);
+	if (!out) {
+		if (error_msg) {
+			// Truncate the error message: Tint includes the full SPIR-V disassembly
+			// which floods the console. Keep first 1500 chars for diagnostics.
+			String err_str = String::utf8(error_msg);
+			// Replace newlines with pipes to prevent console splitting.
+			err_str = err_str.replace("\n", " | ");
+			if (err_str.length() > 1500) {
+				err_str = err_str.left(1500) + "... [truncated]";
+			}
+			ERR_PRINT(vformat("Tint SPIR-V→WGSL failed: %s", err_str));
+			free(error_msg);
+		} else {
+			ERR_PRINT("Tint SPIR-V→WGSL failed (unknown error)");
+		}
+		return nullptr;
+	}
+	return out;
+}
+
 // Returns a malloc'd null-terminated WGSL string (caller must free), or nullptr on
-// failure. Checks: (1) in-memory cache, (2) precompiled table, (3) naga fallback.
+// failure. Checks: (1) in-memory cache, (2) precompiled table, (3) Tint fallback.
 static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
 	uint32_t hash_lo = hash_murmur3_buffer(p_spv_ptr, p_spv_size);
 	uint32_t hash_hi = hash_murmur3_buffer(p_spv_ptr, p_spv_size, 0x9E3779B9);
@@ -140,7 +238,7 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
 		return out;
 	}
 
-	// 2. Check build-time precompiled table (eliminates naga for ubershaders).
+	// 2. Check build-time precompiled table (eliminates runtime translation for ubershaders).
 	const char *precompiled = _lookup_precompiled_wgsl(spv_hash);
 	if (precompiled) {
 		_spv_to_wgsl_precompiled_hits++;
@@ -157,39 +255,10 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
 		return out;
 	}
 
-	// 3. Fall back to naga (for specialized shaders and shaders not in the table).
+	// 3. Fall back to Tint (for specialized shaders and shaders not in the table).
 	_spv_to_wgsl_cache_misses++;
 
-	char *wgsl_str = (char *)(uintptr_t)MAIN_THREAD_EM_ASM_PTR({
-		try {
-			if (typeof window.nagaSpirvToWgsl !== 'function') {
-				console.error('naga SPIR-V\u2192WGSL converter not loaded!');
-				return 0;
-			}
-			var spirvBytes = new Uint8Array(HEAPU8.buffer, $0, $1);
-			var wgsl = window.nagaSpirvToWgsl(spirvBytes);
-			if (!wgsl) { return 0; }
-
-			// Dump SPIR-V hash + WGSL for precompilation capture.
-			// window._wgslDump is set by the capture script.
-			if (typeof window._wgslDump === 'object') {
-				var hashKey = '0x' +
-					($2 >>> 0).toString(16).padStart(8, '0') +
-					($3 >>> 0).toString(16).padStart(8, '0');
-				if (!window._wgslDump[hashKey]) {
-					window._wgslDump[hashKey] = wgsl;
-				}
-			}
-
-			var len = lengthBytesUTF8(wgsl) + 1;
-			var ptr = _malloc(len);
-			stringToUTF8(wgsl, ptr, len);
-			return ptr;
-		} catch (e) {
-			console.error('[SHADER] NAGA conversion exception:', e.message || e);
-			return 0;
-		}
-	}, p_spv_ptr, p_spv_size, hash_hi, hash_lo);
+	char *wgsl_str = _translate_spirv_to_wgsl(p_spv_ptr, p_spv_size);
 
 	if (wgsl_str) {
 		_spv_to_wgsl_cache[spv_hash] = String(wgsl_str);
@@ -197,7 +266,7 @@ static char *_spv_to_wgsl_cached(const uint8_t *p_spv_ptr, int p_spv_size) {
 
 	WEBGPU_DIAG({
 		if ($2 <= 5 || ($2 % 50) === 0) {
-			console.log('[SHADER] WGSL stats: precompiled_hits=' + $0 + ' cache_hits=' + $1 + ' naga_misses=' + $2);
+			console.log('[SHADER] WGSL stats: precompiled_hits=' + $0 + ' cache_hits=' + $1 + ' tint_misses=' + $2);
 		}
 	}, _spv_to_wgsl_precompiled_hits, _spv_to_wgsl_cache_hits, _spv_to_wgsl_cache_misses);
 
@@ -353,6 +422,9 @@ RenderingDeviceDriverWebGPU::~RenderingDeviceDriverWebGPU() {
 // =============================================================================
 
 Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t p_frame_count) {
+	// Initialize Tint shader compiler (SPIR-V → WGSL).
+	tint_wrapper_initialize();
+
 	device = context_driver->get_device();
 	queue = context_driver->get_queue();
 	ERR_FAIL_COND_V(device == nullptr, ERR_CANT_CREATE);
@@ -3131,7 +3203,7 @@ void RenderingDeviceDriverWebGPU::framebuffer_free(FramebufferID p_framebuffer) 
 // =============================================================================
 
 // Helper: map Godot stage mask bits to WGPUShaderStage visibility flags.
-// After NAGA processing (comparison splitting, type changes), the WGSL shader
+// After Tint processing (comparison splitting, type changes), the WGSL shader
 // may reference bindings in stages not predicted by the original SPIR-V reflection.
 // To avoid visibility mismatches, OR in both Vertex and Fragment for any render
 // shader that uses either stage. Compute stays separate.
@@ -3166,7 +3238,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 	String error_text;
 
-	// Maps (set_index << 16 | binding) to the WGSL texture view dimension detected from NAGA output.
+	// Maps (set_index << 16 | binding) to the WGSL texture view dimension detected from Tint output.
 	// Used so SAMPLER_WITH_TEXTURE and TEXTURE BGL entries get the correct viewDimension.
 	HashMap<uint32_t, WGPUTextureViewDimension> wgsl_tex_dims;
 
@@ -3174,14 +3246,14 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	// false if read-write (var<storage, read_write>). Used to correctly set BGL buffer type for SSBOs.
 	HashMap<uint32_t, bool> wgsl_ssbo_readonly;
 
-	// Maps (set_index << 16 | binding) → storage texture access mode detected from NAGA WGSL output.
-	// NAGA emits: texture_storage_2d<format, write/read/read_write>. Used for IMAGE BGL entries.
+	// Maps (set_index << 16 | binding) → storage texture access mode detected from Tint WGSL output.
+	// Tint emits: texture_storage_2d<format, write/read/read_write>. Used for IMAGE BGL entries.
 	HashMap<uint32_t, WGPUStorageTextureAccess> wgsl_storage_tex_access;
 
 	// Maps (set_index << 16 | binding) → storage texture format (from WGSL scan). Used for IMAGE BGL entries.
 	HashMap<uint32_t, WGPUTextureFormat> wgsl_storage_tex_format;
 
-	// Maps (set_index << 16 | binding) → true if NAGA output has var<uniform> (e.g. for texture buffers).
+	// Maps (set_index << 16 | binding) → true if Tint output has var<uniform> (e.g. for texture buffers).
 	HashMap<uint32_t, bool> wgsl_is_uniform;
 
 	// Maps (set_index << 16 | binding) → true if the WGSL has texture_depth_* at this binding.
@@ -3195,7 +3267,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 	// texture.multisampled=true to match sampler2DMS (GLSL) bindings.
 	HashMap<uint32_t, bool> wgsl_is_multisampled_texture;
 
-	// Depth alias bindings: NAGA splits mixed-usage depth textures into two globals
+	// Depth alias bindings: Tint splits mixed-usage depth textures into two globals
 	// (one Depth at binding B, one Float alias at binding B+1). Track (set,B+1) pairs
 	// so we can add extra BGL and bind group entries.
 	// Maps (set_index << 16 | alias_binding) → depth_binding (the adjacent depth texture).
@@ -3237,9 +3309,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 		// emdawnwebgpu does NOT support WGPUShaderSourceSPIRV — it's a thin wrapper
 		// around the browser's WebGPU API which only accepts WGSL.
-		// We convert SPIR-V → WGSL at runtime using naga (compiled to WASM).
+		// We convert SPIR-V → WGSL at runtime using Tint (C++, linked directly).
 		// Many shader stages share SPIR-V bytes; _spv_to_wgsl_cached looks up a
-		// process-lifetime cache before invoking naga (see helper definition).
+		// process-lifetime cache before invoking Tint (see helper definition).
 		char *wgsl_str = _spv_to_wgsl_cached(spv_bytes.ptr(), (int)spv_bytes.size());
 
 		if (wgsl_str == nullptr) {
@@ -3324,7 +3396,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		}
 
 		// WebGPU restriction: Storage buffers with read_write access cannot be used in vertex shaders.
-		// NAGA generates var<storage, read_write> for any SSBO without NonWritable decoration.
+		// Tint generates var<storage, read_write> for any SSBO without NonWritable decoration.
 		// For render stages (vertex + fragment), demote all read_write storage to read (in-place,
 		// same string length). This ensures the BGL can use ReadOnlyStorage with Vertex|Fragment
 		// visibility. Compute stages keep read_write for actual writes.
@@ -3338,7 +3410,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		}
 
 		// Chrome doesn't support the 'sized_binding_array' WGSL language feature.
-		// Naga converts GLSL sampler arrays like "sampler2DArray tex[N]" to
+		// Tint converts GLSL sampler arrays like "sampler2DArray tex[N]" to
 		// "binding_array<texture_2d_array<f32>, N>" in WGSL. Fix: replace
 		// "binding_array<T, N>" with just "T", and fix "varname[expr]" → "varname".
 		// For N>1 (e.g. lightmap_textures[16]), this degrades to single-element
@@ -3387,7 +3459,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				}
 			}
 			// Replace VAR_NAME[any_expr] with VAR_NAME for all unwrapped binding arrays.
-			// Naga may use a variable index (e.g. varname[_e889]) not just varname[0].
+			// Tint may use a variable index (e.g. varname[_e889]) not just varname[0].
 			for (const String &var : binding_array_vars) {
 				int64_t vlen = (int64_t)var.length();
 				int64_t search_pos = 0;
@@ -3426,7 +3498,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		// read_write storage textures into separate write + read (shadow) bindings.
 		// Safari rejects read_write storage texture access at BGL validation.
 		// The shadow read binding uses the odd slot (B+1) which is free for IMAGE
-		// types due to NAGA's binding doubling (even=resource, odd=sampler for combined).
+		// types due to preprocessing's binding doubling (even=resource, odd=sampler for combined).
 		if (!has_rw_storage_textures && strstr(wgsl_str, "read_write>")) {
 			struct RWSplitInfo {
 				uint32_t grp, bnd;
@@ -3439,7 +3511,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				const char *p = wgsl_str;
 				while ((p = strstr(p, "@group(")) != nullptr) {
 					unsigned int grp = 0, bnd = 0;
-					if (sscanf(p, "@group(%u) @binding(%u)", &grp, &bnd) != 2) { p++; continue; }
+					if (!parse_group_binding(p, grp, bnd)) { p++; continue; }
 					const char *semi = strchr(p, ';');
 					if (!semi) { p++; continue; }
 					const char *rw = strstr(p, "read_write>");
@@ -3576,7 +3648,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				const char *p = wgsl_str;
 				while ((p = strstr(p, "@group(")) != nullptr) {
 					unsigned int grp = 0, bnd = 0;
-					if (sscanf(p, "@group(%u) @binding(%u)", &grp, &bnd) != 2) { p++; continue; }
+					if (!parse_group_binding(p, grp, bnd)) { p++; continue; }
 					const char *semi = strchr(p, ';');
 					if (!semi) { p++; continue; }
 					// Look for ", read>" or ",read>" but NOT "read_write>"
@@ -3737,13 +3809,13 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 
 		// Scan WGSL for texture dimension declarations so the BGL uses the right viewDimension.
-		// NAGA format: "@group(G) @binding(B) var NAME: texture_TYPE<...>;"
+		// Tint format: "@group(G) @binding(B) var NAME: texture_TYPE<...>;"
 		// Also detects sampler / sampler_comparison types.
 		{
 			const char *p = wgsl_str;
 			while ((p = strstr(p, "@group(")) != nullptr) {
 				unsigned int grp = 0, bnd = 0;
-				if (sscanf(p, "@group(%u) @binding(%u)", &grp, &bnd) == 2) {
+				if (parse_group_binding(p, grp, bnd)) {
 					// Find the ':' that separates the variable name from the type.
 					// This avoids matching "sampler" in variable names like "shadow_sampler".
 					const char *colon = strchr(p, ':');
@@ -3821,7 +3893,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 							wgsl_is_depth_texture[key] = true;
 						}
 					}
-					// Check for depth alias variable: NAGA names it "*_depth_alias".
+					// Check for depth alias variable: Tint names it "*_depth_alias".
 					// The variable name is between "var " and ":".
 					{
 						const char *var_kw = strstr(p, "var ");
@@ -3853,9 +3925,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 			}
 		}
 
-		// Parse storage buffer binding usage metadata from the naga converter.
+		// Parse storage buffer binding usage metadata from the WGSL translator.
 		// Each "//SSBO_USED:group,binding" line at the top of the WGSL indicates
-		// a storage buffer that the entry point actually uses (via naga's call-graph
+		// a storage buffer that the entry point actually uses (via Tint's call-graph
 		// reachability analysis). This lets us set per-stage BGL visibility so
 		// fragment-only storage buffers don't consume vertex buffer slots on Metal.
 		// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
@@ -3884,14 +3956,14 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		}
 
 		// Scan WGSL for storage buffer access modes and uniform bindings.
-		// NAGA actual output formats:
+		// Tint actual output formats:
 		//   - Read-write: "var<storage, read_write>"  (space after comma)
-		//   - Read-only:  "var<storage>"              (NO access modifier — NAGA omits "read" for LOAD-only)
+		//   - Read-only:  "var<storage>"              (NO access modifier — Tint omits "read" for LOAD-only)
 		{
 			const char *p = wgsl_str;
 			while ((p = strstr(p, "@group(")) != nullptr) {
 				unsigned int grp = 0, bnd = 0;
-				if (sscanf(p, "@group(%u) @binding(%u)", &grp, &bnd) == 2) {
+				if (parse_group_binding(p, grp, bnd)) {
 					const char *fwd = p;
 					const char *limit = fwd + 256;
 					while (fwd < limit && *fwd && *fwd != ';') {
@@ -3922,12 +3994,12 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		}
 
 		// Scan WGSL for storage texture access mode and format.
-		// NAGA format: "@group(G) @binding(B) var name: texture_storage_*<format, access>;"
+		// Tint format: "@group(G) @binding(B) var name: texture_storage_*<format, access>;"
 		{
 			const char *p = wgsl_str;
 			while ((p = strstr(p, "@group(")) != nullptr) {
 				unsigned int grp = 0, bnd = 0;
-				if (sscanf(p, "@group(%u) @binding(%u)", &grp, &bnd) == 2) {
+				if (parse_group_binding(p, grp, bnd)) {
 					const char *fwd = p;
 					const char *limit = fwd + 300;
 					while (fwd < limit && *fwd && *fwd != ';') {
@@ -4001,7 +4073,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		}
 
 		// Extract per-stage override constant IDs from WGSL (@id(N) override ...).
-		// These are present when naga preserved specialization constants as overrides.
+		// These are present when Tint preserved specialization constants as overrides.
 		// Only include overrides whose variable is actually referenced in the shader
 		// body (beyond the declaration line). Safari's WebGPU WGSL→MSL compiler
 		// crashes when pipeline constants are passed for unreferenced overrides.
@@ -4131,7 +4203,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_SAMPLER: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					// FLATTEN-BA pass removes all binding_array<T,N> from WGSL,
 					// so layout entries are always non-array (no bindingArraySize).
@@ -4146,7 +4218,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_INPUT_ATTACHMENT: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					// FLATTEN-BA pass removes all binding_array<T,N> from WGSL,
 					// so layout entries are always non-array (no bindingArraySize).
@@ -4166,7 +4238,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 
 				case RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE: {
 					// Combined sampler+texture split by our SPIR-V preprocessor:
-					// Sampler at binding*2+0, texture at binding*2+1 in the modified SPIR-V → matches NAGA WGSL output.
+					// Sampler at binding*2+0, texture at binding*2+1 in the modified SPIR-V → matches Tint WGSL output.
 					WGPUBindGroupLayoutEntry &samp_entry = entries[e_idx++];
 					samp_entry = {};
 					samp_entry.binding = u.binding * 2 + 0;
@@ -4202,7 +4274,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_IMAGE: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
 					if (wgsl_read_storage_to_sampled.has(k)) {
@@ -4227,7 +4299,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_UNIFORM_BUFFER: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					entry.buffer.type = WGPUBufferBindingType_Uniform;
 					entry.buffer.hasDynamicOffset = false;
@@ -4238,7 +4310,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_STORAGE_BUFFER: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
 					// Check if WGSL scan shows this is actually a storage texture.
@@ -4252,12 +4324,12 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 						entry.storageTexture.viewDimension = wgsl_tex_dims.has(k) ? wgsl_tex_dims[k] : WGPUTextureViewDimension_2D;
 
 					} else if (wgsl_is_uniform.has(k) && wgsl_is_uniform[k]) {
-						// NAGA emitted var<uniform> for this binding.
+						// Tint emitted var<uniform> for this binding.
 						entry.buffer.type = WGPUBufferBindingType_Uniform;
 					} else {
 						bool is_readonly = wgsl_ssbo_readonly.has(k) ? wgsl_ssbo_readonly[k] : !u.writable;
 						entry.buffer.type = is_readonly ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
-						// Use per-stage visibility from naga metadata for storage buffers.
+						// Use per-stage visibility from Tint metadata for storage buffers.
 						// Firefox/wgpu enforces Metal's limit of 8 storage buffers per shader stage.
 						if (wgsl_buffer_stages.has(k)) {
 							entry.visibility = (WGPUShaderStage)wgsl_buffer_stages[k];
@@ -4275,7 +4347,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					entry.buffer.type = WGPUBufferBindingType_Uniform;
 					entry.buffer.hasDynamicOffset = true;
@@ -4286,7 +4358,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					bool is_storage_tex = false;
 					{ uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
@@ -4304,7 +4376,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					  } else {
 						  bool is_readonly = wgsl_ssbo_readonly.has(k) ? wgsl_ssbo_readonly[k] : !u.writable;
 						  entry.buffer.type = is_readonly ? WGPUBufferBindingType_ReadOnlyStorage : WGPUBufferBindingType_Storage;
-						  // Use per-stage visibility from naga metadata (see UNIFORM_TYPE_STORAGE_BUFFER above).
+						  // Use per-stage visibility from Tint metadata (see UNIFORM_TYPE_STORAGE_BUFFER above).
 						  if (wgsl_buffer_stages.has(k)) {
 							  entry.visibility = (WGPUShaderStage)wgsl_buffer_stages[k];
 						  } else if (!wgsl_buffer_stages.is_empty()) {
@@ -4322,9 +4394,9 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
-					// NAGA may convert TBOs to var<uniform> or var<storage,read> depending on usage.
+					// Tint may convert TBOs to var<uniform> or var<storage,read> depending on usage.
 					{ uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
 					  if (wgsl_is_uniform.has(k) && wgsl_is_uniform[k]) {
 						  entry.buffer.type = WGPUBufferBindingType_Uniform;
@@ -4341,10 +4413,10 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 				case RDD::UNIFORM_TYPE_IMAGE_BUFFER: {
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					uint32_t k = ((uint32_t)set << 16) | (u.binding * 2);
-					// NAGA may convert image buffers to texture_storage_*.
+					// Tint may convert image buffers to texture_storage_*.
 					if (wgsl_storage_tex_format.has(k)) {
 						WGPUTextureFormat fmt = wgsl_storage_tex_format[k];
 						WGPUStorageTextureAccess access = wgsl_storage_tex_access.has(k)
@@ -4365,7 +4437,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 					WARN_PRINT_ONCE(vformat("WebGPU: unhandled uniform type %d in bind group layout.", (int)u.type));
 					WGPUBindGroupLayoutEntry &entry = entries[e_idx++];
 					entry = {};
-					entry.binding = u.binding * 2; // NAGA doubles all non-combined bindings.
+					entry.binding = u.binding * 2; // Preprocessing doubles all non-combined bindings.
 					entry.visibility = vis;
 					entry.buffer.type = WGPUBufferBindingType_Uniform;
 					bge.layout_entry = entry;
@@ -4374,7 +4446,7 @@ RDD::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Re
 		}
 
 		// Add BGL entries for depth alias variables.
-		// NAGA splits mixed-usage depth textures: original→Depth at binding B,
+		// Tint splits mixed-usage depth textures: original→Depth at binding B,
 		// clone→Float at binding B+1 (named "*_depth_alias").
 		for (const KeyValue<uint32_t, uint32_t> &kv : wgsl_depth_alias_bindings) {
 			uint32_t alias_key = kv.key;
@@ -4702,7 +4774,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 
 		switch (uniform.type) {
 			case UNIFORM_TYPE_SAMPLER: {
-				// NAGA flattens binding arrays to single resources, so only provide
+				// Tint flattens binding arrays to single resources, so only provide
 				// the first sampler. Multiple IDs at the same binding means a
 				// binding array which is reduced to 1 element.
 				if (uniform.ids.size() > 0) {
@@ -4715,7 +4787,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 
 			case UNIFORM_TYPE_TEXTURE:
 			case UNIFORM_TYPE_INPUT_ATTACHMENT: {
-				// NAGA flattens binding arrays to single resources.
+				// Tint flattens binding arrays to single resources.
 				// Only provide the first texture for array bindings.
 				WGPUTextureViewDimension expected_dim = WGPUTextureViewDimension_Undefined;
 				WGPUTextureSampleType expected_sample = WGPUTextureSampleType_Undefined;
@@ -4893,7 +4965,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 			} break;
 
 			case UNIFORM_TYPE_IMAGE: {
-				// NAGA flattens binding arrays to single resources.
+				// Tint flattens binding arrays to single resources.
 				// Only provide the first image for array bindings.
 				if (uniform.ids.size() > 0) {
 					WGTexture *tex = (WGTexture *)(uniform.ids[0].id);
@@ -4911,7 +4983,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 				WGBuffer *buf = (WGBuffer *)(uniform.ids[0].id);
 				ERR_CONTINUE_MSG(buf == nullptr, "WebGPU: null buffer in uniform set.");
 				WGPUBindGroupEntry entry = {};
-				entry.binding = uniform.binding * 2; // NAGA doubles all non-combined bindings.
+				entry.binding = uniform.binding * 2; // Preprocessing doubles all non-combined bindings.
 				entry.buffer = buf->handle;
 				entry.offset = 0;
 				entry.size = buf->size;
@@ -4922,7 +4994,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 				WGBuffer *buf = (WGBuffer *)(uniform.ids[0].id);
 				ERR_CONTINUE_MSG(buf == nullptr, "WebGPU: null buffer in storage uniform.");
 				WGPUBindGroupEntry entry = {};
-				entry.binding = uniform.binding * 2; // NAGA doubles all non-combined bindings.
+				entry.binding = uniform.binding * 2; // Preprocessing doubles all non-combined bindings.
 				entry.offset = 0;
 				// Alias detection: if this exact WGPUBuffer handle was already added as a
 				// storage binding in this set, redirect the duplicate to the stub buffer.
@@ -4968,7 +5040,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 
 			case UNIFORM_TYPE_TEXTURE_BUFFER:
 			case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER: {
-				// NAGA converts texture buffers to uniform/storage buffers. Bind as buffer.
+				// Tint converts texture buffers to uniform/storage buffers. Bind as buffer.
 				WGBuffer *buf = (WGBuffer *)(uniform.ids[0].id);
 				ERR_CONTINUE_MSG(buf == nullptr, "WebGPU: null buffer in texture buffer uniform.");
 				WGPUBindGroupEntry entry = {};
@@ -7469,7 +7541,7 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 		ShaderStage p_stage) {
 	PackedByteArray patched = _patch_spirv_spec_constants(p_spirv, p_constants);
 
-	// Cached SPIR-V → WGSL via naga (see _spv_to_wgsl_cached above).
+	// Cached SPIR-V → WGSL via Tint (see _spv_to_wgsl_cached above).
 	char *wgsl_str = _spv_to_wgsl_cached(patched.ptr(), (int)patched.size());
 
 	if (!wgsl_str) {
@@ -7544,7 +7616,7 @@ WGPUShaderModule RenderingDeviceDriverWebGPU::_create_module_with_spec_constants
 	}
 
 	// FLATTEN-BA: Remove binding_array<T, N> → T (same pass as in shader_create_from_container).
-	// Chrome doesn't support 'sized_binding_array'; Naga emits it for GLSL texture arrays.
+	// Chrome doesn't support 'sized_binding_array'; Tint emits it for GLSL texture arrays.
 	if (strstr(wgsl_str, "binding_array<")) {
 		String ws(wgsl_str);
 		Vector<String> binding_array_vars;
@@ -7662,7 +7734,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 	// If the base shader modules were compiled with WGSL override declarations
 	// (spirv_to_wgsl_with_overrides), we can pass specialization values as
 	// pipeline constants instead of creating specialized shader modules.
-	// This eliminates all runtime SPIR-V patching and naga conversion.
+	// This eliminates all runtime SPIR-V patching and Tint conversion.
 	WGPUShaderModule vertex_module = shader->stage_modules[SHADER_STAGE_VERTEX];
 	WGPUShaderModule fragment_module = shader->stage_modules[SHADER_STAGE_FRAGMENT];
 	WGPUShaderModule specialized_vertex = nullptr;
@@ -7712,7 +7784,7 @@ RDD::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(
 				}
 			}
 		} else {
-			// Legacy path: patch SPIR-V and create specialized modules via naga.
+			// Legacy path: patch SPIR-V and create specialized modules via Tint.
 			if (!shader->stage_spirv[SHADER_STAGE_VERTEX].is_empty()) {
 				specialized_vertex = _create_module_with_spec_constants(
 						shader->stage_spirv[SHADER_STAGE_VERTEX], p_specialization_constants, SHADER_STAGE_VERTEX);

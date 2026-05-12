@@ -216,7 +216,7 @@ scons platform=web target=template_release dlink_enabled=yes webgpu=yes opengl3=
 
 Requirements:
 - Emscripten 4.0.10+ (for the emdawnwebgpu port)
-- No Rust toolchain needed (naga converter ships as a prebuilt WASM binary)
+- No Rust toolchain needed (Tint C++ translator is compiled directly into the engine)
 - Standard Godot build dependencies (SCons, Python, C++ compiler)
 
 ---
@@ -253,7 +253,7 @@ Common questions about the WebGPU backend — architecture, performance, compati
 |--------|-------|
 | Total new code | ~20,000+ lines |
 | Driver implementation | 7,733 lines (single `.cpp`) |
-| Shaders converted | 146 (SPIR-V → WGSL via patched Naga) |
+| Shaders converted | 146 (SPIR-V → WGSL via Tint) |
 | Renderer | Forward Mobile |
 | Performance vs native | ~80% of Vulkan/Metal FPS |
 | Performance vs WebGL | Up to 5x faster |

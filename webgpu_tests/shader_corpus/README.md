@@ -45,5 +45,5 @@ node run_tests.mjs
 ## Dependencies
 
 - **glslangValidator** — For compiling GLSL fixtures to SPIR-V (`brew install glslang`)
-- **Node.js 18+** — For running the WASM-based test harness
-- **naga-converter WASM** — Built from `drivers/webgpu/naga-converter/` (uses prebuilt `out/` artifacts)
+- **Node.js 18+** — For running the test harness
+- **tint_convert_cli** — Standalone Tint CLI (optional; tests skip gracefully if not available)

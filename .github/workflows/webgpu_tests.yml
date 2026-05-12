@@ -63,57 +63,6 @@ jobs:
           retention-days: 7
 
   # ═══════════════════════════════════════════════════════════════════════════════
-  # Naga-Converter Unit Tests: Rust #[test] for each SPIR-V rewriting pass
-  # ═══════════════════════════════════════════════════════════════════════════════
-  naga-unit-tests:
-    runs-on: ubuntu-24.04
-    name: Naga-Converter Unit Tests (Rust)
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run cargo test
-        working-directory: drivers/webgpu/naga-converter
-        run: cargo test --lib
-
-  # ═══════════════════════════════════════════════════════════════════════════════
-  # Naga-Converter Fuzz Tests: cargo-fuzz with 3 targets (60s each)
-  # ═══════════════════════════════════════════════════════════════════════════════
-  naga-fuzz-tests:
-    runs-on: ubuntu-24.04
-    name: Naga-Converter Fuzz Tests
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
-
-      - name: Fuzz spirv_to_wgsl (60s)
-        working-directory: drivers/webgpu/naga-converter
-        run: cargo +nightly fuzz run spirv_to_wgsl -- -max_total_time=60 -max_len=4096
-
-      - name: Fuzz preprocess_passes (60s)
-        working-directory: drivers/webgpu/naga-converter
-        run: cargo +nightly fuzz run preprocess_passes -- -max_total_time=60 -max_len=4096
-
-      - name: Fuzz split_samplers (60s)
-        working-directory: drivers/webgpu/naga-converter
-        run: cargo +nightly fuzz run split_samplers -- -max_total_time=60 -max_len=4096
-
-  # ═══════════════════════════════════════════════════════════════════════════════
   # Driver Unit Tests: Algorithmic correctness of WebGPU driver subsystems
   # ═══════════════════════════════════════════════════════════════════════════════
   driver-unit-tests:
@@ -167,7 +116,7 @@ jobs:
       - name: Build WebGPU export template
         uses: ./.github/actions/godot-build
         with:
-          scons-flags: ${{ env.SCONS_FLAGS }} threads=no webgpu=yes opengl3=no
+          scons-flags: ${{ env.SCONS_FLAGS }} threads=no dlink_enabled=yes webgpu=yes opengl3=no
           platform: web
           target: template_release
 
@@ -188,7 +137,7 @@ jobs:
 
           # Install WebGPU template (editor looks for web_nothreads_release.zip)
           mkdir -p ~/.local/share/godot/export_templates/4.6.2.dev
-          cp bin/godot.web.template_release.wasm32.nothreads.zip \
+          cp bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
              ~/.local/share/godot/export_templates/4.6.2.dev/web_nothreads_release.zip || true
 
           # Run editor headless to import project and compile all shaders
@@ -217,11 +166,11 @@ jobs:
           retention-days: 7
 
   # ═══════════════════════════════════════════════════════════════════════════════
-  # SPIR-V Validation: Validate ALL engine SPIR-V through naga-converter
+  # SPIR-V Validation: Validate ALL engine SPIR-V through Tint
   # ═══════════════════════════════════════════════════════════════════════════════
   validate-spirv:
     runs-on: ubuntu-24.04
-    name: Validate Engine SPIR-V (naga)
+    name: Validate Engine SPIR-V (Tint)
     needs: [build-webgpu]
     timeout-minutes: 10
     steps:
@@ -241,9 +190,9 @@ jobs:
           name: spirv-dump
           path: /tmp/spirv_dump/
 
-      - name: Validate all SPIR-V through naga-converter
+      - name: Validate all SPIR-V through Tint
         run: |
-          echo "Validating engine SPIR-V files through naga..."
+          echo "Validating engine SPIR-V files through Tint..."
           node webgpu_tests/shader_corpus/validate_spirv_dump.mjs /tmp/spirv_dump/
 
   # ═══════════════════════════════════════════════════════════════════════════════
@@ -380,7 +329,7 @@ jobs:
   test-summary:
     runs-on: ubuntu-24.04
     name: Test Summary
-    needs: [shader-corpus, naga-unit-tests, naga-fuzz-tests, driver-unit-tests, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
+    needs: [shader-corpus, driver-unit-tests, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
     if: always()
     steps:
       - name: Check results
@@ -390,8 +339,6 @@ jobs:
           echo "╚══════════════════════════════════════════════════════════╝"
           echo ""
           echo "  Shader Corpus:        ${{ needs.shader-corpus.result }}"
-          echo "  Naga Unit Tests:      ${{ needs.naga-unit-tests.result }}"
-          echo "  Naga Fuzz Tests:      ${{ needs.naga-fuzz-tests.result }}"
           echo "  Driver Unit Tests:    ${{ needs.driver-unit-tests.result }}"
           echo "  SPIR-V Validation:    ${{ needs.validate-spirv.result }}"
           echo "  Smoke Test:           ${{ needs.smoke-test.result }}"
@@ -406,20 +353,12 @@ jobs:
             echo "::error::Shader corpus tests failed"
             FAILED=1
           fi
-          if [ "${{ needs.naga-unit-tests.result }}" = "failure" ]; then
-            echo "::error::Naga-converter unit tests failed"
-            FAILED=1
-          fi
-          if [ "${{ needs.naga-fuzz-tests.result }}" = "failure" ]; then
-            echo "::error::Naga-converter fuzz tests found a crash"
-            FAILED=1
-          fi
           if [ "${{ needs.driver-unit-tests.result }}" = "failure" ]; then
             echo "::error::Driver unit tests failed"
             FAILED=1
           fi
           if [ "${{ needs.validate-spirv.result }}" = "failure" ]; then
-            echo "::error::Engine SPIR-V validation failed — naga cannot convert one or more shaders"
+            echo "::error::Engine SPIR-V validation failed — Tint cannot convert one or more shaders"
             FAILED=1
           fi
           if [ "${{ needs.smoke-test.result }}" = "failure" ]; then
