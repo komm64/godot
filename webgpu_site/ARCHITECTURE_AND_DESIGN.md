@@ -4,7 +4,7 @@
 
 The Godot WebGPU backend is a complete implementation of Godot's `RenderingDeviceDriver` interface targeting the browser's WebGPU API. It enables Godot 4.6 games to run in the browser with the Forward Mobile renderer at performance parity with native builds, despite WebGPU's fundamentally different execution model.
 
-The implementation spans ~11,000 lines of driver-specific code across 8 files under `drivers/webgpu/`, plus a ~1,670-line Rust/WASM shader converter, ~1,200 lines of rendering server modifications, and ~400 lines of platform/web integration. It achieves functional parity with the Mobile renderer path while working within WebGPU's constraints: no push constants, no combined image-samplers, async-only buffer mapping, no explicit barriers, and limited format support.
+The implementation spans ~11,000 lines of driver-specific code across 8 files under `drivers/webgpu/`, plus ~3,000 lines of C++ SPIR-V preprocessing and Tint (Google's Dawn/Chrome shader compiler) linked directly into the engine WASM, ~1,200 lines of rendering server modifications, and ~400 lines of platform/web integration. It achieves functional parity with the Mobile renderer path while working within WebGPU's constraints: no push constants, no combined image-samplers, async-only buffer mapping, no explicit barriers, and limited format support.
 
 ---
 
@@ -46,11 +46,11 @@ The implementation spans ~11,000 lines of driver-specific code across 8 files un
 |   | RenderingShaderContainer  |  +------------------------------+    |
 |   | WebGPU (SPIR-V storage)   |                                      |
 |   +---------------------------+  +------------------------------+    |
-|                                  | naga-converter (Rust/WASM)   |    |
-|   +---------------------------+  | - SPIR-V binary transforms   |    |
+|                                  | spirv_preprocess.cpp (C++)   |    |
+|   +---------------------------+  | - 12 SPIR-V binary passes    |    |
 |   | webgpu_objects.h          |  | - Push constant rewrite      |    |
 |   | - WGBuffer, WGTexture     |  | - Combined sampler split     |    |
-|   | - WGShader, WGPipeline    |  | - WGSL generation via Naga   |    |
+|   | - WGShader, WGPipeline    |  | + Tint (SPIR-V → WGSL)      |    |
 |   | - WGCommandBuffer         |  +------------------------------+    |
 |   +---------------------------+                                      |
 |                                  +------------------------------+    |
@@ -77,8 +77,9 @@ The implementation spans ~11,000 lines of driver-specific code across 8 files un
 | Context Driver | `rendering_context_driver_webgpu.h/cpp` | ~300 | Device/surface lifecycle from JS shell |
 | Object Wrappers | `webgpu_objects.h` | 430 | GPU object wrapper structs |
 | Shader Container | `rendering_shader_container_webgpu.h/cpp` | ~210 | SPIR-V storage + push constant metadata |
-| Naga Converter | `naga-converter/src/lib.rs` | ~1,670 | SPIR-V preprocessing + WGSL output |
-| Naga (patched) | `naga-converter/naga-patched/` | (vendored) | Patched Naga v28 for Godot compat |
+| SPIR-V Preprocessing | `spirv_preprocess.cpp/h` | ~3,000 | 12 binary-level SPIR-V rewriting passes |
+| Tint Wrapper | `tint_wrapper.cpp/h` | ~80 | C-compatible isolation layer for Tint (C++20) |
+| Tint (vendored) | `thirdparty/tint/` | (vendored, 811 files) | Google's Dawn/Chrome SPIR-V → WGSL compiler |
 | Renderer Integration | `servers/rendering/` (42 files) | ~1,224 | API traits, format promotion, batching |
 | Platform/Web | `platform/web/` (7 files) | ~388 | JS engine glue, build config |
 | **Total new code** | | **~12,600** | |
@@ -94,19 +95,19 @@ The implementation spans ~11,000 lines of driver-specific code across 8 files un
 **Why**: WebGPU device creation is async (Promises). Emscripten's main-thread C++ cannot yield to the event loop without Asyncify (abandoned due to binary size doubling and runtime instability). The device must be ready before WASM begins execution.
 
 **How it works**:
-1. `engine.js` calls `navigator.gpu.requestAdapter()` + `requestDevice()` in parallel with loading the naga WASM converter
-2. Both complete before `Godot(moduleConfig)` is called
+1. `engine.js` calls `navigator.gpu.requestAdapter()` + `requestDevice()`
+2. Device is ready before `Godot(moduleConfig)` is called
 3. C++ imports the device via `WebGPU.importJsDevice(Module.preinitializedWebGPUDevice)`
 4. From that point, all C++ code has synchronous access to the GPU device
 
 ### 2.2 Runtime SPIR-V to WGSL Conversion
 
-**Decision**: Store raw SPIR-V in shader containers. At runtime, convert to WGSL using a patched Naga compiled to WASM. Cache results keyed by 64-bit hash.
+**Decision**: Store raw SPIR-V in shader containers. At runtime, preprocess with 12 C++ binary-level passes and convert to WGSL using Tint (compiled directly into the engine WASM). Cache results keyed by 64-bit hash.
 
 **Why**:
 - emdawnwebgpu only accepts WGSL, not SPIR-V
 - Build-time conversion would lose runtime specialization constant support
-- Naga is mature for SPIR-V→WGSL and compiles to WASM cleanly
+- Tint is Google's own SPIR-V→WGSL compiler (same as Chrome uses), C++, BSD-licensed
 - Caching prevents redundant conversions (~40ms/shader)
 
 **Trade-off**: ~15s startup cost for first-time conversion of ~383 unique shader stages. Acceptable for initial release; pre-compilation at export time is a future optimization.
@@ -139,13 +140,13 @@ CPU Shadow Buffer (256KB):
 
 ### 2.4 Combined Image-Sampler Splitting
 
-**Decision**: At the SPIR-V binary level (before Naga parsing), split combined image-sampler variables into separate image and sampler variables with doubled binding indices.
+**Decision**: At the SPIR-V binary level (before Tint parsing), split combined image-sampler variables into separate image and sampler variables with doubled binding indices.
 
-**Why**: WebGPU/WGSL does not support combined image-samplers. Godot's GLSL shaders use `sampler2D` (combined). Naga's SPIR-V frontend requires separate OpLoad of image and sampler followed by OpSampledImage at use sites.
+**Why**: WebGPU/WGSL does not support combined image-samplers. Godot's GLSL shaders use `sampler2D` (combined). The SPIR-V must present separate image and sampler variables for Tint to generate valid WGSL.
 
 **Binding convention**: Original binding N → sampler at N*2, image at N*2+1. All other bindings are also doubled to avoid collision.
 
-**Why SPIR-V-level**: Operating at the binary level (rather than post-Naga text patching) is robust and handles edge cases — function parameters, multi-level call chains, access chain expressions.
+**Why SPIR-V-level**: Operating at the binary level (rather than post-conversion text patching) is robust and handles edge cases — function parameters, multi-level call chains, access chain expressions.
 
 ### 2.5 Subpass Flattening
 
@@ -201,7 +202,7 @@ All traits default to 0 in the base class — non-WebGPU backends are unaffected
 | Push constants | Native | Emulated (ring buffer) | Emulated (ring buffer) |
 | Subpasses | Native | Flattened | Flattened |
 | Barriers | Explicit, complex | Tracked implicitly | No-op |
-| Shader format | SPIR-V native | SPIR-V → MSL (SPIRV-Cross) | SPIR-V → WGSL (Naga) |
+| Shader format | SPIR-V native | SPIR-V → MSL (SPIRV-Cross) | SPIR-V → WGSL (Tint) |
 | Combined samplers | Native | Split at shader level | Split at SPIR-V level |
 | Multi-draw indirect | Native | Emulated (loop) | Emulated (loop) |
 | Buffer mapping | Synchronous | Synchronous | Shadow buffer (async) |
@@ -231,35 +232,36 @@ GLSL (Godot shaders, authored or built-in)
 SPIR-V 1.3 bytecode (stored in shader container)
     | C++ driver: specialization constant patching (if needed)
     | 64-bit hash cache lookup (hit -> return cached WGSL)
-    | JS bridge: MAIN_THREAD_EM_ASM -> window.nagaSpirvToWgsl()
-    | WASM naga-converter:
+    | C++ spirv_preprocess.cpp (12 binary-level passes):
         1. freeze_spec_constant_ops (evaluate OpSpecConstantOp)
-        2. infer_readonly_storage (add NonWritable decorations)
-        3. convert_push_constants_to_uniforms (PC -> storage buffer)
-        4. split_combined_samplers (combined -> image + sampler)
-        5. fix_depth2_images (depth=2 -> depth=1)
-        -> naga SPIR-V parser (with Y-flip for Vulkan->WebGPU NDC)
-        -> module fixups: writeonly->readwrite, Inf/NaN->MAX, strip point_size
-        -> flatten binding arrays
-        -> naga validation
-        -> naga WGSL writer
-        -> WGSL post-processing: hex float fix, strip f16, add diagnostics
+        2. rewrite_copy_logical (OpCopyLogical -> OpCopyObject)
+        3. rewrite_terminate_invocation (OpTerminateInvocation -> OpKill)
+        4. convert_push_constants_to_uniforms (PC -> storage buffer)
+        5. split_combined_samplers (combined -> image + sampler)
+        6. fix_depth2_images (depth=2 -> depth=1)
+        7. negate_position_y (Vulkan -> WebGPU NDC Y-flip)
+        8. strip_restrict_decoration (remove Restrict, no WGSL equivalent)
+        9. strip_memory_barrier (replace OpMemoryBarrier with OpNop)
+        10. fix_nonfinite_literals (Inf/NaN -> FLT_MAX/MIN)
+        11. flatten_binding_arrays (unwrap handle arrays)
+        12. infer_readonly_storage (add NonWritable to read-only SSBOs)
+    | Tint (SPIR-V -> WGSL, compiled into engine WASM)
     | Return WGSL string
-    | C++ additional WGSL transforms:
+    | C++ WGSL post-processing:
         - Format remapping (r8/rg8/r16/rg16 -> 32-bit equivalents)
         - read_write storage demote for vertex/fragment stages
-        - binding_array flattening at text level
+        - hex float fix, strip f16, add diagnostics
     | wgpuDeviceCreateShaderModule
 ```
 
-### Naga Patches (6 modifications to vendored naga v28)
+### Tint Patches (6 patches covering 8 files, 3 logical groups)
 
-1. **IO-Shareable relaxation**: Allow booleans in `@location` bindings (Godot passes bools between stages)
-2. **Image class mismatch tolerance**: Allow Depth/Float type mismatches in function arguments
-3. **TEXTURE barrier flag**: New barrier type + `textureBarrier()` WGSL emission for compute shaders
-4. **Inconsistent comparison sampling split**: Textures used for both comparison and non-comparison are cloned
-5. **Function parameter depth promotion**: Comparison-only parameters promoted to Depth type
-6. **Sampling flags through access chains**: Propagate sampling flags through array index expressions
+1. **UBO layout relaxation** (1 file): `SetSkipBlockLayout(true)` — Godot's UBO layout uses C++ struct packing, not std140/std430
+2. **Spec constant size mismatches** (5 files): Godot's specialization constants change effective struct/array sizes at runtime. Patches add a `kAllowStructMemberSizeMismatch` capability to the IR validator, gate decompose_strided_array padding, and suppress invalid `@size` attributes
+3. **Point size tolerance** (1 file): Accept non-constant `point_size` stores — Godot passes through `gl_PointSize` from input to output, Tint strips it anyway
+4. **Vendoring** (1 file): Replace `absl::from_chars` with `std::from_chars` — Godot doesn't ship Abseil
+
+Compared to the previous naga approach (42 patched Rust files across many subsystems), Tint requires only 8 files in 3 logical groups, making upgrades straightforward.
 
 ---
 
@@ -303,10 +305,9 @@ Layer 3: firstInstance + PC dedup         -> eliminate per-draw SetBindGroup
     |                          |                              |
     | Engine.startGame()       |                              |
     |->                        |                              |
-    |                          | Promise.all([                |
-    |  requestWebGPUDevice()   |   device + features,         |
-    |  loadNagaSpirvToWgsl()   |   naga WASM module          |
-    |<-                        | ])                           |
+    |                          |                              |
+    |  requestWebGPUDevice()   |   device + features          |
+    |<-                        |                              |
     |                          |                              |
     |                          | Godot(moduleConfig)          |
     |                          |->                            |
@@ -320,9 +321,9 @@ Layer 3: firstInstance + PC dedup         -> eliminate per-draw SetBindGroup
 ### Build System
 
 - SCons with `webgpu=yes` flag, `--use-port=emdawnwebgpu` for Emscripten
-- Naga-converter is a prebuilt WASM sidecar (~1MB), built separately via `wasm-pack`
-- Bundled into export template zip alongside game WASM
-- No Rust toolchain required for engine contributors
+- Tint and SPIRV-Tools compiled directly into the engine WASM (no separate sidecar binary)
+- No Rust toolchain needed — all C++ dependencies built with SCons
+- Standard Godot build dependencies only (SCons, Python, C++ compiler, Emscripten)
 
 ---
 
@@ -357,10 +358,10 @@ Layer 3: firstInstance + PC dedup         -> eliminate per-draw SetBindGroup
 ### What Would Need to Change for Mainline Godot
 
 1. **Base driver interface**: 10 new ApiTrait enums and ~9 new virtual methods affect all backends (have safe no-op defaults, but need review)
-2. **WGSL string manipulation**: Should move to the Rust naga-converter (AST transforms vs fragile text patching)
-4. **Vendored Naga**: Upstream would want patches submitted to naga project or built as external dep
-5. **Test infrastructure**: Need headless Chrome/Firefox WebGPU for CI
-6. **Shared constants**: Magic numbers (binding 120, ring size 256KB) should be in one shared header
+2. **Vendored Tint + SPIRV-Tools**: ~16 MB of vendored source. Upstream would want to evaluate vendoring strategy (extraction script provided)
+3. **Tint patches**: 6 patches covering 8 files — upstream may want these submitted to Dawn/Tint project
+4. **Test infrastructure**: Need headless Chrome/Firefox WebGPU for CI
+5. **Shared constants**: Magic numbers (binding 120, ring size 256KB) should be in one shared header
 
 ### What Aligns Well with Godot Architecture
 - Follows RenderingDevice abstraction correctly
@@ -381,8 +382,8 @@ Layer 3: firstInstance + PC dedup         -> eliminate per-draw SetBindGroup
 - **Consistent patterns**: Object lifecycle, error handling, and async safety are uniform throughout
 
 ### Concerns
-- **WGSL string patching**: Fragile dependency on Naga's exact output format
-- **Naga patch maintenance**: 6 patches to vendored naga v28 require ongoing maintenance with upstream
+- **Tint patch maintenance**: 6 patches covering 8 files (3 logical groups). Low complexity, but must be maintained across Tint upgrades
+- **Vendored dependency size**: Tint (~9.1 MB) + SPIRV-Tools (~6.8 MB) = ~16 MB of vendored source
 - **Single developer knowledge**: No co-authors visible in commit history (bus factor risk)
 
 ### Overall Grade: B+

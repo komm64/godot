@@ -186,7 +186,7 @@ Active encoder state (NONE/RENDER/COMPUTE) managed with `end_active_encoder()` c
 | Limited storage texture formats | Promote R8/RG8/R16/RG16 to 32-bit at texture + WGSL level |
 | No texture component swizzle | Convert L8/LA8 to RGBA8 on CPU |
 | No push constants | 256KB ring buffer emulation |
-| No combined image-samplers | SPIR-V-level split before Naga |
+| No combined image-samplers | SPIR-V-level split before Tint |
 | No subpasses | Flatten to separate render passes |
 | 256-byte row alignment for copies | Applied in all buffer↔texture operations |
 
@@ -256,20 +256,18 @@ All `WGPUSurfaceGetCurrentTextureStatus` values handled:
 
 ---
 
-## 5. Naga Patch Correctness
+## 5. Tint Patch Correctness
 
-Six patches to vendored naga v28. Assessment of each:
+Six patches covering 8 files in vendored Tint. Assessment by logical group:
 
-| Patch | Risk Level | Correctness |
-|-------|-----------|-------------|
-| IO-shareable relaxation (booleans in @location) | Low | Correct — Dawn handles internally |
-| Image class mismatch tolerance | Low | Correct — functional equivalence |
-| TEXTURE barrier flag | Low | Correct — new IR flag with proper emission |
-| Inconsistent comparison split | **Medium** | Complex (~300 lines) but handles all observed cases |
-| Function parameter depth promotion | Low | Correct for Godot's shaders |
-| Sampling flags through access chains | Low | Correct — fixes binding array propagation |
+| Patch Group | Files | Risk Level | Correctness |
+|-------------|-------|-----------|-------------|
+| UBO layout relaxation | 1 | Low | Uses spirv-tools' official `SetSkipBlockLayout` API — one line, always necessary |
+| Spec constant size mismatches | 5 | Low | Capability-gated guards following Tint's own patterns — clean, well-scoped |
+| Point size tolerance | 1 | Low | Accepts non-constant stores to a value Tint strips anyway — arguably a Tint bug |
+| Vendoring (abseil removal) | 1 | None | Mechanical `absl::from_chars` → `std::from_chars` — zero behavioral difference |
 
-**Divergence risk**: Medium overall. The comparison split patch is the most complex and will need careful porting when upgrading naga.
+**Divergence risk**: Low overall. All patches are localized (3 logical groups), follow Tint's own coding patterns, and are straightforward to reapply on Tint upgrades. This is a dramatic improvement over the previous naga approach which required 42 patched files across many subsystems.
 
 ---
 
@@ -354,18 +352,22 @@ Six patches to vendored naga v28. Assessment of each:
 - Async readback (viewport capture)
 - Dynamic scenes (skeleton animation)
 
-### What Lacks Testing Infrastructure
-- No automated unit tests for the WebGPU driver
-- No headless browser CI (testing is manual)
-- No regression test suite
-- No fuzz testing of the shader pipeline
-- Edge cases of the naga patches rely on Godot's built-in shader corpus
+### Automated Testing Infrastructure
 
-### Recommendations for Post-Launch
-1. Headless Chrome/Firefox WebGPU tests in CI
-2. Shader corpus tests (convert all built-in shaders, validate WGSL)
-3. Resource lifecycle stress test (rapid create/destroy cycles)
-4. Multi-browser automated screenshot comparison
+| Suite | Count | Coverage |
+|-------|-------|----------|
+| SPIR-V preprocessing unit tests | 191 | All 12 binary-level passes, edge cases, spec constant ops |
+| Driver unit tests | 305 | Bind group layouts, format handling, pipeline state |
+| Shader corpus (GLSL → SPIR-V → WGSL) | 13 fixtures | End-to-end conversion + validation |
+| Engine shader corpus | ~400+ shaders | Regression baseline with `expected_failures.json` |
+| Scene smoketests | 19 scenes × 3 browsers | Chrome, Firefox, Safari — zero GPU errors required |
+| Resource lifecycle stress tests | - | Rapid create/destroy cycles |
+| Screenshot comparison | Chrome + Firefox | Pixel-level regression detection |
+| C++ fuzz targets | 3 targets | `fuzz_preprocess_passes`, `fuzz_split_samplers`, `fuzz_spirv_to_wgsl` |
+
+### Remaining Gaps
+- Edge cases of the Tint patches rely on Godot's built-in shader corpus
+- Fuzz targets use standalone mutation driver (libFuzzer not available with Apple clang)
 
 ---
 
@@ -373,7 +375,7 @@ Six patches to vendored naga v28. Assessment of each:
 
 ### Input Validation
 - SPIR-V input is engine-generated (not user-supplied in typical use)
-- Naga validates the SPIR-V before WGSL generation
+- Tint validates the SPIR-V before WGSL generation
 - WebGPU API performs its own validation layer (browser-side)
 
 ### Memory Safety

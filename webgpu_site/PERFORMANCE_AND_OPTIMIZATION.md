@@ -357,7 +357,7 @@ All traits default to 0 in the base class. Non-WebGPU backends are completely un
 
 4. **Batch size cap**: Add configurable maximum (e.g., 4096 instances) for mobile GPU scheduling.
 
-5. **Shader pre-compilation**: Run naga at export time and ship WGSL directly. Runtime conversion only for specialization constants that differ from defaults. Would eliminate the sometimes up to ~15s startup cost.
+5. **Shader pre-compilation**: Run Tint at export time and ship WGSL directly. Runtime conversion only for specialization constants that differ from defaults. Would eliminate the sometimes up to ~15s startup cost.
 
 6. **Push constant ring sizing**: Monitor peak usage and right-size the 256KB ring buffer. Add runtime warning when approaching the 1024-slot limit.
 

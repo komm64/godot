@@ -39,7 +39,7 @@ Destruction is the reverse: cast ID back to pointer, release GPU handles, delete
 - Push constant emulation metadata (bind group index, binding, stage mask)
 - Merged PC group layout (when push constants share a group with material uniforms)
 - Reflection data (`bind_group_infos`) for uniform set creation
-- Depth alias binding map (for Naga-split depth textures)
+- Depth alias binding map (for depth textures split during SPIR-V preprocessing)
 
 **WGPipelineWrapper**
 - Union of render/compute pipeline handles
@@ -212,27 +212,26 @@ When a uniform set created with shader A's BGL needs to be used with shader B's 
 
 ## 4. Shader Pipeline Details
 
-### 4.1 SPIR-V Pre-Processing (naga-converter)
+### 4.1 SPIR-V Pre-Processing (spirv_preprocess.cpp)
 
-Five binary-level passes before Naga parsing:
+Twelve binary-level passes before Tint parsing (in runtime call order):
 
-1. **freeze_spec_constant_ops**: Evaluates `OpSpecConstantOp` instructions (integer arithmetic, logical ops, bitwise, select, comparisons, type conversions). Naga doesn't support these.
+1. **freeze_spec_constant_ops**: Evaluates `OpSpecConstantOp` instructions (integer arithmetic, logical ops, bitwise, select, comparisons, type conversions). Tint doesn't support spec constant operations.
+2. **rewrite_copy_logical**: Rewrites `OpCopyLogical` to `OpCopyObject` (SPIR-V 1.4+ feature Tint doesn't handle).
+3. **rewrite_terminate_invocation**: Rewrites `OpTerminateInvocation` to `OpKill` (SPIR-V 1.6 feature).
+4. **convert_push_constants_to_uniforms**: Rewrites push-constant variables to storage buffers at `@group(3) @binding(120)`. Changes storage class, injects decorations.
+5. **split_combined_samplers**: Most complex pass (~500 lines). Splits combined image-sampler variables, doubles all binding numbers, handles function parameters and call sites, updates entry point interfaces.
+6. **fix_depth2_images**: Rewrites SPIR-V `depth=2` (unknown comparison) to `depth=1`.
+7. **negate_position_y**: Flips Y component of `gl_Position` for Vulkan-to-WebGPU NDC difference.
+8. **strip_restrict_decoration**: Removes `Restrict` decoration (glslang hint, no WGSL equivalent).
+9. **strip_memory_barrier**: Replaces `OpMemoryBarrier` with `OpNop` (no WGSL equivalent).
+10. **fix_nonfinite_literals**: Replaces Inf/NaN float constants with FLT_MAX/MIN (WGSL has no literal infinity).
+11. **flatten_binding_arrays**: Unwraps arrays of handle types (image/sampler) into individual variables. Tint doesn't support `OpTypeArray` of handle types.
+12. **infer_readonly_storage**: Multi-pass analysis finds SSBOs never written to, injects `OpDecorate NonWritable`. Enables Tint to emit `var<storage, read>` instead of `var<storage, read_write>`.
 
-2. **infer_readonly_storage**: Multi-pass analysis finds SSBOs never written to, injects `OpDecorate NonWritable`. Prevents writable-aliasing validation errors when Godot binds placeholder buffers.
+### 4.2 Tint Conversion
 
-3. **convert_push_constants_to_uniforms**: Rewrites push-constant variables to storage buffers at `@group(3) @binding(120)`. Changes storage class, injects decorations.
-
-4. **split_combined_samplers**: Most complex pass (~500 lines). Splits combined image-sampler variables, doubles all binding numbers, handles function parameters and call sites, updates entry point interfaces.
-
-5. **fix_depth2_images**: Rewrites SPIR-V `depth=2` (unknown comparison) to `depth=1`.
-
-### 4.2 Post-Parse Module Fixups
-
-Applied to the Naga Module before validation:
-- `fix_writeonly_storage`: WGSL requires STORE-only buffers to also have LOAD
-- `fix_nonfinite_literals`: Inf/NaN → f32::MAX/MIN (WGSL has no literal infinity)
-- `strip_point_size`: No `@builtin(point_size)` in WGSL
-- `flatten_binding_arrays`: All BindingArray sizes reduced to 1 (Chrome limitation)
+After preprocessing, the SPIR-V is passed to Tint (Google's Dawn/Chrome shader compiler) via `tint_wrapper_spirv_to_wgsl()`. Tint performs SPIR-V parsing, IR validation, and WGSL code generation. Six patches to Tint handle Godot-specific requirements (UBO layout, spec constant size mismatches, point_size tolerance).
 
 ### 4.3 WGSL Post-Processing
 
@@ -378,8 +377,8 @@ All bone data consolidated into a single GPU storage buffer:
 | `modf(x, y)` → `floor() + subtraction` | WGSL has no `modf` with out-param |
 | `isinf(x)` → `abs(x) > 3.0e+10` | WGSL has no `isinf` |
 | `isnan(x)` → `x != x` | WGSL has no `isnan` |
-| Array varyings → individual vars | WGSL/Naga doesn't support array interface variables |
-| switch → if/else chains | Naga SPIR-V scoping issues with phi nodes |
+| Array varyings → individual vars | WGSL doesn't support array interface variables |
+| switch → if/else chains | SPIR-V scoping issues with phi nodes in WGSL |
 | `texture()` → `textureLod()` on radiance | Avoid mipmap artifacts from octahedral discontinuity |
 
 ---
@@ -400,27 +399,17 @@ scons platform=web target=template_debug dlink_enabled=yes webgpu=yes opengl3=ye
 
 1. SCons reads `platform/web/detect.py` → sets `WEBGPU_ENABLED`, `RD_ENABLED`, links emdawnwebgpu
 2. `modules/glslang/config.py` → enables glslang for SPIR-V compilation
-3. `drivers/SCsub` → includes `drivers/webgpu/SCsub` → compiles 3 .cpp files
+3. `drivers/SCsub` → includes `drivers/webgpu/SCsub` → compiles driver sources, SPIRV-Tools (~150 .cpp), Tint (~300 .cc with C++20), and tint_wrapper
 4. Emscripten (emcc) compiles C++ with `--use-port=emdawnwebgpu` headers
 5. Emscripten links with emdawnwebgpu JS glue
-6. `emscripten_helpers.py` packages: .js + .wasm + naga_wasm_bg.wasm into template zip
+6. `emscripten_helpers.py` packages: .js + .wasm into template zip
 
-### 8.3 Naga Converter Build (Separate)
-
-```bash
-cd drivers/webgpu/naga-converter
-wasm-pack build --target web --release
-cp pkg/naga_converter_bg.wasm prebuilt/naga_wasm_bg.wasm
-```
-
-Prebuilt binary committed to repo. No Rust toolchain required for engine contributors.
-
-### 8.4 Runtime Loading
+### 8.3 Runtime Loading
 
 1. `engine.js` detects `renderingDriver === 'webgpu'`
-2. Parallel: `requestWebGPUDevice()` + `loadNagaSpirvToWgsl()`
-3. Both complete → `Godot(moduleConfig)` called with preinitializedWebGPUDevice
-4. C++ imports device, rendering begins
+2. Requests WebGPU device (async, before WASM loads)
+3. Device ready → `Godot(moduleConfig)` called with preinitializedWebGPUDevice
+4. C++ imports device, Tint is already compiled into the WASM, rendering begins
 
 ---
 
@@ -447,7 +436,7 @@ Additional safety:
 
 - WebGPU operates entirely on the main thread (single queue)
 - Works with both threaded and non-threaded WASM builds
-- Naga conversion always on main thread (JS APIs only accessible from main thread)
+- Tint conversion runs in-process on the main thread (compiled into WASM)
 - No SharedArrayBuffer requirement for WebGPU itself (broader hosting compatibility)
 
 ### 9.4 WorkerThreadPool Nothreads Fix

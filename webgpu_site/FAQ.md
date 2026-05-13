@@ -28,7 +28,7 @@ The `dlink_enabled=yes` flag enables Emscripten dynamic linking, which produces 
 
 Requirements:
 - Emscripten 4.0.10+ (for the emdawnwebgpu port)
-- No Rust toolchain needed (naga converter ships as a prebuilt WASM binary)
+- No Rust toolchain needed (Tint C++ translator is compiled directly into the engine)
 - Standard Godot build dependencies (SCons, Python, C++ compiler)
 
 ### 5. Do I need to modify my Godot project to use WebGPU?
@@ -84,7 +84,7 @@ A layered optimization stack that reduces IPC message count:
 
 ### 10. What's the startup time?
 
-Approximately 15 seconds for first-time shader compilation (~383 unique SPIR-V stages converted to WGSL via the naga converter). Subsequent loads from browser cache are near-instant because the WGSL cache persists for the page session.
+Approximately 15 seconds for first-time shader compilation (~383 unique SPIR-V stages converted to WGSL via Tint). Subsequent loads from browser cache are near-instant because the WGSL cache persists for the page session.
 
 This is a known limitation. Future work: pre-compile WGSL at export time, shipping directly without runtime conversion.
 
@@ -122,34 +122,36 @@ This design means push constant updates cost zero additional IPC — they're bat
 Godot compiles GLSL → SPIR-V at engine build time (via glslang). At runtime in the browser:
 
 1. SPIR-V bytecode is loaded from the shader container
-2. Five binary-level preprocessing passes fix Naga's limitations (spec constants, readonly inference, push constant rewrite, combined sampler split, depth image fix)
-3. Patched Naga (compiled to WASM) parses SPIR-V and generates WGSL
+2. Twelve binary-level preprocessing passes in C++ (`spirv_preprocess.cpp`) transform the SPIR-V for WebGPU compatibility (spec constant folding, push constant rewrite, combined sampler split, Y-negation, readonly inference, and more)
+3. Tint (Google's Dawn/Chrome SPIR-V→WGSL compiler, compiled directly into the engine WASM) parses the preprocessed SPIR-V and generates WGSL
 4. Post-processing fixes browser-specific issues (f32::MAX literals, f16 stripping, derivative uniformity)
-5. C++ applies format remapping and binding_array flattening
+5. C++ applies format remapping
 6. `wgpuDeviceCreateShaderModule` creates the GPU shader
 
 Results are cached by 64-bit SPIR-V hash — identical stages are never converted twice.
 
-### 15. Why did you vendor and patch Naga instead of using upstream?
+### 15. Why Tint instead of Naga? Why vendor and patch it?
 
-Upstream Naga v28 has six issues that prevent it from handling Godot's SPIR-V output correctly:
-1. Rejects boolean values in `@location` shader I/O (Godot passes bools between stages)
-2. Rejects depth/float type mismatches in function arguments
-3. No TEXTURE barrier support (needed for compute shaders)
-4. Rejects textures used for both comparison and non-comparison sampling
-5. Doesn't promote function parameter types for depth textures
-6. Doesn't propagate sampling flags through array access chains
+Tint is Google's SPIR-V→WGSL compiler from the Dawn/Chrome project — it's literally what Chrome uses for WebGPU shader compilation. We chose Tint over the previous Naga (Rust) approach because:
+- **C++ only** — matches Godot's build system (no Rust/wasm-pack dependency)
+- **Compiled directly into the engine WASM** — no separate sidecar binary to load
+- **Far fewer patches** — 6 patches covering 8 files (3 logical groups) vs Naga's 42 patched files
+- **BSD 3-Clause license** — compatible with Godot's licensing
 
-Each patch is minimal and targeted. We plan to upstream them to the Naga project.
+Six small patches to vendored Tint handle Godot-specific requirements:
+1. UBO layout relaxation (Godot uses C++ struct packing, not std140/std430)
+2. Spec constant size mismatches (Godot's specialization constants change struct sizes at runtime) — 5 files
+3. Point size tolerance (accept non-constant `gl_PointSize` stores)
+4. Vendoring (replace `absl::from_chars` with `std::from_chars`)
 
 ### 16. How does the WebGPU device get created?
 
 JavaScript creates the device **before** WASM loads (since device creation is async and Emscripten C++ can't await Promises without Asyncify). The `engine.js` shell:
 1. Calls `navigator.gpu.requestAdapter()` with `powerPreference: 'high-performance'`
 2. Requests a device with all supported optional features and maximum limits
-3. Loads the naga WASM converter in parallel
-4. Passes the device into the Emscripten module config
-5. C++ imports it via `WebGPU.importJsDevice()`
+3. Passes the device into the Emscripten module config
+4. C++ imports it via `WebGPU.importJsDevice()`
+5. Tint is already compiled into the engine WASM — no separate shader converter to load
 
 ### 17. Why a single 7733-line implementation file?
 
@@ -258,7 +260,7 @@ The 1-frame latency is acceptable for viewport capture, profiling, and compute r
 
 ### 27. How is the combined-sampler splitting implemented?
 
-At the SPIR-V binary level (before Naga parsing), the most complex preprocessing pass (~500 lines of Rust):
+At the SPIR-V binary level (before Tint parsing), the most complex preprocessing pass (~500 lines of C++):
 
 1. Identifies all `OpVariable` with `OpTypeSampledImage` pointer type
 2. For each combined variable at binding N:
@@ -270,7 +272,7 @@ At the SPIR-V binary level (before Naga parsing), the most complex preprocessing
 5. Doubles ALL other bindings to avoid collision (except PC ring buffer at binding 120)
 6. Updates `OpEntryPoint` interface lists
 
-This approach is more robust than post-Naga text patching because it handles edge cases like multi-level function call chains and access chain expressions.
+This approach is more robust than post-conversion text patching because it handles edge cases like multi-level function call chains and access chain expressions.
 
 ---
 
@@ -285,8 +287,8 @@ New methods include: `buffer_create_with_data`, `buffer_initiate_async_map`, `bu
 ### 29. What would need to change for upstream Godot acceptance?
 
 1. **RFC for API traits**: The 10 new trait enums need formal review by Godot rendering team
-2. **Move WGSL patching to Rust**: AST transforms in naga-converter instead of C++ string manipulation
-4. **Upstream naga patches**: Submit the 6 modifications to the Naga project
+2. **Upstream Tint patches**: Submit the 6 patches to the Dawn/Tint project (patches 5 & 6 are arguably Tint bugs)
+4. **Reduce WGSL text manipulation**: Move remaining string-level transforms into SPIR-V preprocessing where possible
 5. **CI infrastructure**: Headless Chrome/Firefox WebGPU testing
 6. **Shared constants**: Single source of truth for magic numbers (binding 120, ring size, alignment)
 7. **Feature flags documentation**: Clear docs on what each ApiTrait does and when it's safe to enable
@@ -322,7 +324,7 @@ Currently, there is no automated test suite for the WebGPU backend. Correctness 
 - Manual testing across Chrome, Firefox, and Safari
 - Stress test scenes (20k instances, 32 lights, 60k shared-material objects)
 - The browser's own WebGPU validation layer (catches spec violations)
-- Naga's built-in SPIR-V and WGSL validation passes
+- Tint's built-in SPIR-V and WGSL validation passes
 - Performance counter monitoring for unexpected behavior
 
 For upstream, we'd need:
