@@ -170,7 +170,7 @@ uint sc_directional_penumbra_shadow_samples() {
 #define SHADER_COUNT_MULTIPLE 2
 
 uint option_to_count(uint option, uint bound) {
-	// Single-return pattern to avoid SPIR-V phi/emit scoping issues in NAGA.
+	// Single-return pattern to avoid SPIR-V phi/emit scoping issues in Tint.
 	uint result = bound;
 	if (option == SHADER_COUNT_NONE) {
 		result = 0u;

@@ -83,8 +83,8 @@ DepthImageFixResult fix_depth2_images(const Vector<uint8_t> &p_bytes);
 // Compensates for the difference between Vulkan's Y-down NDC (which
 // Godot's GLSL shaders target) and WebGPU's Y-up NDC.
 // Without this, all rendered content appears flipped vertically.
-// Tint has no equivalent of naga's `adjust_coordinate_space` option,
-// so this is done as a SPIR-V preprocessing pass instead.
+// Tint has no built-in coordinate space adjustment option, so this
+// is done as a SPIR-V preprocessing pass instead.
 Vector<uint8_t> negate_position_y(const Vector<uint8_t> &p_bytes);
 
 // Strip OpDecorate/OpMemberDecorate for decorations unsupported by Tint:

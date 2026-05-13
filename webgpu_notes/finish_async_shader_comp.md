@@ -11,22 +11,22 @@
 
 Two-part async shader pipeline was implemented on `async_shader_pipeline` branch (commit `864e936cd3` + `eb9d522e92`):
 
-### Part 1: Naga Web Worker (SPIR-V → WGSL translation off main thread)
+### Part 1: Tint Web Worker (SPIR-V → WGSL translation off main thread)
 
 **Status: Working correctly. Never merged.**
 
 Files:
-- `platform/web/js/engine/naga_worker.js` (new) — standalone Web Worker that loads its own copy of `naga_wasm_bg.wasm` (~1 MB) and handles `translate` messages
-- `platform/web/js/engine/engine.js` — spawns worker during `loadNagaSpirvToWgsl`, exposes `window._nagaWorkerPostTranslation()`, `window._nagaWorkerPollCount()`, `window._nagaWorkerGetResult()` for C++ to call via EM_ASM
-- `drivers/webgpu/rendering_device_driver_webgpu.cpp` — `_post_spirv_to_worker()`, `_poll_naga_worker_results()`, `PendingWorkerPipeline` struct, deferral logic, 60-poll timeout fallback to sync
-- `platform/web/emscripten_helpers.py` — bundles `naga_worker.js` in export template zip
+- `platform/web/js/engine/tint_worker.js` (new) — standalone Web Worker that loads its own copy of `tint_convert.wasm` and handles `translate` messages
+- `platform/web/js/engine/engine.js` — spawns worker, exposes `window._tintWorkerPostTranslation()`, `window._tintWorkerPollCount()`, `window._tintWorkerGetResult()` for C++ to call via EM_ASM
+- `drivers/webgpu/rendering_device_driver_webgpu.cpp` — `_post_spirv_to_worker()`, `_poll_tint_worker_results()`, `PendingWorkerPipeline` struct, deferral logic, 60-poll timeout fallback to sync
+- `platform/web/emscripten_helpers.py` — bundles `tint_worker.js` in export template zip
 
 How it works:
 1. When a specialized pipeline is requested and the WGSL isn't in `_spv_to_wgsl_cache`, the patched SPIR-V bytes are posted to the worker (with 64-bit hash as two 32-bit halves to avoid JS precision loss)
 2. Worker translates SPIR-V → WGSL in parallel with main thread rendering
-3. Each frame, `_poll_naga_worker_results()` (called from `fence_wait`) drains completed results from a JS queue back into `_spv_to_wgsl_cache`
+3. Each frame, `_poll_tint_worker_results()` (called from `fence_wait`) drains completed results from a JS queue back into `_spv_to_wgsl_cache`
 4. When all WGSL dependencies for a pending pipeline are cached, it proceeds to GPU pipeline creation
-5. If results don't arrive within 60 polls, falls back to sync naga on main thread
+5. If results don't arrive within 60 polls, falls back to sync Tint on main thread
 
 Benchmark results (from the branch):
 - Max frame spike: 133ms → 67ms (-50%)
@@ -86,14 +86,14 @@ When the Promise resolves, the callback fires during an arbitrary point in the f
 
 **Problem B: Async pipeline infrastructure overhead** (~7 fps hit, 34.0 → 26.6)
 Even with callbacks never firing, just having the async code path costs ~7 fps. Possible causes:
-- `_poll_naga_worker_results()` called from `fence_wait()` every frame does multiple EM_ASM calls (check count, dequeue results, read hash halves, read WGSL pointer)
+- `_poll_tint_worker_results()` called from `fence_wait()` every frame does multiple EM_ASM calls (check count, dequeue results, read hash halves, read WGSL pointer)
 - `_add_new_pipelines_to_map()` called from `get_pipeline()` in the hot draw loop (~3,800 draws/frame on stress scene). This takes a `MutexLock` on `compiled_queue_mutex`, iterates the queue, and does an RBMap insert — executed per-draw even when the queue is empty
 - Extra branching in the specialization constant code path
 - The `PendingWorkerPipeline` vector iteration in the poll function
 
 ### Decision: Park the work
 
-The async pipeline commits were moved to branch `async_shader_pipeline` and removed from `webgpu-4.6.2`. The naga worker code went with them (same commits). The work is preserved but not merged.
+The async pipeline commits were moved to branch `async_shader_pipeline` and removed from `webgpu-4.6.2`. The Tint worker code went with them (same commits). The work is preserved but not merged.
 
 ---
 
@@ -104,7 +104,7 @@ From `STARTUP_PROFILING.md` (2026-05-06, demo_3d_platformer normal variant):
 - 859 total shader modules (511 base, 348 specialized)
 - 190 render pipelines, 47 compute pipelines — **all synchronous**
 - 39.8 MB WGSL generated
-- Naga conversion: ~6.7s cumulative wall clock, 99% of shader creation time
+- Tint conversion: ~6.7s cumulative wall clock, 99% of shader creation time
 - `createShaderModule` browser API: ~2.5s cumulative (mostly fast, one 810ms outlier)
 - `createRenderPipeline` browser API: ~4.4ms cumulative (near-instant; Dawn defers to first use)
 - First visible frame: 7s
@@ -112,17 +112,17 @@ From `STARTUP_PROFILING.md` (2026-05-06, demo_3d_platformer normal variant):
 - All compilation done: 38s
 - Steady state: 12-13 fps
 
-Compilation happens in 14+ waves spread across 38 seconds. Each wave triggers FPS crashes (53→10→1→recovery). The engine runs ubershaders during compilation gaps, but naga translation blocks the main thread during each wave.
+Compilation happens in 14+ waves spread across 38 seconds. Each wave triggers FPS crashes (53→10→1→recovery). The engine runs ubershaders during compilation gaps, but Tint translation blocks the main thread during each wave.
 
 ---
 
 ## The Fix: Three Pieces
 
-### Fix 1: Merge the Naga Web Worker (as-is)
+### Fix 1: Merge the Tint Web Worker (as-is)
 
 The web worker for SPIR-V → WGSL translation is correct and validated. It eliminates 50-75% of frame spikes during shader compilation. It should be cherry-picked from `async_shader_pipeline` and merged.
 
-The worker offloads naga translation to a separate thread. The main thread continues rendering with ubershaders while translations complete. Results are polled once per frame during `fence_wait()`.
+The worker offloads Tint translation to a separate thread. The main thread continues rendering with ubershaders while translations complete. Results are polled once per frame during `fence_wait()`.
 
 No changes needed to the worker implementation itself.
 
@@ -157,7 +157,7 @@ Once per frame (between frames, NOT during draw loop):
 This approach:
 - Avoids emdawnwebgpu's callback mechanism entirely
 - Controls exactly when results are consumed (between frames, not mid-draw)
-- Uses the same polling pattern already proven by the naga worker
+- Uses the same polling pattern already proven by the Tint worker
 - The JS Promise still resolves async in the browser GPU process — we just pick up results at a controlled time
 
 **Implementation sketch for the JS side** (in engine.js or a new helper):
@@ -225,12 +225,12 @@ However, `PipelineHashMapRD` is shared Godot code (not WebGPU-specific). Changes
 `GPUDevice` is **not transferable** across Web Worker boundaries per the WebGPU spec. The `device.createRenderPipeline()` and `device.createShaderModule()` calls must happen on the thread that owns the device — the main thread.
 
 This means:
-- **Naga translation (SPIR-V → WGSL)**: CAN run in a web worker (CPU-only, no GPU objects needed)
+- **Tint translation (SPIR-V → WGSL)**: CAN run in a web worker (CPU-only, no GPU objects needed)
 - **`createShaderModule(wgsl)`**: Must run on main thread (needs `GPUDevice`), but is fast (<2ms each)
 - **`createRenderPipeline(desc)` / `createRenderPipelineAsync(desc)`**: Must run on main thread (needs `GPUDevice`), but `Async` version offloads the heavy GPU compilation to the browser's GPU process automatically
 - **Actual GPU shader compilation**: Already async — happens in a separate browser process regardless of which API is used. The `Async` variant just gives a Promise instead of blocking until compilation is "accepted" (Dawn defers actual Metal/Vulkan compilation to first pipeline use anyway)
 
-The web worker can only handle the naga CPU work. Everything GPU-touching stays on the main thread but uses async APIs to avoid blocking.
+The web worker can only handle the Tint CPU work. Everything GPU-touching stays on the main thread but uses async APIs to avoid blocking.
 
 ---
 
@@ -267,7 +267,7 @@ These pieces are already in place on `webgpu-4.6.2` and don't need changes:
 3. **Specialization constant patching** (`rendering_device_driver_webgpu.cpp`):
    - `_patch_spirv_spec_constants()` — patches SPIR-V bytes with runtime constant values
    - `_spv_to_wgsl_cache` — HashMap<uint64_t, String> keyed by MurmurHash3 of patched SPIR-V
-   - `_create_module_with_spec_constants()` — cache lookup, naga conversion, `createShaderModule`
+   - `_create_module_with_spec_constants()` — cache lookup, Tint conversion, `createShaderModule`
 
 4. **Strip topology handling**: Falls back to sync for line/triangle strips (need Uint16+Uint32 variants)
 
@@ -275,21 +275,21 @@ These pieces are already in place on `webgpu-4.6.2` and don't need changes:
 
 ## Pre-Compilation: Could We Ship WGSL Instead of SPIR-V?
 
-From STARTUP_PROFILING analysis: naga conversion costs ~6.7s of main-thread time. Could we do this at build/export time?
+From STARTUP_PROFILING analysis: Tint conversion costs ~6.7s of main-thread time. Could we do this at build/export time?
 
-**For base (uber) shaders: Yes, in theory.** The SPIR-V is deterministic at build time. We could run naga during `scons` and ship pre-converted WGSL alongside or instead of SPIR-V. This would eliminate the ~4.7s of base shader naga conversion.
+**For base (uber) shaders: Yes, in theory.** The SPIR-V is deterministic at build time. We could run Tint during `scons` and ship pre-converted WGSL alongside or instead of SPIR-V. This would eliminate the ~4.7s of base shader Tint conversion.
 
 **For specialized shaders: No.** Specialization constants are determined at runtime (material features, light counts, etc.). The SPIR-V must be patched with runtime values, then converted. This can't be done at build time.
 
 **Trade-off**: The base WGSL is ~8 MB (vs SPIR-V which is smaller). Download size increase. But the 4.7s savings on first load is significant. This is orthogonal to the async work — could be done independently.
 
-**However**: With the web worker fix, the 4.7s happens off the main thread, so the user sees smooth ubershader rendering during that time. Pre-compilation would reduce total wall-clock time but the user experience improvement is smaller since the main thread isn't blocked anyway.
+**However**: With the Tint web worker fix, the 4.7s happens off the main thread, so the user sees smooth ubershader rendering during that time. Pre-compilation would reduce total wall-clock time but the user experience improvement is smaller since the main thread isn't blocked anyway.
 
 ---
 
 ## Recommended Implementation Order
 
-1. **Cherry-pick naga web worker from `async_shader_pipeline`** — immediate benefit, proven code, low risk
+1. **Cherry-pick Tint web worker from `async_shader_pipeline`** — immediate benefit, proven code, low risk
 2. **Implement JS-side async pipeline polling** — monkey-patch emdawnwebgpu's `createRenderPipelineAsync` to store Promise results in a pollable queue; poll from `fence_wait()`
 3. **Profile the infrastructure overhead** — with the callback mechanism fixed, measure whether the ~7 fps hit is from the broken callbacks or from the code structure itself
 4. **If overhead persists, optimize the hot path** — move `compiled_queue` drain out of per-draw loop, minimize EM_ASM calls in poll functions
@@ -300,7 +300,7 @@ From STARTUP_PROFILING analysis: naga conversion costs ~6.7s of main-thread time
 ## Key Files Reference
 
 On `async_shader_pipeline` branch:
-- `platform/web/js/engine/naga_worker.js` — Web Worker (106 lines)
+- `platform/web/js/engine/tint_worker.js` — Web Worker (106 lines)
 - `platform/web/js/engine/engine.js` — Worker spawn + queue APIs (lines ~397-466)
 - `drivers/webgpu/rendering_device_driver_webgpu.cpp` — Worker integration (lines ~143-340), async pipeline creation (lines ~7286-7751)
 - `drivers/webgpu/rendering_device_driver_webgpu.h` — `PipelineCreatedCallback`, `render_pipeline_create_async()`
@@ -311,8 +311,8 @@ On `async_shader_pipeline` branch:
 - `servers/rendering/renderer_rd/pipeline_hash_map_rd.h` — `compiled_queue`, `add_compiled_pipeline()`, `get_pipeline()`
 
 On `webgpu-4.6.2` (current) for context:
-- `drivers/webgpu/rendering_device_driver_webgpu.cpp:101` — `_spv_to_wgsl_cached()` (sync naga path)
-- `drivers/webgpu/rendering_device_driver_webgpu.cpp:117` — `MAIN_THREAD_EM_ASM_PTR` naga call
+- `drivers/webgpu/rendering_device_driver_webgpu.cpp:101` — `_spv_to_wgsl_cached()` (sync Tint path)
+- `drivers/webgpu/rendering_device_driver_webgpu.cpp:117` — `MAIN_THREAD_EM_ASM_PTR` Tint call
 - `servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.cpp:2387` — hot draw loop
 - `webgpu_notes/STARTUP_PROFILING.md` — full cold-cache profiling data
 - `webgpu_notes/perf_optimization_may3_2026.md` — optimization history and benchmark data

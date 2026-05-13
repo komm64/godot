@@ -727,7 +727,7 @@ WebGPU has no subpasses within render passes. Vulkan render passes can have mult
 ```
 Build/Export time:
   GLSL source → [glslang] → SPIR-V bytecode → [SPIRV-Reflect] → ReflectionData
-                                              → [Tint/Naga] → WGSL source
+                                              → [Tint] → WGSL source
 
 Runtime (browser):
   WGSL source → wgpuDeviceCreateShaderModule() → WGPUShaderModule
@@ -741,7 +741,7 @@ Input: ReflectShader with SPIR-V bytecode per stage + reflection data
 Processing:
 1. For each shader stage (vertex, fragment, compute):
    a. Take SPIR-V bytecode
-   b. Run through Tint/Naga to produce WGSL
+   b. Run through Tint to produce WGSL
    c. During translation, configure:
       - Push constant block → uniform buffer at group(N) binding(M)
       - Descriptor set indices → bind group indices (1:1 mapping)

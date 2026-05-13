@@ -11,14 +11,14 @@ This PR adds a **WebGPU rendering backend** for Godot's web exports, enabling th
 - **Skeletal animation (GPU skinning)** — verified working
 - **PBR materials, shadows, bloom, procedural sky** — full Mobile renderer features
 - **GDExtension support** — WASM-based GDExtensions work with WebGPU
-- **SPIR-V → WGSL translation** — automatic via Naga converter (Rust/WASM)
+- **SPIR-V → WGSL translation** — automatic via Tint (C++/WASM)
 
 ### Architecture
 - New `RenderingDeviceDriverWebGPU` — full implementation of `RenderingDeviceDriver` interface
 - New `RenderingContextDriverWebGPU` — device/surface management for the browser
 - New `RenderingShaderContainerWebGPU` — shader container format with SPIR-V → WGSL conversion
 - Build system: `scons platform=web webgpu=yes` using Emscripten 4.0.10+ with `emdawnwebgpu` port
-- Shader translation: Naga v28 (Rust→WASM) converts SPIR-V to WGSL at runtime
+- Shader translation: Tint (C++→WASM via Emscripten) converts SPIR-V to WGSL at runtime
 
 ## Changes
 
@@ -28,13 +28,13 @@ This PR adds a **WebGPU rendering backend** for Godot's web exports, enabling th
 - `drivers/webgpu/rendering_shader_container_webgpu.cpp/h` (~210 lines) — Shader container
 - `drivers/webgpu/webgpu_objects.h` (~350 lines) — GPU object wrappers
 - `drivers/webgpu/pixel_formats_webgpu.h` (~710 lines) — DataFormat → WGPUTextureFormat table
-- `drivers/webgpu/naga-converter/` — Rust/WASM SPIR-V→WGSL converter (prebuilt binary)
+- `drivers/webgpu/tint_cli/` — C++ SPIR-V→WGSL converter (Tint + 12 preprocessing passes)
 
 ### Modified files
 - `SConstruct` — Add `webgpu` build option
 - `platform/web/detect.py` — WebGPU build flags, Emscripten 4.0.10+ requirement
 - `platform/web/display_server_web.cpp/h` — WebGPU display server initialization
-- `platform/web/js/engine/engine.js` — WebGPU device pre-initialization, Naga loader
+- `platform/web/js/engine/engine.js` — WebGPU device pre-initialization, Tint loader
 - `servers/rendering/rendering_device_driver.h` — `buffer_get_data_direct()` virtual (optional override)
 - `servers/rendering/rendering_device.cpp` — Hook for driver-level buffer readback
 - `modules/glslang/config.py` — Enable glslang for WebGPU builds
@@ -43,7 +43,7 @@ This PR adds a **WebGPU rendering backend** for Godot's web exports, enabling th
 
 Tested with a real game (Shiny Gen — 2D/3D hybrid, entities, UI, shadows):
 - **Chrome 120+**: Renders correctly at interactive frame rate
-- **Shader compilation**: 36 shaders compiled via Naga SPIR-V→WGSL in ~2s
+- **Shader compilation**: 36 shaders compiled via Tint SPIR-V→WGSL in ~2s
 - **Compute shaders**: Dispatch + readback verified (multiply, entity events)
 - **Push constant optimization**: 8.5x improvement via ring buffer batching
 

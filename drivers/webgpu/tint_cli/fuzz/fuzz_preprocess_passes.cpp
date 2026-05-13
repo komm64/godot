@@ -1,11 +1,7 @@
-// Fuzz all 11 SPIR-V preprocessing passes in sequence.
+// Fuzz all 12 SPIR-V preprocessing passes in sequence.
 //
 // Exercises the passes without Tint parsing, catching crashes in the
 // raw SPIR-V manipulation code (out-of-bounds, integer overflow, etc.).
-// Mirrors the naga-converter fuzz target preprocess_passes.rs but covers
-// the 4 additional passes added for Tint (negate_position_y,
-// strip_restrict_decoration, strip_memory_barrier, fix_nonfinite_literals,
-// flatten_binding_arrays).
 
 #include "../../spirv_preprocess.h"
 

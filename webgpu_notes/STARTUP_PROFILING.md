@@ -12,25 +12,25 @@
 ## Ordered Startup Timeline
 
 Everything below is on the main thread unless noted. Overlapping ranges mean
-the activities are interleaved (naga conversion for shader A, then B, etc.),
+the activities are interleaved (Tint conversion for shader A, then B, etc.),
 not truly parallel.
 
 1. **(0 - 174 ms) Page load + WASM bootstrap**
    a. **(0 - 11 ms)** HTML page load + DOM ready. Local server, tiny HTML. `DOMContentLoaded` + `window.load` both at ~11 ms.
    b. **(10 - 18 ms)** WebGPU adapter + device acquisition. `requestAdapter` 6 ms, `requestDevice` 1 ms.
-   c. **(11 - 174 ms)** WASM download + compile + Godot bootstrap. `index.wasm` (40.7 MB) fetched from localhost, compiled by browser. `index.pck` (1.1 MB) game data fetched. `naga_wasm_bg.wasm` (1 MB) loaded by 45 ms. Engine banner at 174 ms.
+   c. **(11 - 174 ms)** WASM download + compile + Godot bootstrap. `index.wasm` (40.7 MB) fetched from localhost, compiled by browser. `index.pck` (1.1 MB) game data fetched. `tint_convert.wasm` loaded by 45 ms. Engine banner at 174 ms.
 
 2. **(174 - 306 ms) Engine + rendering init**
    a. **(174 - 227 ms)** Godot engine init. Selects "WebGPU 1.0 - Forward Mobile" backend.
    b. **(227 - 306 ms)** Rendering subsystem init (pre-shader). ~80 ms before first shader needed.
 
 3. **(306 - 4,872 ms) Base shader module creation (511 modules)**
-   a. **(306 - 560 ms)** Compute shader modules: 47 modules, 6 compute pipelines. CanvasSdf (6), Skeleton (2), Sort (3), Particles (1), ParticlesCopy (21). Each: ~8 ms naga conversion in WASM, <0.1 ms `createShaderModule`.
+   a. **(306 - 560 ms)** Compute shader modules: 47 modules, 6 compute pipelines. CanvasSdf (6), Skeleton (2), Sort (3), Particles (1), ParticlesCopy (21). Each: ~8 ms Tint conversion in WASM, <0.1 ms `createShaderModule`.
    b. **(460 - 720 ms)** Canvas/2D shader modules: 56 modules. CanvasShader (36), CanvasOcclusion (6), Blit (8). Overlaps late compute shaders.
    c. **(530 ms)** First render pipelines: CanvasOcclusionShaderRD (4 pipelines).
    d. **(384 - 1,447 ms)** Post-processing shader modules: 110 modules. BokehDof, BlurRaster, Copy, CopyToFb, Tonemap, SMAA, LuminanceReduce, etc.
    e. **(1,330 - 2,640 ms)** Sky shader modules: 36 modules.
-   f. **(630 - 4,872 ms)** **SceneForwardMobile base shaders: 300 modules.** 10 variants x 30 modules (vertex+fragment). Fragment stages are 170K-200K chars WGSL each. Naga conversion dominates: avg 8.3 ms/module, longest 526 ms. Overlaps everything above in step 3.
+   f. **(630 - 4,872 ms)** **SceneForwardMobile base shaders: 300 modules.** 10 variants x 30 modules (vertex+fragment). Fragment stages are 170K-200K chars WGSL each. Tint conversion dominates: avg 8.3 ms/module, longest 526 ms. Overlaps everything above in step 3.
    g. **(2,190 - 3,000 ms)** Early specialized waves 1-2: 16 modules + 8 pipelines. First specialized SceneForwardMobile variants (depth pre-pass :9, :11).
    h. **(4,200 ms)** Engine PERF: `fps=0, draws/f=0`. Engine running, no frames yet.
    i. **(4,710 - 4,872 ms)** Last base shader modules finish.
@@ -95,7 +95,7 @@ not truly parallel.
 | Total compute pipelines | 47 |
 | Total WGSL code generated | 39.8 MB |
 
-The dominant startup bottleneck is **SPIR-V to WGSL conversion via naga (in WASM)**, which accounts for 99% of shader module creation wall-clock time. The actual browser `createShaderModule` calls complete in <2 ms each. Shader compilation and pipeline creation span from 0.3 s to 38 s, with multiple waves of specialized shader compilation interrupting rendering throughput.
+The dominant startup bottleneck is **SPIR-V to WGSL conversion via Tint (in WASM)**, which accounts for 99% of shader module creation wall-clock time. The actual browser `createShaderModule` calls complete in <2 ms each. Shader compilation and pipeline creation span from 0.3 s to 38 s, with multiple waves of specialized shader compilation interrupting rendering throughput.
 
 ---
 
@@ -135,7 +135,7 @@ The base shaders are loaded in dependency order:
 | 1.37 - 1.56 s | Post-processing (Bokeh, Blur, Copy, Tonemap, SMAA, etc.) | ~80 | Post-processing pipeline |
 | 2.20 - 3.00 s | Early specialized pipelines (SceneForwardMobile:9, :11) | 8 | First specialized variants |
 
-**Bottleneck**: 99% of this phase (4,664 ms out of 4,694 ms) is spent in naga SPIR-V-to-WGSL conversion inside WASM. The actual `createShaderModule` browser calls total only 30 ms. Average per-module naga conversion: 8.3 ms. Longest single conversion: 526 ms (ParticlesShaderRD, 88K chars WGSL output).
+**Bottleneck**: 99% of this phase (4,664 ms out of 4,694 ms) is spent in Tint SPIR-V-to-WGSL conversion inside WASM. The actual `createShaderModule` browser calls total only 30 ms. Average per-module Tint conversion: 8.3 ms. Longest single conversion: 526 ms (ParticlesShaderRD, 88K chars WGSL output).
 
 ### Phase 2: First Major Specialized Shader Wave (4.7 - 6.5 s)
 
@@ -161,7 +161,7 @@ This is the first big burst of pipeline specialization. The engine has determine
 | 12.4 s | 0 fps | FPS drops - heavy GPU work |
 
 The engine renders with ubershaders between compilation waves, but specialized shader compilation is **synchronous on the main thread** (single-threaded WASM, no WorkerThreadPool parallelism). Each compilation burst blocks the main thread entirely, causing FPS to drop to 0-1. FPS is low overall because:
-1. Synchronous naga SPIR-V→WGSL conversion blocks the main thread during each wave
+1. Synchronous Tint SPIR-V→WGSL conversion blocks the main thread during each wave
 2. Dawn defers actual GPU shader compilation to first pipeline use, causing additional stalls
 3. Scene resources (textures, meshes) are still loading
 
@@ -206,7 +206,7 @@ Notable: the steady-state FPS (12-13) is **lower** than the brief peak (50-53 fp
 
 ### Base vs Specialized Modules
 
-| Category | Count | Total WGSL Size | createShaderModule Time | Naga Conversion Time (est.) |
+| Category | Count | Total WGSL Size | createShaderModule Time | Tint Conversion Time (est.) |
 |----------|-------|-----------------|------------------------|-----------------------------|
 | Base modules | 511 | ~8 MB | 25 ms | ~4,664 ms |
 | Specialized modules | 348 | ~32 MB | 2,477 ms* | ~2,084 ms |
@@ -319,7 +319,7 @@ Time(s)  FPS   Notes
 | Activity | Wall Clock | Notes |
 |----------|-----------|-------|
 | Page load + WASM init | 0.3 s | Fast |
-| Naga SPIR-V-to-WGSL conversion | ~6.7 s (cumulative) | In WASM, single-threaded, 99% of shader creation time |
+| Tint SPIR-V-to-WGSL conversion | ~6.7 s (cumulative) | In WASM, single-threaded, 99% of shader creation time |
 | createShaderModule (browser API) | ~2.5 s (cumulative) | Mostly fast; one 810ms outlier |
 | createRenderPipeline (browser API) | ~4.4 ms (cumulative) | Near-instant; Dawn defers real work |
 | Actual GPU shader compilation | Unknown | Hidden inside Dawn; manifests as frame stalls |
@@ -332,7 +332,7 @@ The total wall-clock from first event to last shader module: **37.4 s**. Most of
 
 ## Observations and Notes
 
-1. **Naga conversion is the primary bottleneck**, not browser shader compilation. The naga WASM module converts each SPIR-V blob to WGSL on the main thread, blocking rendering. Average 8.3 ms per module for base shaders, 6.2 ms for specialized shaders.
+1. **Tint conversion is the primary bottleneck**, not browser shader compilation. The Tint WASM module converts each SPIR-V blob to WGSL on the main thread, blocking rendering. Average 8.3 ms per module for base shaders, 6.2 ms for specialized shaders.
 
 2. **SceneForwardMobileShaderRD dominates everything**: 96% of all WGSL code, the majority of pipelines, and most of the wall-clock time.
 
@@ -374,19 +374,19 @@ To change output path: `--output <path>`
 
 ## Updated Results: Override Path (2026-05-08)
 
-The override specialization constant work eliminates all 348 runtime-specialized shader modules by replacing baked specialization constants with WGSL `@id(N) override` declarations. Instead of creating a separate shader module for each specialization variant (requiring a full naga SPIR-V-to-WGSL conversion per module), the base shader modules declare their specialization constants as overrides, and specialization happens at `createRenderPipeline` time via the pipeline's `constants` dictionary. The precompiled WGSL table (378 entries) supplies all base shader source at build time, eliminating the naga WASM module from the runtime entirely.
+The override specialization constant work eliminates all 348 runtime-specialized shader modules by replacing baked specialization constants with WGSL `@id(N) override` declarations. Instead of creating a separate shader module for each specialization variant (requiring a full Tint SPIR-V-to-WGSL conversion per module), the base shader modules declare their specialization constants as overrides, and specialization happens at `createRenderPipeline` time via the pipeline's `constants` dictionary. The precompiled WGSL table (378 entries) supplies all base shader source at build time, eliminating the Tint WASM module from the runtime entirely.
 
-**Why this works**: Previously, each specialized shader was a distinct SPIR-V blob with specialization constants folded in at compile time, requiring naga to convert it to WGSL independently. With the override path, a single base WGSL module contains `@id(0) override SPEC_0: u32 = 0;` declarations. When the engine needs a specialized pipeline, it passes `{ 0: value, 1: value, ... }` to `createRenderPipeline` -- the browser/Dawn handles constant substitution natively with no additional shader modules needed.
+**Why this works**: Previously, each specialized shader was a distinct SPIR-V blob with specialization constants folded in at compile time, requiring Tint to convert it to WGSL independently. With the override path, a single base WGSL module contains `@id(0) override SPEC_0: u32 = 0;` declarations. When the engine needs a specialized pipeline, it passes `{ 0: value, 1: value, ... }` to `createRenderPipeline` -- the browser/Dawn handles constant substitution natively with no additional shader modules needed.
 
-**Important context**: The "before" profiling already had the WGSL cache/precompiled table in place for base shaders. The 6.7s cumulative naga conversion time was entirely from the 348 specialized shader modules that still required runtime SPIR-V-to-WGSL conversion. The override path improvement is specifically about eliminating those 348 runtime conversions.
+**Important context**: The "before" profiling already had the WGSL cache/precompiled table in place for base shaders. The 6.7s cumulative Tint conversion time was entirely from the 348 specialized shader modules that still required runtime SPIR-V-to-WGSL conversion. The override path improvement is specifically about eliminating those 348 runtime conversions.
 
 ### Before / After Comparison
 
 | Metric | Before (Specialized Modules) | After (Override Path) | Improvement |
 |--------|-----------------------------|-----------------------|-------------|
 | Total shader modules | 859 (511 base + 348 specialized) | 490 (all base, 0 specialized) | 43% fewer modules |
-| Specialized modules | 348 (runtime naga conversion) | 0 | 100% eliminated |
-| Naga conversion time | ~6.7s cumulative | 0ms (precompiled table, 378 entries) | 6.7s eliminated |
+| Specialized modules | 348 (runtime Tint conversion) | 0 | 100% eliminated |
+| Tint conversion time | ~6.7s cumulative | 0ms (precompiled table, 378 entries) | 6.7s eliminated |
 | Top shader module compile time | 526ms | 1.54ms | 340x faster |
 | Total base shader compile time | N/A | 28.8ms | -- |
 | All shader modules done | ~38s | 3.1s | 12x faster |
@@ -400,7 +400,7 @@ The override specialization constant work eliminates all 348 runtime-specialized
 
 ### Key Takeaways
 
-1. **Naga WASM is completely removed from the runtime.** All 378 precompiled WGSL entries are loaded from the build-time table. Zero bytes of SPIR-V are converted at runtime.
+1. **Tint WASM is completely removed from the runtime.** All 378 precompiled WGSL entries are loaded from the build-time table. Zero bytes of SPIR-V are converted at runtime.
 
 2. **Shader module creation collapses from 38s to 3.1s.** The 490 base modules load from the precompiled table and compile in 28.8ms total, with the slowest single module at 1.54ms (vs 526ms before).
 

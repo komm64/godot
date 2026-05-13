@@ -72,7 +72,7 @@ const ERROR_CAPTURE_SCRIPT = `
     console.error = function() {
         var msg = Array.prototype.join.call(arguments, ' ');
         window._webgpuDebug.allErrors.push(msg.substring(0, 500));
-        if (msg.indexOf('[SHADER]') >= 0 || msg.indexOf('NAGA') >= 0) {
+        if (msg.indexOf('[SHADER]') >= 0 || msg.indexOf('TINT') >= 0 || msg.indexOf('spirv') >= 0) {
             window._webgpuDebug.shaderFails.push(msg.substring(0, 500));
         }
         if (msg.indexOf('GPUValidationError') >= 0 || msg.indexOf('UNCAPTURED-GPU-ERROR') >= 0) {
@@ -252,7 +252,7 @@ async function runScenePlaywright(scene, browser, timeout) {
             gpuErrors.push(text.substring(0, 200));
         }
 
-        if (text.includes('[SHADER]') || text.includes('NAGA conversion')) {
+        if (text.includes('[SHADER]') || text.includes('Tint conversion') || text.includes('spirv error')) {
             shaderErrors.push(text.substring(0, 200));
         }
 

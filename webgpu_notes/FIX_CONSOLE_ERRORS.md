@@ -167,7 +167,7 @@ Three distinct bugs stacked on top of each other, each hidden by the next. All t
 
 ### What the three bugs were
 
-1. **`multisampled` flag hardcoded to `false` in every BGL entry.** `drivers/webgpu/rendering_device_driver_webgpu.cpp` had `entry.texture.multisampled = false;` at every texture BGL creation site. Godot's `resolve_raster.glsl` declares `uniform sampler2DMS source_depth;` which NAGA translates to `texture_multisampled_2d<f32>` in WGSL — but our BGL reflection scan never detected the multisampled variants and therefore always set the flag to false, so the BGL and the shader module disagreed on the first texture binding.
+1. **`multisampled` flag hardcoded to `false` in every BGL entry.** `drivers/webgpu/rendering_device_driver_webgpu.cpp` had `entry.texture.multisampled = false;` at every texture BGL creation site. Godot's `resolve_raster.glsl` declares `uniform sampler2DMS source_depth;` which Tint translates to `texture_multisampled_2d<f32>` in WGSL — but our BGL reflection scan never detected the multisampled variants and therefore always set the flag to false, so the BGL and the shader module disagreed on the first texture binding.
 
 2. **`sampleType=Float` is illegal for multisampled textures.** Once we flipped `multisampled=true`, the BGL failed a different validation: WebGPU requires `sampleType ∈ { 'unfilterable-float', 'depth', 'sint', 'uint' }` for MSAA bindings — `'float'` (filterable) is never allowed because MSAA textures can't be filtered. The paired sampler also has to be `NonFiltering` rather than `Filtering`.
 
@@ -186,7 +186,7 @@ All in `drivers/webgpu/rendering_device_driver_webgpu.cpp` + `rendering_device_d
 
 3. **New fallback texture `fallback_ms_texture`** — 4×4 R32Float, `sampleCount=4`, usage `TextureBinding|RenderAttachment` (RenderAttachment is required for MSAA textures even though we never render to it). Created in `initialize()` alongside the existing float and cube fallbacks, released in the destructor.
 
-4. **`uniform_set_create` substitution** for `UNIFORM_TYPE_SAMPLER_WITH_TEXTURE` checks the BGL entry's multisampled flag first. If the BGL expects multisampled and the bound texture is either non-MS or depth format, it substitutes `fallback_ms_texture_view` instead of the regular float fallback. This means the resolve shader reads a 4×4 zero texture and produces an (incorrect) depth resolve, **but no GPU validation errors**. A proper MSAA depth resolve would require rewriting the NAGA output to use `texture_depth_multisampled_2d`; that's a deeper structural change deferred to later.
+4. **`uniform_set_create` substitution** for `UNIFORM_TYPE_SAMPLER_WITH_TEXTURE` checks the BGL entry's multisampled flag first. If the BGL expects multisampled and the bound texture is either non-MS or depth format, it substitutes `fallback_ms_texture_view` instead of the regular float fallback. This means the resolve shader reads a 4×4 zero texture and produces an (incorrect) depth resolve, **but no GPU validation errors**. A proper MSAA depth resolve would require rewriting the Tint output to use `texture_depth_multisampled_2d`; that's a deeper structural change deferred to later.
 
 ### Result
 

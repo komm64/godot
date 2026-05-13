@@ -78,12 +78,12 @@ A Godot 4.6 project that programmatically creates a scene exercising **100% of R
 
 ## Usage
 
-### With SPIR-V dump (for naga validation)
+### With SPIR-V dump (for shader validation)
 ```bash
 # Build engine with dump enabled:
 GODOT_DUMP_SPIRV=/tmp/spirv_dump godot --headless --path . --quit
 
-# Validate all dumped SPIR-V through naga:
+# Validate all dumped SPIR-V through Tint:
 node ../shader_corpus/validate_spirv_dump.mjs /tmp/spirv_dump/
 ```
 

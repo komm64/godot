@@ -3,7 +3,6 @@
 // This is the most complex preprocessing pass (~500 lines) — it allocates
 // new IDs, rewrites entry points, manipulates bindings, and injects new
 // instructions. Focused fuzzing here has the highest chance of finding bugs.
-// Mirrors the naga-converter fuzz target split_samplers.rs.
 
 #include "../../spirv_preprocess.h"
 

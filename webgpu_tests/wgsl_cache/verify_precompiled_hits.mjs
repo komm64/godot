@@ -168,7 +168,7 @@ server.listen(0, async () => {
 		console.log(`\n${'─'.repeat(60)}`);
 		console.log(`  Precompiled hits:  ${precompiledHits}`);
 		console.log(`  In-memory hits:    ${cacheHits}`);
-		console.log(`  Naga fallbacks:    ${cacheMisses}`);
+		console.log(`  Tint fallbacks:    ${cacheMisses}`);
 		console.log(`${'─'.repeat(60)}`);
 
 		if (precompiledHits > 0) {
@@ -183,7 +183,7 @@ server.listen(0, async () => {
 			console.log(`\n  RESULT: FAIL — No precompiled table hits!`);
 			console.log(`  The build-time hashes don't match runtime SPIR-V.`);
 			if (cacheMisses > 0) {
-				console.log(`  ${cacheMisses} shaders fell through to naga.`);
+				console.log(`  ${cacheMisses} shaders fell through to Tint.`);
 			}
 		}
 

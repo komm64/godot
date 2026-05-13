@@ -1,8 +1,7 @@
 // Fuzz the complete SPIR-V -> WGSL conversion pipeline.
 //
-// Exercises all 11 SPIR-V preprocessing passes followed by Tint parsing,
-// validation, and WGSL code generation. Mirrors the naga-converter fuzz
-// target spirv_to_wgsl.rs.
+// Exercises all 12 SPIR-V preprocessing passes followed by Tint parsing,
+// validation, and WGSL code generation.
 //
 // Tint can abort() on malformed SPIR-V (TINT_UNIMPLEMENTED, TINT_ICE).
 // Fork isolation around the Tint call prevents one crash from killing the

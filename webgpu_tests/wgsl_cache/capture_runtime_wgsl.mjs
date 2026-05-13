@@ -92,7 +92,7 @@ server.listen(0, async () => {
 		console.log('Loading engine and waiting for shader compilation...');
 		await page.goto(`http://localhost:${port}/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-		// Wait for naga to finish (no new dump entries for 5 seconds).
+		// Wait for Tint to finish (no new dump entries for 5 seconds).
 		let lastCount = 0;
 		let stableCount = 0;
 		for (let i = 0; i < 120; i++) {

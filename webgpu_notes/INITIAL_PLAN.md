@@ -12,7 +12,7 @@
 Godot’s modern renderers already target **RenderingDevice** (abstract API used by Vulkan/Metal).
 We need:
 1. A new **WebGPU RenderingDevice driver** (C++ + Emscripten glue).
-2. Shader translator: Godot’s SPIR-V/GLSL → WGSL (via Naga or Dawn tools).
+2. Shader translator: Godot’s SPIR-V/GLSL → WGSL (via Tint/Dawn).
 3. Integration with Emscripten so `platform=web` builds produce `.wasm` + JS that calls `navigator.gpu`.
 4. Fallback path to WebGL 2.0 (Compatibility renderer) when WebGPU is unavailable.
 5. Build system updates (SCons) + new export template option.
@@ -83,7 +83,7 @@ To let agents work 24/7 without you babysitting:
   - Modern GPU (NVIDIA/AMD – for native validation; WebGPU testing can be CPU-only but faster with GPU).
   - 32+ GB RAM, 8+ cores.
   - ~100 GB SSD.
-- Install once: Emscripten 3.1+, Rust + cargo, Python 3.12, SCons, Git, Docker.
+- Install once: Emscripten 3.1+, Python 3.12, SCons, Git, Docker.
 
 **Recommended Stack for Agents**
 1. **Primary workspace**: GitHub repo (your fork).
@@ -95,7 +95,7 @@ To let agents work 24/7 without you babysitting:
    - Provide a `Dockerfile` + `docker-compose.yml` that includes:
      - Godot build deps
      - Emscripten SDK
-     - Rust + wgpu tools
+     - Dawn/Tint (C++20)
      - Browser testing (Playwright + headless Chrome/Firefox)
    - Agents can spin up fresh containers for each major change.
 4. **Persistent state**:

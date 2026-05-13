@@ -80,12 +80,12 @@ bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_d_particles 
 cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_d && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene E - Skeletal Animation  tmp/benchmarks/scene_e_animated/benchmark.gd
-bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_e/naga_wasm_bg.wasm
+bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e/index.html && cp tmp/benchmarks/exports/webgpu/tint_convert.wasm tmp/benchmarks/exports/webgpu/scene_e/tint_convert.wasm
 # Expected: 20 GPU-skinned cylinders visibly bending/swinging ~120fps
 cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
 # Scene F - SubViewport + SSAO + Bloom  tmp/benchmarks/scene_f_postfx/benchmark.gd
-bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_f_postfx --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_f/naga_wasm_bg.wasm
+bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_f_postfx --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f/index.html && cp tmp/benchmarks/exports/webgpu/tint_convert.wasm tmp/benchmarks/exports/webgpu/scene_f/tint_convert.wasm
 # Expected: 5 spinning PBR cubes, procedural sky, SSAO, bloom, SubViewport torus on quad
 cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 ```
@@ -128,7 +128,7 @@ cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/we
 fps: ~120fps (expected after fix)
 visual: 20 GPU-skinned cylinders animating
 
-**Root cause of original bug**: WGSL scanner in `rendering_device_driver_webgpu.cpp` matched `var<storage, read>` (never produced by NAGA) but missed `var<storage>` (NAGA's actual read-only format). Skeleton shader's `BlendShapeWeights` and `BlendShapeData` fallbacks (`default_rd_storage_buffer`, 16 bytes) were both incorrectly marked as `WGPUBufferBindingType_Storage` (writable) → Chrome rejected the dispatch with "writable storage buffer aliasing".
+**Root cause of original bug**: WGSL scanner in `rendering_device_driver_webgpu.cpp` matched `var<storage, read>` (never produced by Tint) but missed `var<storage>` (Tint's actual read-only format). Skeleton shader's `BlendShapeWeights` and `BlendShapeData` fallbacks (`default_rd_storage_buffer`, 16 bytes) were both incorrectly marked as `WGPUBufferBindingType_Storage` (writable) → Chrome rejected the dispatch with "writable storage buffer aliasing".
 
 **Fix**: Added `var<storage>` detection as read-only in the WGSL scanner (March 2026). Rebuild required — see **rebuild note** below.
 
@@ -143,7 +143,7 @@ cp bin/godot.web.template_release.wasm32.nothreads.zip tmp/benchmarks/templates/
 
 **Re-export and serve**:
 
-bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_e/naga_wasm_bg.wasm
+bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e/index.html && cp tmp/benchmarks/exports/webgpu/tint_convert.wasm tmp/benchmarks/exports/webgpu/scene_e/tint_convert.wasm
 
 cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_e && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 
@@ -156,7 +156,7 @@ expected: 20 GPU-skinned cylinders visibly bending/swinging. FPS ~120. Zero GPU 
 fps: 120fps
 visual: passing as expected
 
-bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_f_postfx --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f/index.html && cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm tmp/benchmarks/exports/webgpu/scene_f/naga_wasm_bg.wasm
+bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_f_postfx --export-release WebGPU /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f/index.html && cp tmp/benchmarks/exports/webgpu/tint_convert.wasm tmp/benchmarks/exports/webgpu/scene_f/tint_convert.wasm
 
 cd /Users/dwalter/Documents/projects/godotwebgpu/godot/tmp/benchmarks/exports/webgpu/scene_f && python3 ../../../serve.py & sleep 0.5 && open -a "Google Chrome" http://localhost:8080
 

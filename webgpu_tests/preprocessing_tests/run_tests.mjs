@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // SPIR-V preprocessing pass tests for the Tint-based WGSL conversion pipeline.
 //
-// Ports the 90 naga-converter Rust unit tests to JavaScript, testing
-// each SPIR-V preprocessing pass via tint_convert_cli end-to-end.
+// Tests all 12 SPIR-V preprocessing passes via tint_convert_cli end-to-end.
 //
 // Usage: node run_tests.mjs
 
@@ -92,7 +91,7 @@ function convertFixture(name) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SPIR-V construction helpers (ported from naga Rust helpers)
+// SPIR-V construction helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SPIRV_MAGIC = 0x07230203;

@@ -17,7 +17,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 EDITOR_BIN="$REPO_ROOT/bin/godot.macos.editor.arm64"
 PROFILER_GD="$SCRIPT_DIR/benchmark_profiler.gd"
 WEBGPU_ZIP="$REPO_ROOT/bin/godot.web.template_release.wasm32.nothreads.zip"
-# Use official Godot 4.6 WebGL template — our codebase's JS has naga/WebGPU
+# Use official Godot 4.6 WebGL template — our codebase's JS has WebGPU
 # loading code baked in even without webgpu=yes, so it can't serve as a
 # clean WebGL baseline.
 WEBGL_ZIP="$HOME/Library/Application Support/Godot/export_templates/4.6.stable.official.89cea1439/web_nothreads_release.zip"

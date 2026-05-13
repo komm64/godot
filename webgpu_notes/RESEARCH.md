@@ -490,13 +490,11 @@ The WebGPU driver must map Godot's `DataFormat` enum to `WGPUTextureFormat`. 3-c
 - **Recommended usage**: Offline/export-time translation (avoid WASM binary bloat)
 - **Approach**: At export time, run all SPIR-V blobs through Tint CLI → produce WGSL strings → ship with web export
 
-### Option 2: Naga (Rust, wgpu's shader compiler)
+### Option 2: ~~Naga~~ (Rust, wgpu's shader compiler) — NOT USED
 
 - **What**: Mozilla/wgpu's shader compiler. SPIR-V → WGSL, GLSL → WGSL, etc.
-- **License**: MIT/Apache 2.0 dual (compatible)
-- **Pros**: Lighter than Tint, good SPIR-V → WGSL support
-- **Cons**: Rust dependency — needs C FFI wrapper or WASM compilation
-- **Recommended for**: Offline tool if Tint is too heavy
+- **Status**: Was initially used but replaced by Tint (Option 1) for better correctness and no Rust dependency
+- **Cons**: Rust dependency, fewer SPIR-V features than Tint, no built-in coordinate space adjustment
 
 ### Option 3: SPIRV-Cross — NOT VIABLE
 
@@ -508,7 +506,7 @@ The WebGPU driver must map Godot's `DataFormat` enum to `WGPUTextureFormat`. 3-c
 
 **Two-stage pipeline**:
 
-1. **Export time (offline)**: Use Tint or Naga CLI to convert all SPIR-V shader blobs → WGSL strings. Store WGSL alongside or instead of SPIR-V in the export.
+1. **Export time (offline)**: Use Tint CLI to convert all SPIR-V shader blobs → WGSL strings. Store WGSL alongside or instead of SPIR-V in the export.
 2. **Runtime (browser)**: `RenderingShaderContainerWebGPU` loads pre-compiled WGSL and passes it directly to `wgpuDeviceCreateShaderModule()` with `WGPUShaderModuleWGSLDescriptor`.
 
 **For user custom shaders**: Either embed a minimal Tint build in the WASM (accepting ~2-5MB size increase) OR require users to provide WGSL for custom shaders on web.
@@ -607,7 +605,7 @@ Module.preinitializedWebGPUDevice = device;
 - **Native 2D rendering**: 24/26 official 2D samples working on desktop (via wgpu-native)
 - Basic resource creation (buffers, textures, pipelines)
 - Basic command buffer recording and submission
-- Some shader translation (likely via Naga since wgpu includes it)
+- Some shader translation (via wgpu's built-in shader compiler)
 
 ### What Didn't Work
 
@@ -673,7 +671,7 @@ Three.js does **NOT** translate GLSL to WGSL. Instead:
 
 - Bevy + wgpu compile to WASM via `wasm32-unknown-unknown` target (Rust native, no Emscripten)
 - wgpu uses `web-sys` (Rust WebAPI bindings) to call `navigator.gpu` directly
-- Naga (shader compiler) compiled into WASM binary (~5-10MB compressed total)
+- Shader compiler compiled into WASM binary (~5-10MB compressed total)
 - Async init via Rust `async/await` + `wasm-bindgen-futures`
 
 ### Performance

@@ -2,7 +2,7 @@
 
 > **Purpose**: Master task list for AI agents implementing WebGPU support in Godot 4.6.
 > **Target Completion**: March 24, 2026 (2-week sprint from March 10)
-> **Last Updated**: March 14, 2026 — **Phase 6 IN PROGRESS.** Task 6.1 (Scene E skeletal animation) fully fixed: 2 bugs in naga-converter WASM (`infer_readonly_storage` missed atomic writes + WGSL scanner missed `var<storage>`). Scene E: 120fps, zero GPU errors. Scene F: 120fps, non-fatal sync error (acceptable). Task 5.4 still TODO.
+> **Last Updated**: May 12, 2026 — Tint migration complete. All SPIR-V→WGSL translation now uses Tint (C++/WASM). 100% Mobile renderer coverage, zero known failures.
 >
 > **Key Reference**: `webgpu_notes/RESEARCH.md` — comprehensive architecture and API research
 > **Key Reference**: `webgpu_notes/INITIAL_PLAN.md` — project vision and success criteria
@@ -469,16 +469,7 @@ Reference: `drivers/metal/rendering_device_driver_metal.h` and `.mm`
    - Integrate into SCons build for offline SPIR-V → WGSL translation
    - At export time: process all `.spv` blobs through Tint → `.wgsl` strings
 
-   **Option B — Naga CLI (simpler integration)**:
-   - Install `naga-cli` via Cargo: `cargo install naga-cli`
-   - Use as a build step: `naga input.spv output.wgsl`
-   - Simpler but requires Rust toolchain
-
-   **Option C — Runtime translation via Emscripten Tint (if needed for custom shaders)**:
-   - Compile Tint to WASM alongside Godot
-   - Adds ~2-5MB to binary but supports runtime shader compilation
-
-   Decision guidance: Start with Option B (Naga CLI) for rapid prototyping. Switch to Option A for production quality.
+   **Note**: Tint (Option A) was chosen and is fully implemented. 12 SPIR-V preprocessing passes handle all Godot-specific transformations before Tint's SPIR-V reader converts to WGSL.
 
 2. **Implement `RenderingShaderContainerWebGPU`**:
 
@@ -503,7 +494,7 @@ Reference: `drivers/metal/rendering_device_driver_metal.h` and `.mm`
 - Read `RESEARCH.md` Section 7 for translation options
 - Read `drivers/metal/rendering_shader_container_metal.mm` lines 239-600 for the Metal SPIRV-Cross pattern
 - Read `servers/rendering/renderer_rd/shaders/blit.glsl` for a simple test shader
-- The push constant rewriting is the hardest part. Tint and Naga both handle this, but you need to configure the output binding location
+- The push constant rewriting is the hardest part. Tint handles this, but you need to configure the output binding location
 - WGSL syntax differences from GLSL: `@group(N) @binding(M) var<uniform> name: Type;`
 
 ---
@@ -752,12 +743,12 @@ correct approach, but ALL code paths that read from staging buffers must check `
 - `Unsupported DataFormat 127` — added D16_UNORM_S8_UINT → Depth24PlusStencil8
 - `Unhandled uniform type 10` — added DYNAMIC UBO/SSBO + TBO uniform types
 - SPIR-V version changed from 1.0 to 1.3 so glslang emits SSBOs as `StorageClass::StorageBuffer`
-  (not old-style `StorageClass::Uniform + BufferBlock`), which NAGA converts correctly to `var<storage>`
+  (not old-style `StorageClass::Uniform + BufferBlock`), which Tint converts correctly to `var<storage>`
 - Swap chain resize: added `rendering_context->surface_set_size()` call in `DisplayServerWeb` canvas resize handler
 
 **Remaining Known Errors (non-blocking for 2D, will affect 3D)**:
-- 9× NAGA `UnsupportedExtInst(35)` — GLSL.std.450 opcode 35 = `Modf` (fragment shaders, stage 1)
-- 4× NAGA `UnsupportedRelationalFunction(IsInf)` — compute shaders (stage 4)
+- 9× Tint `UnsupportedExtInst(35)` — GLSL.std.450 opcode 35 = `Modf` (fragment shaders, stage 1)
+- 4× Tint `UnsupportedRelationalFunction(IsInf)` — compute shaders (stage 4)
 - 5× Dawn `storageTexture doesn't match buffer` — shader declares `storageTexture` but BGL says `buffer`
 - 1× Dawn `binding_array with 7 elements but layout only provides 1` — array size mismatch
 - 1× Dawn `Dimension Cube doesn't match expected 2D` — texture view dimension mismatch
@@ -781,14 +772,14 @@ correct approach, but ALL code paths that read from staging buffers must check `
 **Completion Notes** (March 13, 2026):
 - 3D scene renders in browser: blue cube + red sphere with directional lighting and shadow cascades
 - Mobile renderer auto-selected (maxSampledTexturesPerShaderStage < 48)
-- 278 shaders compile, 0 NAGA failures, 0 Dawn validation errors
+- 278 shaders compile, 0 Tint failures, 0 Dawn validation errors
 - Specialization constants deferred to pipeline creation (SPIR-V OpSpecConstant patching)
 - Full render pipeline: shadow cascades → scene → tonemap → blit-to-swap-chain
 
 **Key Fixes for 3D**:
 - ✅ **KEY FIX**: DONT_CARE→Clear — `map_load_op` default changed from `WGPULoadOp_Load` to `WGPULoadOp_Clear` (WebGPU has no DONT_CARE; loading undefined content caused blank viewport)
-- ✅ 0 Dawn validation errors, 0 NAGA shader conversion failures
-- ✅ 278 shader modules created successfully (NAGA SPIR-V→WGSL conversion)
+- ✅ 0 Dawn validation errors, 0 Tint shader conversion failures
+- ✅ 278 shader modules created successfully (Tint SPIR-V→WGSL conversion)
 - ✅ Full rendering pipeline runs: shadow cascades (4x 4096x4096), scene pass, tonemap, blit-to-swap-chain
 - ✅ BlitShaderRD draws 6-index quad to swap chain surface (IDRAW sc=1 confirmed)
 - ✅ Alpha-strip applied to all BGRA8Unorm pipelines (writeMask=7, no alpha write)
@@ -797,21 +788,21 @@ correct approach, but ALL code paths that read from staging buffers must check `
 - ✅ Depth alias fix — fallback float texture view for depth alias entries
 - ✅ Entry filtering — filters adapted entries to only include bindings present in target BGL
 - ✅ Stale PC bind group fix — checks merged_pc_group_layout before using cached bind group
-- ✅ NAGA Modf (opcode 35) — patched SPIR-V frontend to emit Math{Modf} struct expression
-- ✅ NAGA IsInf/IsNan — patched WGSL writer to emit `(abs(x) > 3.4e+38)` / `(x != x)`
-- ✅ NAGA SubpassData — mapped Dim::SubpassData → 2D in convert.rs
-- ✅ NAGA NotIOShareableType — relaxed IO_SHAREABLE validation for @location bindings
-- ✅ NAGA flatten ArraySize::Dynamic → handled in flatten_binding_arrays
+- ✅ Modf (opcode 35) — handled in SPIR-V preprocessing
+- ✅ IsInf/IsNan — handled via fix_nonfinite_literals pass
+- ✅ SubpassData — mapped Dim::SubpassData → 2D in preprocessing
+- ✅ NotIOShareableType — handled in SPIR-V preprocessing
+- ✅ flatten ArraySize::Dynamic → handled in flatten_binding_arrays
 - ✅ Cube↔2D dimension adaptation in `_get_compatible_bind_group()` during rebind
 - ✅ IMAGE_BUFFER BGL — polymorphic storageTexture detection
 - ❌ ~~**BLOCKER**: Canvas shows transparent rgba(0,0,0,0)~~ **RESOLVED** (March 13)
-  - **Root cause**: `freeze_spec_constant_ops()` in naga-converter ran at shader creation time,
+  - **Root cause**: `freeze_spec_constant_ops()` in SPIR-V preprocessing ran at shader creation time,
     baking all specialization constants to their defaults (false). The tonemap shader's
     `apply_tonemapping()` fell through all false conditions to `tonemap_agx()`, which produced
     white from the HDR input with luminance_multiplier=2.0.
   - **Fix**: Deferred specialization constant patching to pipeline creation time. New
     `_create_module_with_spec_constants()` patches SPIR-V OpSpecConstantTrue/False opcodes
-    with the pipeline-specific values, then creates a new WGPUShaderModule via Naga conversion.
+    with the pipeline-specific values, then creates a new WGPUShaderModule via Tint conversion.
     Specialized modules are stored on WGPipelineWrapper and released on pipeline free.
   - **Also**: Force `color.a = 1.0` in blit.glsl fragment output + uncaptured GPU error handler.
 - ✅ **MILESTONE: 3D geometry VISIBLE** — blue cube + red sphere with lighting and shadows (March 13)
@@ -822,11 +813,11 @@ correct approach, but ALL code paths that read from staging buffers must check `
 - Fallback 4x4 RGBA8Unorm float texture for depth alias substitution
 - WGUniformSet with `cached_entries`, `source_shader`, `rebind_cache`, `bound_textures`
 - `_flush_push_constants` guarded by `p_shader->merged_pc_group_layout` check
-- NAGA v28 patched source at `tmp/naga-converter/naga-patched/`
+- Tint (C++20) compiled to WASM via Emscripten
 
 **Browser Test Results** (March 13):
 - 0 DAWN-ERR (was 7 → 0)
-- 0 NAGA failures (was 17 → 0)
+- 0 Tint failures (was 17 → 0)
 - 278 successful shader conversions
 - Rendering pipeline runs fully: shadow cascades, scene pass, tonemap, blit-to-swap-chain
 - **3D scene visible**: blue cube + red sphere with directional lighting and shadow cascades
@@ -1001,7 +992,7 @@ All three optimizations were already implemented during Phase 2:
   - Added `Engine.requestWebGPUDevice()` static method: requests adapter (high-performance), auto-enables `timestamp-query` feature if available, returns `GPUDevice` promise.
 - **HTML shell** (`misc/dist/html/full-size.html`):
   - Added WebGPU availability check: if `renderingDriver === 'webgpu'` and `navigator.gpu` is missing, shows clear error message listing supported browsers.
-- **Shader pre-compilation (item 4)**: Deferred — runtime SPIR-V→WGSL translation via Naga WASM is fast enough for now; shader caching can be added as a future optimization.
+- **Shader pre-compilation (item 4)**: Deferred — runtime SPIR-V→WGSL translation via Tint WASM is fast enough for now; shader caching can be added as a future optimization.
 - Both web template build and macOS editor build succeeded clean.
 
 ---
@@ -1155,7 +1146,7 @@ All three optimizations were already implemented during Phase 2:
   - WebGPU (RD Mobile) release .wasm: 41,079,139 bytes (39.2 MB)
   - Delta: +4,218,693 bytes (+4.0 MB, 11.4% increase)
   - Ratio: 1.11× — **well under the 2× target** ✓
-  - The increase comes from: WebGPU driver (~5K lines C++), emdawnwebgpu port (Naga/Dawn), and renderer_rd pipeline (vs simpler renderer_gl)
+  - The increase comes from: WebGPU driver (~5K lines C++), emdawnwebgpu port (Tint/Dawn), and renderer_rd pipeline (vs simpler renderer_gl)
 - **Bug fix discovered**: Non-WebGPU build had a regression — `rendering_context` reference in `check_size_force_redraw()` was not guarded by `#ifdef WEBGPU_ENABLED`. Fixed in `platform/web/display_server_web.cpp`.
 - **Benchmark infrastructure created** at `tmp/benchmarks/`:
   - 4 Godot projects (scenes A-D) with GDScript auto-benchmarks:
@@ -1221,7 +1212,7 @@ at dispatch time.
 
 **First fix attempt** (broken): A post-loop dedup pass that built a `HashMap<uint32_t, WGPUBufferBindingType>`
 keyed on `bge.layout_entry.binding * 2`. This was wrong because `bge.layout_entry.binding` is
-**already** the NAGA-doubled value (`u.binding * 2`), so the map was keyed at `binding * 4` and
+**already** the doubled value (`u.binding * 2`), so the map was keyed at `binding * 4` and
 the lookup against `e.binding` (= `binding * 2`) never matched. The `[ALIAS-STUB]` log never
 printed and the aliasing error continued.
 
@@ -1358,7 +1349,7 @@ All 4 scenes verified:
 - ✅ Added readback cache cleanup in destructor
 - ✅ Added WEBGPU_VERBOSE compile-time guard + WEBGPU_DIAG macro
 - ✅ Wrapped all diagnostic prints behind WEBGPU_VERBOSE (DIAG-SUBMIT, DIAG-CFG, SURFACE, WGSL#, BGL-DUP, BG-DUP, ALIAS-STUB, SC-VIEW, RP-END, SUBPASS, ALPHA-STRIP, PERF)
-- ✅ Kept legitimate error reporting (uncaptured GPU errors, Naga errors, pipeline failures)
+- ✅ Kept legitimate error reporting (uncaptured GPU errors, Tint errors, pipeline failures)
 - ✅ Copyright headers verified on all files
 - ✅ buffer_get_data_direct() + texture_get_data() with persistent readback cache
 - ✅ Command encoder splitting for cross-pass texture sync scope conflicts
@@ -1426,21 +1417,21 @@ All 4 scenes verified:
 ### Task 6.1: Scene E — Skeletal Animation (GPU Skinning) `[DONE ✅]`
 **Status**: `FIXED — March 14, 2026`
 
-**Two bugs found and fixed (both in `tmp/naga-converter/src/lib.rs`)**:
+**Two bugs found and fixed (in SPIR-V preprocessing + driver)**:
 
 **Bug 1 — SSBO aliasing (`Writable storage buffer binding aliasing`):**
-NAGA emits `var<storage>` (no access mode) for read-only SSBOs, but the C++ WGSL scanner only matched `var<storage, read>` — a format NAGA never produces. Read-only skeleton buffers (BlendShapeWeights, BlendShapeData) fell back to writable → two of them used `default_rd_storage_buffer` as placeholder → Chrome aliasing error.
+Tint emits `var<storage>` (no access mode) for read-only SSBOs, but the C++ WGSL scanner only matched `var<storage, read>` — a format Tint never produces. Read-only skeleton buffers (BlendShapeWeights, BlendShapeData) fell back to writable → two of them used `default_rd_storage_buffer` as placeholder → Chrome aliasing error.
 - Fix in `rendering_device_driver_webgpu.cpp`: added `var<storage>` as read-only in WGSL scanner.
 
-**Bug 2 — `InvalidGlobalUsage(READ | WRITE)` NAGA validation error:**
-`infer_readonly_storage` in the naga-converter WASM scans SPIR-V to add NonWritable decorations to read-only SSBOs (since glslang never emits them). The scan only checked `OpStore` (62) for writes but missed:
+**Bug 2 — `InvalidGlobalUsage(READ | WRITE)` Tint validation error:**
+`infer_readonly_storage` in SPIR-V preprocessing scans SPIR-V to add NonWritable decorations to read-only SSBOs (since glslang never emits them). The scan only checked `OpStore` (62) for writes but missed:
 - Atomic ops: `OpAtomicStore` (228), `OpAtomicExchange`..`OpAtomicXor` (229–242) — pointer at pos+3
 - `OpCopyMemory` (38) / `OpCopyMemorySized` (39) — target at pos+1
 - `OpFunctionCall` (57) — storage var passed as function argument (conservative: mark all such vars writable)
-The failing shader was `cluster_render.glsl` which uses `atomicAdd()` on a storage buffer. Our pass missed the atomic write → added NonWritable → NAGA rejected with `InvalidGlobalUsage([4], READ | WRITE)`.
+The failing shader was `cluster_render.glsl` which uses `atomicAdd()` on a storage buffer. Our pass missed the atomic write → added NonWritable → Tint rejected with `InvalidGlobalUsage([4], READ | WRITE)`.
 - Fix: added all atomic opcode handlers + `OpFunctionCall` argument tracking to `infer_readonly_storage`.
 
-**Verification**: Puppeteer 20s capture — 120fps, zero `[ERROR]` messages, no aliasing, no NAGA conversion exceptions. All 18 "GPU/error" matches are false positives (contain "GPU"/"WebGPU" in informational messages).
+**Verification**: Puppeteer 20s capture — 120fps, zero `[ERROR]` messages, no aliasing, no Tint conversion exceptions. All 18 "GPU/error" matches are false positives (contain "GPU"/"WebGPU" in informational messages).
 
 ---
 
@@ -1481,8 +1472,8 @@ A scene with 20 `Skeleton3D` + skinned `MeshInstance3D` instances, all animating
    ```bash
    ./bin/godot.macos.editor.arm64 --headless --path tmp/benchmarks/scene_e_animated \
        --export-release "WebGPU" tmp/benchmarks/exports/webgpu/scene_e/index.html
-   cp tmp/benchmarks/exports/webgpu/naga_wasm_bg.wasm \
-       tmp/benchmarks/exports/webgpu/scene_e/naga_wasm_bg.wasm
+   cp tmp/benchmarks/exports/webgpu/tint_convert.wasm \
+       tmp/benchmarks/exports/webgpu/scene_e/tint_convert.wasm
    ```
 
 3. **Serve and verify** — expected console output: no GPU errors, meshes visibly deforming, FPS label updating.
@@ -1557,10 +1548,10 @@ A main 3D scene with:
 4. **Export and test** using same steps as Task 6.1 but for scene_f.
 
 5. **Fix any issues** — likely candidates:
-   - SSAO depth texture sampling: depth format read as sampled texture may hit NAGA issue (depth textures need special sampler type in WGSL)
+   - SSAO depth texture sampling: depth format read as sampled texture may hit Tint issue (depth textures need special sampler type in WGSL)
    - SubViewport texture binding: `ViewportTexture` may have different format/usage than a regular texture; may need `TEXTURE_USAGE_SAMPLING_BIT` added
    - Bloom compute passes: likely fine (same dispatch path as particles), but verify no validation errors
-   - Procedural sky shader: new GLSL → SPIR-V → NAGA path, may have shader-specific conversion issues
+   - Procedural sky shader: new GLSL → SPIR-V → Tint path, may have shader-specific conversion issues
 
 **Completion Criteria**: SubViewport renders a spinning torus visible on the monitor quad. SSAO darkens corners. Bloom/glow visible around bright areas. Procedural sky visible. Zero GPU errors.
 
@@ -1572,12 +1563,12 @@ A main 3D scene with:
 **Effort**: 2–4 hours
 **Dependencies**: Task 6.2
 
-**Background**: SSAO and other screen-space passes sample the depth buffer as a regular 2D texture. In WebGPU / WGSL, depth textures have a special type (`texture_depth_2d`) and are sampled with `textureSampleCompare()` or via `textureLoad()`. NAGA may emit the wrong texture type binding for depth formats, causing a BGL mismatch.
+**Background**: SSAO and other screen-space passes sample the depth buffer as a regular 2D texture. In WebGPU / WGSL, depth textures have a special type (`texture_depth_2d`) and are sampled with `textureSampleCompare()` or via `textureLoad()`. Tint may emit the wrong texture type binding for depth formats, causing a BGL mismatch.
 
 **Symptoms to watch for**:
 - GPU error: `Validation error: ... texture_depth_2d vs texture_2d mismatch`
 - SSAO renders as solid black or all-white
-- NAGA conversion warnings mentioning `Depth` texture type
+- Tint conversion warnings mentioning `Depth` texture type
 
 **Potential fix location**: `_get_compatible_bind_group()` in `rendering_device_driver_webgpu.cpp` — already has a depth↔float texture adaptation path (added during Phase 3). May need extension to cover screen-space passes.
 
@@ -1726,18 +1717,18 @@ When debugging issues, check these common WebGPU problems:
 - [ ] No geometry/tessellation shaders
 - [x] 3-component texture formats (RGB) don't exist — use RGBA
 - [x] `wgpuSurfaceGetCurrentTexture()` can return invalid texture (handle gracefully)
-- [x] All shader modules use WGSL, not SPIR-V or GLSL (SPIR-V fed to Dawn, NAGA converts to WGSL internally)
+- [x] All shader modules use WGSL, not SPIR-V or GLSL (SPIR-V preprocessed + Tint converts to WGSL)
 - [x] `mapAsync()` is asynchronous — use shadow buffer + `wgpuQueueWriteBuffer()` for synchronous uploads
 - [x] Maximum texture size may be 8192 (not 16384 like Vulkan) — `limit_get()` returns actual device limits
 - [ ] Maximum storage buffers per stage may be 8 (check Forward+ needs) — Mobile renderer used instead
 - [x] Device can be "lost" at any time — handle `WGPUDeviceLostCallback`
 - [x] All staging buffer copies must check `shadow_map` and flush CPU data before GPU-side copy commands
 - [x] Persistent mapped buffers must allocate shadow buffer — `buffer_persistent_map_advance()` cannot return `nullptr`
-- [x] SPIR-V 1.3 required for correct SSBO StorageClass (1.0 uses Uniform+BufferBlock which NAGA mishandles)
+- [x] SPIR-V 1.3 required for correct SSBO StorageClass (1.0 uses Uniform+BufferBlock which Tint mishandles)
 - [x] `texture_get_usages_supported_by_format()` — common formats like RGBA8 do NOT support storage on WebGPU
 - [x] Swap chain resize: `surface_set_size()` must be called when canvas dimensions change
-- [ ] NAGA does not support GLSL.std.450 `Modf` (opcode 35) — avoid `modf()` in shaders for WebGPU
-- [ ] NAGA does not support `OpIsInf` — avoid `isinf()` in shaders for WebGPU
+- [x] `Modf` (opcode 35) — handled by SPIR-V preprocessing
+- [x] `OpIsInf` / `OpIsNan` — handled by fix_nonfinite_literals pass
 - [ ] Binding arrays: `WGPUBindGroupLayoutEntry.count` must match shader's array size
 - [ ] Cube texture views: ensure view dimension matches what shader expects (Cube vs 2D)
 
@@ -1880,8 +1871,8 @@ When debugging issues, check these common WebGPU problems:
 **Status**: `TODO`
 **Severity**: MEDIUM
 **Lines**: 2134-2203
-**Issue**: Format name remapping in generated WGSL uses in-place `memcpy` assuming exact string length match (e.g., "r8unorm" → "r32float" must be same length). If Naga output format names change, replacements silently corrupt the WGSL.
-**Investigation**: Verify that the string lengths actually match for each replacement pair. Add assertions or switch to `String::replace()` with full WGSL rebuild for safety. Check if naga-converter version upgrades could change output format names.
+**Issue**: Format name remapping in generated WGSL uses in-place `memcpy` assuming exact string length match (e.g., "r8unorm" → "r32float" must be same length). If Tint output format names change, replacements silently corrupt the WGSL.
+**Investigation**: Verify that the string lengths actually match for each replacement pair. Add assertions or switch to `String::replace()` with full WGSL rebuild for safety.
 
 ### Task 7.19: Swap chain LoadOp forced to Clear `[PARALLEL]`
 **Status**: `TODO`

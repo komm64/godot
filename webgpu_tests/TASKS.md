@@ -4,7 +4,7 @@
 
 | Category | Status | What Exists | What's Missing |
 |----------|--------|-------------|----------------|
-| **Shader pipeline (SPIR-V -> WGSL)** | Done | 9 hand-crafted GLSL fixtures compiled & validated through naga-converter WASM | Fuzz testing of the shader pipeline (random/malformed SPIR-V inputs) |
+| **Shader pipeline (SPIR-V -> WGSL)** | Done | 9 hand-crafted GLSL fixtures compiled & validated through Tint WASM | Fuzz testing of the shader pipeline (random/malformed SPIR-V inputs) |
 | **Full engine SPIR-V validation** | Done | All 309 engine-compiled shaders validated offline via `validate_spirv_dump.mjs` with expected-failures baseline | — |
 | **End-to-end smoke test** | Done | Headless Chrome runs exported Godot project, checks no shader errors / device-lost | Multi-browser smoke test (Firefox/Safari headless) |
 | **Resource lifecycle stress** | Done | Rapid create/destroy of buffers, textures, pipelines in standalone browser test | — |
@@ -13,9 +13,9 @@
 | **CI pipeline** | Done | GitHub Actions workflow with parallel jobs, path-triggered, merge-gating | — |
 | **Shader coverage scene** | Done | GDScript scene exercising 100% of RenderingDevice shader paths (all material/lighting/post-process combos) | — |
 | **Unit tests (driver)** | Done | 305 JS tests covering ring buffer, shadow buffer, bind group layout, pipeline hashing, command buffer, format mapping, buffer alignment, std140 packing, texture layout, texture conversion, bind group compatibility | — |
-| **Unit tests (naga-converter)** | Done | 71 Rust `#[test]` covering all rewriting passes, post-parse fixes, end-to-end SPIR-V → WGSL, and error cases | — |
+| **Unit tests (SPIR-V preprocessing)** | Done | 191 JS tests covering all 12 SPIR-V rewriting passes, end-to-end SPIR-V → WGSL, and error cases | — |
 | **Regression test suite** | Missing | No named/tracked regression cases | A suite of known-bug repros that run in CI to prevent recurrence |
-| **Fuzz testing** | Done | 3 cargo-fuzz targets (spirv_to_wgsl, preprocess_passes, split_samplers) with seeded corpus; found & fixed 4 bugs | — |
+| **Fuzz testing** | Done | 3 C++ fuzz targets (spirv_to_wgsl, preprocess_passes, split_samplers) with seeded corpus; found & fixed 4 bugs | — |
 | **Multi-browser CI** | Done | Scene smoketest runs 18 scenes on Chrome + Firefox + Safari; CI runs Chrome + Firefox | Safari CI automation (requires macOS runner) |
 | **Performance benchmarks** | Missing | *Nothing* | Frame-time / draw-call benchmarks to catch performance regressions (shader compile time, IPC overhead, buffer upload) |
 | **Async readback tests** | Missing | *Nothing dedicated* | Test viewport capture, GPU->CPU buffer readback timing, fence/callback correctness |
@@ -23,21 +23,23 @@
 
 ## Task Breakdown
 
-### 1. Unit tests: naga-converter (Rust `#[test]`) — DONE
+### 1. Unit tests: SPIR-V preprocessing (JS) — DONE
 
-50 Rust unit tests in `drivers/webgpu/naga-converter/src/lib.rs`:
+191 JavaScript tests in `webgpu_tests/preprocessing_tests/run_tests.mjs`:
 
-- [x] `freeze_spec_constant_ops` — 6 tests (no-op, rewrite, evaluate IAdd, bool, SpecId stripping, composites)
-- [x] `rewrite_copy_logical` — 5 tests (no-op, single/multiple replace, preserves others, too-small input)
-- [x] `rewrite_terminate_invocation` — 4 tests (no-op, single/multiple replace, too-small input)
-- [x] `infer_readonly_storage` — 6 tests (no storage, adds NonWritable, written var, access-chain write, no duplicate, mixed)
-- [x] `convert_push_constants_to_uniforms` — 3 tests (no push constants, rewrites storage class, injects decorations)
-- [x] `split_combined_samplers` — 2 tests (no combined, basic split)
-- [x] `fix_depth2_images` — 3 tests (depth=0 unchanged, depth=2→1, depth=1 preserved)
-- [x] `eval_spec_op` — 10 tests (arithmetic, logical, select, comparisons, bitwise, unknown)
-- [x] `fix_fmax_literals` — 3 tests (positive, negative, no-match)
-- [x] End-to-end: 2 tests (minimal vertex shader, fragment with OpTerminateInvocation)
-- [x] Edge cases: 3 tests (empty input, header-only, idempotency)
+- [x] `freeze_spec_constant_ops` — tests for no-op, rewrite, evaluate IAdd, bool, SpecId stripping, composites
+- [x] `rewrite_copy_logical` — tests for no-op, single/multiple replace, preserves others, too-small input
+- [x] `rewrite_terminate_invocation` — tests for no-op, single/multiple replace, too-small input
+- [x] `infer_readonly_storage` — tests for no storage, adds NonWritable, written var, access-chain write, no duplicate, mixed
+- [x] `convert_push_constants_to_uniforms` — tests for no push constants, rewrites storage class, injects decorations
+- [x] `split_combined_samplers` — tests for no combined, basic split
+- [x] `fix_depth2_images` — tests for depth=0 unchanged, depth=2→1, depth=1 preserved
+- [x] `eval_spec_op` — tests for arithmetic, logical, select, comparisons, bitwise, unknown
+- [x] `fix_nonfinite_literals` — tests for positive, negative, no-match
+- [x] `flatten_binding_arrays` — tests for array flattening, access chain rewriting
+- [x] `negate_position_y` — tests for Y-flip insertion
+- [x] `strip_restrict_decoration` — tests for restrict removal
+- [x] End-to-end and edge cases
 
 ### 2. Unit tests: WebGPU driver (JS isolation) — DONE
 
@@ -52,22 +54,15 @@
 - [x] Buffer alignment and offset calculations (33 tests)
 - [x] Uniform buffer packing (std140 layout) (23 tests)
 
-### 3. Fuzz testing (naga-converter) — DONE
+### 3. Fuzz testing (SPIR-V preprocessing) — DONE
 
-3 cargo-fuzz targets in `drivers/webgpu/naga-converter/fuzz/`:
+3 C++ fuzz targets in `drivers/webgpu/tint_cli/fuzz/`:
 
-- [x] `spirv_to_wgsl` — full pipeline (all passes + naga parse + WGSL gen), catch_unwind for naga panics
-- [x] `preprocess_passes` — all 7 SPIR-V rewriting passes chained, no naga parsing
-- [x] `split_samplers` — most complex pass (~500 lines) in isolation
-- [x] Seeded corpus: 9 .spv fixtures + 2 regression files + 6 synthetic edge cases
-- [x] CI job runs all 3 targets for 60s each on every push/PR
-- [x] Local CI (`local_ci.sh`) Stage 3 runs fuzz tests when Rust nightly available
-
-Bugs found and fixed by fuzzing:
-- Integer overflows in `split_combined_samplers` (3 multiplication sites → `wrapping_mul`/`wrapping_add`)
-- Out-of-bounds read in `read_word` (added bounds check)
-- `alloc_id` overflow when SPIR-V bound = u32::MAX (`next_id += 1` → `wrapping_add`)
-- Conditional compilation fix for `log()` and `spirv_to_wgsl` outside WASM runtime
+- [x] `spirv_to_wgsl` — full pipeline (all 12 preprocessing passes + Tint SPIR-V reader + WGSL writer)
+- [x] `preprocess_passes` — all 12 SPIR-V rewriting passes chained, no Tint parsing
+- [x] `split_samplers` — most complex pass in isolation
+- [x] Seeded corpus from engine shader fixtures
+- [x] CI job runs fuzz targets on every push/PR
 
 ### 4. Regression test suite
 
@@ -85,7 +80,7 @@ Bugs found and fixed by fuzzing:
 
 ### 6. Performance benchmarks
 
-- [ ] Shader compile time benchmark (measure naga-converter throughput)
+- [ ] Shader compile time benchmark (measure Tint conversion throughput)
 - [ ] Frame-time benchmark scene (stable scene, measure ms/frame variance)
 - [ ] Buffer upload throughput benchmark
 - [ ] CI job that runs benchmarks and reports regressions (not merge-blocking, warning-only)

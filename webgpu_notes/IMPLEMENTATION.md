@@ -6,8 +6,8 @@
 ## Implementation Statistics
 
 - **Total driver code**: ~6,800 lines across 9 files in `drivers/webgpu/`
-- **Shader translation**: Naga v28 (patched) compiled to WASM, ~2 MB
-- **Shaders compiling**: 278 unique shaders (0 Naga failures, 0 Dawn validation errors)
+- **Shader translation**: Tint (C++20, compiled to WASM via Emscripten)
+- **Shaders compiling**: 278 unique shaders (0 Tint failures, 0 Dawn validation errors)
 - **Renderer**: Mobile renderer auto-selected (WebGPU typically reports 16 sampled textures/stage; Forward+ requires ≥48)
 
 ## Architecture Decisions (Final)
@@ -20,9 +20,9 @@
 
 ### 2. Shader Pipeline
 ```
-GLSL (Godot shaders) → SPIR-V (glslang, build-time) → WGSL (Naga, runtime)
+GLSL (Godot shaders) → SPIR-V (glslang, build-time) → WGSL (Tint, runtime)
 ```
-- Naga patched for: combined image-sampler splitting, push constant → storage buffer rewrite, binding remapping
+- 12 SPIR-V preprocessing passes before Tint: combined image-sampler splitting, push constant → uniform buffer rewrite, binding remapping, Y-flip, etc.
 - WGSL source passed to `wgpuDeviceCreateShaderModule()` with `WGPUShaderSourceWGSL`
 - Reflection data extracted from SPIR-V at container creation time
 
@@ -63,7 +63,7 @@ GLSL (Godot shaders) → SPIR-V (glslang, build-time) → WGSL (Naga, runtime)
 | Texture upload | `wgpuQueueWriteTexture` | 256-byte row alignment enforced |
 | Barriers | No-op | WebGPU auto-tracks |
 | Bind groups | Cached + adapted | Per-shader layout adaptation when needed |
-| Shader compile | Naga WASM (~5ms/shader) | One-time cost at shader creation |
+| Shader compile | Tint WASM (~5ms/shader) | One-time cost at shader creation |
 
 ## Browser Compatibility
 

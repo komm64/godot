@@ -127,9 +127,9 @@ static bool parse_group_binding(const char *p, unsigned int &r_grp, unsigned int
 // =============================================================================
 //
 // emdawnwebgpu only accepts WGSL, so every shader stage must be converted from
-// SPIR-V. Previously this used naga (Rust→WASM); now it uses Tint (C++, linked
-// directly). SPIR-V preprocessing (push constant rewriting, sampler splitting,
-// Y-flip, etc.) runs before Tint's SpirvToWgsl.
+// SPIR-V. Tint (C++, linked directly into the engine WASM) handles the
+// conversion. Twelve SPIR-V preprocessing passes (push constant rewriting,
+// sampler splitting, Y-flip, etc.) run before Tint's SpirvToWgsl.
 //
 // Cache lives for process lifetime — the SPIR-V → WGSL mapping is independent
 // of the WebGPU device, and a single process never creates more than ~1k

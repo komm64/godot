@@ -3,7 +3,7 @@
  *
  * Serves the exported Godot WebGPU project in headless Chrome and validates:
  * 1. WebGPU device initializes without errors
- * 2. No shader compilation failures (NAGA conversion errors)
+ * 2. No shader compilation failures (SPIR-V → WGSL conversion errors)
  * 3. No device-lost events
  * 4. Engine runs for the configured frame count and exits cleanly
  *
@@ -129,7 +129,7 @@ async function main() {
         const text = msg.text();
 
         // Track shader errors
-        if (text.includes('[SHADER]') || text.includes('NAGA conversion')) {
+        if (text.includes('[SHADER]') || text.includes('Tint conversion') || text.includes('spirv error')) {
             shaderErrors.push(text);
             console.error(`  [SHADER ERROR] ${text}`);
         }
