@@ -2900,6 +2900,7 @@ bool RenderingDeviceDriverWebGPU::command_buffer_begin(CommandBufferID p_cmd_buf
 	cmd->active_encoder = WGCommandBuffer::NONE;
 	cmd->push_constants_dirty = false;
 	cmd->push_constant_data_len = 0;
+	cmd->invalidate_bind_groups();
 
 	return true;
 }
@@ -5109,8 +5110,9 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 	}
 
 	// Add shadow read bindings for read_write storage texture splits.
-	// For each split, create a GPU copy of the original texture and bind it
-	// at the shadow read slot (write_binding + 1).
+	// For each split, create a read-only shadow texture and bind it at the
+	// shadow read slot. The shadow is kept in sync by texture uploads and by
+	// post-dispatch source->shadow copies for compute writes.
 	for (const KeyValue<uint32_t, uint32_t> &kv : shader->rw_storage_splits) {
 		uint32_t split_grp = kv.key >> 16;
 		uint32_t write_bnd = kv.key & 0xFFFF;
@@ -5130,7 +5132,9 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 		WGPUTextureDescriptor shadow_desc = {};
 		shadow_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
 		shadow_desc.dimension = orig_tex->dimension;
-		shadow_desc.size = { orig_tex->width, orig_tex->height, orig_tex->depth };
+		shadow_desc.size.width = orig_tex->width;
+		shadow_desc.size.height = orig_tex->height;
+		shadow_desc.size.depthOrArrayLayers = (orig_tex->dimension == WGPUTextureDimension_3D) ? orig_tex->depth : orig_tex->layers;
 		shadow_desc.format = orig_tex->format;
 		shadow_desc.mipLevelCount = orig_tex->mipmaps;
 		shadow_desc.sampleCount = orig_tex->sample_count;
@@ -5161,6 +5165,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 			entries.push_back(shadow_entry);
 			us->rw_shadow_textures.push_back(shadow_tex);
 			us->rw_shadow_views.push_back(shadow_view);
+			us->rw_shadow_syncs.push_back({ orig_tex, shadow_tex });
 			// Register in the driver-level map so future texture_update calls
 			// on the source also copy to this shadow.
 			rw_shadow_copy_map[orig_tex->gpu_handle()].push_back(shadow_tex);
@@ -5490,6 +5495,144 @@ uint32_t RenderingDeviceDriverWebGPU::uniform_sets_get_dynamic_offsets(VectorVie
 
 void RenderingDeviceDriverWebGPU::command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) {
 	// No-op: WebGPU doesn't need explicit preparation.
+}
+
+void RenderingDeviceDriverWebGPU::_copy_texture_to_rw_shadow(WGCommandBuffer *p_cmd_buf, const WGTexture *p_source, WGPUTexture p_shadow) {
+	ERR_FAIL_NULL(p_cmd_buf);
+	ERR_FAIL_NULL(p_source);
+	ERR_FAIL_NULL(p_shadow);
+
+	WGPUTexture source_handle = p_source->gpu_handle();
+	ERR_FAIL_NULL(source_handle);
+
+	for (uint32_t mip = 0; mip < p_source->mipmaps; mip++) {
+		uint32_t width = MAX(1u, p_source->width >> mip);
+		uint32_t height = MAX(1u, p_source->height >> mip);
+
+		WGPUTexelCopyTextureInfo src = {};
+		src.texture = source_handle;
+		src.mipLevel = p_source->base_mipmap + mip;
+		src.aspect = WGPUTextureAspect_All;
+
+		WGPUTexelCopyTextureInfo dst = {};
+		dst.texture = p_shadow;
+		dst.mipLevel = mip;
+		dst.origin = { 0, 0, 0 };
+		dst.aspect = WGPUTextureAspect_All;
+
+		if (p_source->dimension == WGPUTextureDimension_3D) {
+			uint32_t depth = MAX(1u, p_source->depth >> mip);
+			src.origin = { 0, 0, p_source->base_layer };
+			WGPUExtent3D extent = { width, height, depth };
+			wgpuCommandEncoderCopyTextureToTexture(p_cmd_buf->encoder, &src, &dst, &extent);
+		} else {
+			for (uint32_t layer = 0; layer < p_source->layers; layer++) {
+				src.origin = { 0, 0, p_source->base_layer + layer };
+				dst.origin = { 0, 0, layer };
+				WGPUExtent3D extent = { width, height, 1 };
+				wgpuCommandEncoderCopyTextureToTexture(p_cmd_buf->encoder, &src, &dst, &extent);
+			}
+		}
+	}
+}
+
+void RenderingDeviceDriverWebGPU::_sync_rw_storage_texture_shadows_after_compute_dispatch(WGCommandBuffer *p_cmd_buf) {
+	ERR_FAIL_NULL(p_cmd_buf);
+	if (has_rw_storage_textures || p_cmd_buf->active_encoder != WGCommandBuffer::COMPUTE) {
+		return;
+	}
+
+	bool needs_sync = false;
+	for (uint32_t i = 0; i < WGCommandBuffer::MAX_BIND_GROUPS; i++) {
+		const WGUniformSet *us = p_cmd_buf->last_bound_state[i].uniform_set;
+		if (us && !us->rw_shadow_syncs.is_empty()) {
+			needs_sync = true;
+			break;
+		}
+	}
+	if (!needs_sync) {
+		return;
+	}
+
+	WGPipelineWrapper *pipeline = p_cmd_buf->render_state.current_pipeline;
+
+	// End the compute pass so the following texture copies form a new WebGPU
+	// synchronization scope ordered after the dispatch that wrote the source.
+	p_cmd_buf->end_active_encoder();
+
+	LocalVector<WGPUTexture> copied_shadows;
+	for (uint32_t i = 0; i < WGCommandBuffer::MAX_BIND_GROUPS; i++) {
+		const WGUniformSet *us = p_cmd_buf->last_bound_state[i].uniform_set;
+		if (!us) {
+			continue;
+		}
+		for (const WGUniformSet::RWShadowSync &sync : us->rw_shadow_syncs) {
+			if (!sync.source || !sync.shadow) {
+				continue;
+			}
+			bool already_copied = false;
+			for (WGPUTexture copied : copied_shadows) {
+				if (copied == sync.shadow) {
+					already_copied = true;
+					break;
+				}
+			}
+			if (already_copied) {
+				continue;
+			}
+			_copy_texture_to_rw_shadow(p_cmd_buf, sync.source, sync.shadow);
+			copied_shadows.push_back(sync.shadow);
+		}
+	}
+
+	if (!pipeline || !pipeline->compute_handle) {
+		return;
+	}
+
+	// Restore the compute pass state so consecutive dispatches without explicit
+	// rebinds continue to work after the inter-dispatch shadow copy.
+	WGPUComputePassDescriptor pass_desc = {};
+	p_cmd_buf->compute_encoder = wgpuCommandEncoderBeginComputePass(p_cmd_buf->encoder, &pass_desc);
+	p_cmd_buf->active_encoder = WGCommandBuffer::COMPUTE;
+	wgpuComputePassEncoderSetPipeline(p_cmd_buf->compute_encoder, pipeline->compute_handle);
+
+	WGShader *shader = pipeline->shader;
+	if (shader) {
+		for (uint32_t gap_idx : shader->gap_bind_group_indices) {
+			wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, gap_idx, empty_bind_group, 0, nullptr);
+		}
+	}
+
+	for (uint32_t i = 0; i < WGCommandBuffer::MAX_BIND_GROUPS; i++) {
+		const WGCommandBuffer::BoundGroupState &bs = p_cmd_buf->last_bound_state[i];
+		if (bs.group) {
+			wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, i, bs.group, bs.dynamic_offset_count, bs.dynamic_offsets);
+			p_cmd_buf->bound_bind_groups[i] = bs.group;
+		}
+	}
+
+	if (shader && shader->push_constant_size > 0 && shader->push_constant_bind_group != UINT32_MAX) {
+		bool use_merged = (shader->merged_pc_group_layout && p_cmd_buf->current_pc_bind_group != nullptr);
+		WGPUBindGroup pc_bind_group_to_use = use_merged ? p_cmd_buf->current_pc_bind_group : push_constant_bind_group;
+		if (pc_bind_group_to_use) {
+			uint32_t dyn_offsets[WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN + 1] = {};
+			uint32_t num_dyn_offsets = 1;
+			if (use_merged && p_cmd_buf->pc_group_material_dyn_count > 0) {
+				uint32_t mat_count = p_cmd_buf->pc_group_material_dyn_count;
+				if (mat_count > WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN) {
+					mat_count = WGCommandBuffer::MAX_PC_GROUP_MATERIAL_DYN;
+				}
+				for (uint32_t j = 0; j < mat_count; j++) {
+					dyn_offsets[j] = p_cmd_buf->pc_group_material_dyn_offsets[j];
+				}
+				dyn_offsets[mat_count] = p_cmd_buf->last_flushed_pc_offset;
+				num_dyn_offsets = mat_count + 1;
+			} else {
+				dyn_offsets[0] = p_cmd_buf->last_flushed_pc_offset;
+			}
+			wgpuComputePassEncoderSetBindGroup(p_cmd_buf->compute_encoder, shader->push_constant_bind_group, pc_bind_group_to_use, num_dyn_offsets, dyn_offsets);
+		}
+	}
 }
 
 // =============================================================================
@@ -8252,6 +8395,7 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_uniform_sets(CommandBuffe
 			if (set_idx < WGCommandBuffer::MAX_BIND_GROUPS) {
 				auto &bs = cmd->last_bound_state[set_idx];
 				bs.group = bg_to_bind;
+				bs.uniform_set = us;
 				bs.dynamic_offset_count = num_dyn;
 				for (uint32_t j = 0; j < num_dyn && j < WGCommandBuffer::MAX_BIND_GROUP_DYN_OFFSETS; j++) {
 					bs.dynamic_offsets[j] = set_dyn_offsets[j];
@@ -8271,6 +8415,7 @@ void RenderingDeviceDriverWebGPU::command_compute_dispatch(CommandBufferID p_cmd
 	}
 
 	wgpuComputePassEncoderDispatchWorkgroups(cmd->compute_encoder, p_x_groups, p_y_groups, p_z_groups);
+	_sync_rw_storage_texture_shadows_after_compute_dispatch(cmd);
 }
 
 void RenderingDeviceDriverWebGPU::command_compute_dispatch_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset) {
@@ -8285,6 +8430,7 @@ void RenderingDeviceDriverWebGPU::command_compute_dispatch_indirect(CommandBuffe
 	}
 
 	wgpuComputePassEncoderDispatchWorkgroupsIndirect(cmd->compute_encoder, indirect->handle, p_offset);
+	_sync_rw_storage_texture_shadows_after_compute_dispatch(cmd);
 }
 
 RDD::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) {

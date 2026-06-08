@@ -93,7 +93,8 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	// Source WGPUTexture → shadow WGPUTexture handles for read_write storage splits.
 	// When a source texture is updated (command_copy_buffer_to_texture), the new
 	// data is also copied to every registered shadow so compute shaders see
-	// the latest contents through the read-only shadow binding.
+	// the latest contents through the read-only shadow binding. Compute writes
+	// are synchronized by post-dispatch source->shadow command-encoder copies.
 	HashMap<WGPUTexture, LocalVector<WGPUTexture>> rw_shadow_copy_map;
 	bool float32_filterable_supported = false;
 	bool float32_blendable_supported = false;
@@ -171,6 +172,8 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 
 	// --- BGL Rebinding Helper ---
 	WGPUBindGroup _get_compatible_bind_group(WGUniformSet *p_us, WGShader *p_target_shader, uint32_t p_set_idx);
+	void _copy_texture_to_rw_shadow(WGCommandBuffer *p_cmd_buf, const WGTexture *p_source, WGPUTexture p_shadow);
+	void _sync_rw_storage_texture_shadows_after_compute_dispatch(WGCommandBuffer *p_cmd_buf);
 
 	// --- Pixel Format Mapping ---
 	// TODO: Move to dedicated pixel_formats_webgpu.h/cpp when ready.

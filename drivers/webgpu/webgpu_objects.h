@@ -176,7 +176,7 @@ struct WGShader {
 	// Read-write storage texture splits: maps (set << 16 | write_binding) → read_shadow_binding.
 	// When readonly-and-readwrite-storage-textures is unavailable, read_write storage
 	// textures are split into separate write (original) + read (shadow) bindings.
-	// The shadow binding receives a GPU copy of the texture at bind group creation time.
+	// The shadow binding is synchronized from uploads and post-dispatch compute copies.
 	HashMap<uint32_t, uint32_t> rw_storage_splits;
 
 	// Read-only storage texture → sampled texture conversions.
@@ -271,6 +271,14 @@ struct WGUniformSet {
 	// Owned by the uniform set; released when the set is destroyed.
 	LocalVector<WGPUTexture> rw_shadow_textures;
 	LocalVector<WGPUTextureView> rw_shadow_views;
+
+	// Source textures that must be copied into their split read shadows after
+	// a compute dispatch writes the storage texture.
+	struct RWShadowSync {
+		WGTexture *source = nullptr;
+		WGPUTexture shadow = nullptr;
+	};
+	LocalVector<RWShadowSync> rw_shadow_syncs;
 
 	// Tracks which source→shadow registrations this uniform set created in
 	// rw_shadow_copy_map, so they can be deregistered when the set is freed.
@@ -409,6 +417,7 @@ struct WGCommandBuffer {
 	static constexpr uint32_t MAX_BIND_GROUP_DYN_OFFSETS = 9; // 8 material + 1 PC ring
 	struct BoundGroupState {
 		WGPUBindGroup group = nullptr;
+		WGUniformSet *uniform_set = nullptr;
 		uint32_t dynamic_offsets[MAX_BIND_GROUP_DYN_OFFSETS] = {};
 		uint32_t dynamic_offset_count = 0;
 	};
@@ -417,6 +426,9 @@ struct WGCommandBuffer {
 	void invalidate_bind_groups() {
 		for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
 			bound_bind_groups[i] = nullptr;
+			last_bound_state[i].group = nullptr;
+			last_bound_state[i].uniform_set = nullptr;
+			last_bound_state[i].dynamic_offset_count = 0;
 		}
 		bound_shader = nullptr;
 		current_pc_bind_group = nullptr;
