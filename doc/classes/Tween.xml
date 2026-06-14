@@ -144,6 +144,19 @@
 				[b]Note:[/b] As it results from accumulating frame deltas, the time returned after the [Tween] has finished animating will be slightly greater than the actual [Tween] duration.
 			</description>
 		</method>
+		<method name="snapshot_get_state" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns an engine-internal runtime snapshot of this [Tween]. The snapshot is intended for savestate systems and may contain direct [Object] references that must be remapped by the caller before being stored persistently. Unsupported tweener types are reported in the returned dictionary with [code]supported == false[/code] instead of being approximated silently.
+			</description>
+		</method>
+		<method name="snapshot_set_state">
+			<return type="int" enum="Error" />
+			<param index="0" name="state" type="Dictionary" />
+			<description>
+				Restores a runtime snapshot produced by [method snapshot_get_state]. The [param state] dictionary must already contain live [Object] references for tween targets and bound nodes. Returns [constant OK] on success.
+			</description>
+		</method>
 		<method name="interpolate_value" qualifiers="static">
 			<return type="Variant" />
 			<param index="0" name="initial_value" type="Variant" />
