@@ -188,6 +188,7 @@ public:
 	virtual Color render_target_get_clear_request_color(RID p_render_target) override { return Color(); }
 	virtual void render_target_disable_clear_request(RID p_render_target) override {}
 	virtual void render_target_do_clear_request(RID p_render_target) override {}
+	virtual Error render_target_write_image(RID p_render_target, const Ref<Image> &p_image) override { return ERR_UNAVAILABLE; }
 
 	virtual void render_target_set_sdf_size_and_scale(RID p_render_target, RS::ViewportSDFOversize p_size, RS::ViewportSDFScale p_scale) override {}
 	virtual Rect2i render_target_get_sdf_rect(RID p_render_target) const override { return Rect2i(); }
