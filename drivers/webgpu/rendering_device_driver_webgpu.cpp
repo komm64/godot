@@ -1896,6 +1896,15 @@ void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
 		wgpuTextureViewRelease(tex->default_view);
 	}
 	if (tex->handle && !tex->is_from_swap_chain) {
+		// Destroy eagerly: wgpuTextureRelease only drops the JS-side reference,
+		// leaving actual GPU memory reclamation to the browser's GC. Under
+		// per-frame texture churn (e.g. uniform sets rebuilt every frame) GC
+		// cannot keep up and dedicated VRAM balloons by GBs until the GPU
+		// process dies. handle != nullptr means this WGTexture owns the GPU
+		// texture (shared/sliced views carry view_source instead), and RD
+		// defers driver-level frees until the frame's work completed, so an
+		// eager destroy is safe here.
+		wgpuTextureDestroy(tex->handle);
 		wgpuTextureRelease(tex->handle);
 	}
 	delete tex;
@@ -5443,6 +5452,11 @@ void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
 	}
 	for (WGPUTexture t : us->rw_shadow_textures) {
 		if (t) {
+			// Shadow read textures are owned exclusively by this uniform set.
+			// Destroy eagerly for the same reason as texture_free: Release
+			// alone leaves VRAM reclamation to JS GC, which cannot keep up
+			// when uniform sets (and thus shadows) are rebuilt per frame.
+			wgpuTextureDestroy(t);
 			wgpuTextureRelease(t);
 		}
 	}
