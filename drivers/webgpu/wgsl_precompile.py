@@ -865,7 +865,7 @@ def build_wgsl_precompiled(target, source, env):
     result = subprocess.run(
         ["bash", build_script],
         cwd=repo_root,
-        timeout=600,
+        timeout=2400,
     )
     if result.returncode != 0:
         print("[WGSL Precompile] ERROR: tint_convert_cli build failed", file=sys.stderr)
