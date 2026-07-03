@@ -42,7 +42,7 @@ namespace spirv_preprocess {
 
 // ---- SPIR-V opcode constants ----
 
-static constexpr uint16_t OP_NAME = 5;
+[[maybe_unused]] static constexpr uint16_t OP_NAME = 5;
 static constexpr uint16_t OP_TYPE_BOOL = 20;
 static constexpr uint16_t OP_TYPE_FUNCTION = 33;
 static constexpr uint16_t OP_TYPE_INT = 21;
@@ -106,7 +106,7 @@ static constexpr uint32_t DECO_DESCRIPTOR_SET = 34;
 
 // SPIR-V BuiltIn values.
 static constexpr uint32_t BUILTIN_POSITION = 0;
-static constexpr uint32_t BUILTIN_POINT_SIZE = 1;
+[[maybe_unused]] static constexpr uint32_t BUILTIN_POINT_SIZE = 1;
 
 // SPIR-V execution model values.
 static constexpr uint32_t EXEC_MODEL_VERTEX = 0;
