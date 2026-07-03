@@ -38,7 +38,6 @@ env:
     dev_mode=yes
     tests=no
     debug_symbols=no
-    use_closure_compiler=yes
     threads=no
     dlink_enabled=yes
     webgpu=yes
