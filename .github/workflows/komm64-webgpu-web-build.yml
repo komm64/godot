@@ -32,10 +32,14 @@ concurrency:
   group: ${{ github.workflow }}|${{ github.ref_name }}|${{ inputs.ref || '' }}|${{ inputs.target || '' }}
   cancel-in-progress: true
 
+# dev_mode / production はターゲット別 (Compilation ステップで付与):
+#   template_debug   → dev_mode=yes (アサーション込み、iPad 調査用)
+#   template_release → production=yes (最適化 + アサーション無し)
+# 旧構成は release にも dev_mode=yes が入っており、配布 wasm が
+# デバッグビルド (48MB & 低速) になっていた (pixtube 2026-07-10 発覚)
 env:
   EM_VERSION: 4.0.11
   SCONS_FLAGS: >-
-    dev_mode=yes
     tests=no
     debug_symbols=no
     threads=no
@@ -77,7 +81,7 @@ jobs:
       - name: Compilation
         uses: ./.github/actions/godot-build
         with:
-          scons-flags: ${{ env.SCONS_FLAGS }}
+          scons-flags: ${{ env.SCONS_FLAGS }} ${{ (github.event_name == 'push' || inputs.target == 'template_release') && 'production=yes' || 'dev_mode=yes' }}
           platform: web
           target: ${{ github.event_name == 'push' && 'template_release' || inputs.target }}
 
