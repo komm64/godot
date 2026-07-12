@@ -1170,6 +1170,14 @@ void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer, uint32_t p_use
 		if (buf->dirty_end > buf->dirty_offset) {
 			flush_offset = buf->dirty_offset;
 			flush_size = buf->dirty_end - buf->dirty_offset;
+		} else if (buf->is_dynamic() && buf->per_frame_size > 0) {
+			// dirty was already cleared by an earlier flush this frame. Dynamic
+			// slices can be flushed more than once per frame (the 2D instance
+			// buffer appends across multiple _render_batch_items calls without a
+			// new map_advance), so the live data is still in the current slice —
+			// flush from there, NOT from offset 0.
+			flush_offset = (uint64_t)buf->frame_idx * buf->per_frame_size;
+			flush_size = buf->per_frame_size;
 		}
 		// Upload only the bytes the caller actually wrote this frame. Persistent
 		// slices (e.g. the 2D instance buffer) mark the whole ~2MB slice dirty but
