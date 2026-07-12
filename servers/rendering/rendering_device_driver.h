@@ -205,7 +205,11 @@ public:
 	virtual void buffer_unmap(BufferID p_buffer) = 0;
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) = 0;
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) = 0;
-	virtual void buffer_flush(BufferID p_buffer) {}
+	// p_used_size: number of bytes actually written this frame (from the mapped
+	// pointer). Lets a backend upload only the written extent instead of the whole
+	// persistent slice (e.g. the 2D instance buffer is a ~2MB slice but only a few
+	// hundred instances are written per frame). UINT32_MAX = flush the full range.
+	virtual void buffer_flush(BufferID p_buffer, uint32_t p_used_size = UINT32_MAX) {}
 	virtual void buffer_initiate_async_map(BufferID p_buffer) {} // WebGPU: start async map so it completes by next frame.
 	// Direct queue write to a buffer, bypassing staging buffers entirely.
 	// Used for skeleton/bone updates that are fully written before any draws.

@@ -922,9 +922,12 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 
 	state.instance_data = nullptr;
 	if (state.instance_data_index > 0) {
-		// If there was any remaining instance data, it must be flushed.
+		// If there was any remaining instance data, it must be flushed. Only upload
+		// the instances actually written, not the whole pre-allocated slice
+		// (item_buffer_size defaults to 16384 = ~2MB; a typical frame writes a few
+		// hundred). On WebGPU the empty tail was being re-uploaded every frame.
 		RID buf = state.instance_buffers._get(0);
-		RD::get_singleton()->buffer_flush(buf);
+		RD::get_singleton()->buffer_flush(buf, state.instance_data_index * sizeof(InstanceData));
 		state.instance_data_index = 0;
 	}
 }

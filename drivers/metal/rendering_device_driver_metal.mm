@@ -203,8 +203,8 @@ uint64_t RenderingDeviceDriverMetal::buffer_get_dynamic_offsets(Span<BufferID> p
 	return mask;
 }
 
-void RenderingDeviceDriverMetal::buffer_flush(BufferID p_buffer) {
-	// Nothing to do.
+void RenderingDeviceDriverMetal::buffer_flush(BufferID p_buffer, uint32_t p_used_size) {
+	// Nothing to do (shared memory; p_used_size unused).
 }
 
 uint64_t RenderingDeviceDriverMetal::buffer_get_device_address(BufferID p_buffer) {
