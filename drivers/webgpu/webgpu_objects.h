@@ -61,6 +61,18 @@ struct WGBuffer {
 	uint64_t dirty_offset = 0;
 	uint64_t dirty_end = 0; // Exclusive end. 0 means "no explicit range set."
 
+	// Skip-if-unchanged upload cache. Godot's 2D renderer re-maps and re-flushes
+	// large UBOs every frame even when the bytes are byte-identical to the previous
+	// frame (measured: ~99.8% of >64KB web uploads were redundant, dominating CPU).
+	// buffer_flush()/buffer_unmap() hash the flush range and skip the
+	// wgpuQueueWriteBuffer when it matches the last uploaded (offset,size,hash).
+	// Invalidated by any GPU-side write that bypasses the shadow path
+	// (buffer_write_direct, command_copy_buffer dst).
+	uint64_t last_flush_hash = 0;
+	uint64_t last_flush_offset = 0;
+	uint64_t last_flush_size = 0;
+	bool last_flush_valid = false;
+
 	// Dynamic persistent rotation (Task 7.5).
 	// `frame_idx` is UINT32_MAX for non-dynamic buffers. For BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT
 	// buffers, buffer_create sets frame_idx=0 and per_frame_size to the aligned single-frame
