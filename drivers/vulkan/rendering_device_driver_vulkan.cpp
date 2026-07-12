@@ -1918,7 +1918,9 @@ uint64_t RenderingDeviceDriverVulkan::buffer_get_dynamic_offsets(Span<BufferID> 
 	return mask;
 }
 
-void RenderingDeviceDriverVulkan::buffer_flush(BufferID p_buffer) {
+void RenderingDeviceDriverVulkan::buffer_flush(BufferID p_buffer, uint32_t p_used_size) {
+	// p_used_size is unused on Vulkan: dynamic buffers are host-visible and the GPU
+	// reads the mapped memory directly, so there is no per-frame upload cost to trim.
 	BufferDynamicInfo *buf_info = (BufferDynamicInfo *)p_buffer.id;
 
 	VkMemoryPropertyFlags mem_props_flags;

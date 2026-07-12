@@ -239,7 +239,7 @@ public:
 	/// Return dynamic offsets for buffers. Stub — returns 0.
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override final;
 	/// Flush a buffer's shadow CPU data to the GPU via wgpuQueueWriteBuffer.
-	virtual void buffer_flush(BufferID p_buffer) override final;
+	virtual void buffer_flush(BufferID p_buffer, uint32_t p_used_size = UINT32_MAX) override final;
 	// Upload a shadow range, skipping the wgpuQueueWriteBuffer when the bytes are
 	// byte-identical to the last upload for this buffer (redundant-upload skip).
 	void _buffer_flush_range(WGBuffer *p_buf, uint64_t p_offset, uint64_t p_size);

@@ -1197,7 +1197,7 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_dynamic_offsets(Span<BufferID> 
 	return mask;
 }
 
-void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
+void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer, uint32_t p_used_size) {
 	WGBuffer *buf = (WGBuffer *)(p_buffer.id);
 	if (buf && buf->shadow_map) {
 		// Flush only the dirty range if one was set (e.g., by
@@ -1207,6 +1207,13 @@ void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
 		if (buf->dirty_end > buf->dirty_offset) {
 			flush_offset = buf->dirty_offset;
 			flush_size = buf->dirty_end - buf->dirty_offset;
+		}
+		// Upload only the bytes the caller actually wrote this frame. Persistent
+		// slices (e.g. the 2D instance buffer) mark the whole ~2MB slice dirty but
+		// typically write only a few hundred instances — uploading the empty tail
+		// every frame was the dominant web CPU cost (wgpuQueueWriteBuffer).
+		if (p_used_size != UINT32_MAX && (uint64_t)p_used_size < flush_size) {
+			flush_size = p_used_size;
 		}
 		_buffer_flush_range(buf, flush_offset, flush_size);
 		buf->dirty_offset = 0;
