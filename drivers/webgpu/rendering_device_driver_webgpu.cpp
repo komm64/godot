@@ -1088,52 +1088,15 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_map(BufferID p_buffer) {
 	return buf->shadow_map;
 }
 
-// FNV-1a 64, processed 8 bytes/word for speed. Used to detect that a buffer's
-// shadow content is byte-identical to what we last uploaded, so the redundant
-// wgpuQueueWriteBuffer can be skipped (the dominant web CPU cost).
-static inline uint64_t _wg_hash_range(const uint8_t *p, uint64_t n) {
-	uint64_t h = 1469598103934665603ULL;
-	uint64_t i = 0;
-	for (; i + 8 <= n; i += 8) {
-		uint64_t w;
-		memcpy(&w, p + i, 8);
-		h = (h ^ w) * 1099511628211ULL;
-	}
-	for (; i < n; i++) {
-		h = (h ^ (uint64_t)p[i]) * 1099511628211ULL;
-	}
-	return h;
-}
-
-// Upload a shadow range to the GPU, skipping the writeBuffer if the bytes are
-// unchanged since the last upload for this buffer. Returns nothing; updates perf.
+// Upload a shadow range to the GPU. (The redundant-upload skip that used to live
+// here was removed once the 2D instance buffer stopped flushing its empty tail —
+// the remaining uploads are small enough that content-hashing them wasn't worth
+// the cache-invalidation complexity. See buffer_flush() / renderer_canvas_render.)
 void RenderingDeviceDriverWebGPU::_buffer_flush_range(WGBuffer *p_buf, uint64_t p_offset, uint64_t p_size) {
 	if (p_size == 0) {
 		return;
 	}
-	// Storage buffers can be written by compute/GPU passes, so the shadow bytes
-	// being unchanged does NOT imply the GPU still holds them — never skip those.
-	// The redundant re-uploads are uniform/vertex/index buffers (CPU-upload only).
-	if (p_buf->usage & WGPUBufferUsage_Storage) {
-		wgpuQueueWriteBuffer(queue, p_buf->handle, p_offset, p_buf->shadow_map + p_offset, p_size);
-		p_buf->last_flush_valid = false;
-		perf.buffer_uploads_done++;
-		return;
-	}
-	uint64_t h = _wg_hash_range(p_buf->shadow_map + p_offset, p_size);
-	if (p_buf->last_flush_valid && p_buf->last_flush_offset == p_offset &&
-			p_buf->last_flush_size == p_size && p_buf->last_flush_hash == h) {
-		// GPU already holds these exact bytes — skip the redundant upload.
-		perf.buffer_uploads_skipped++;
-		perf.bytes_skipped += p_size;
-		return;
-	}
 	wgpuQueueWriteBuffer(queue, p_buf->handle, p_offset, p_buf->shadow_map + p_offset, p_size);
-	p_buf->last_flush_hash = h;
-	p_buf->last_flush_offset = p_offset;
-	p_buf->last_flush_size = p_size;
-	p_buf->last_flush_valid = true;
-	perf.buffer_uploads_done++;
 }
 
 void RenderingDeviceDriverWebGPU::buffer_unmap(BufferID p_buffer) {
@@ -1226,8 +1189,6 @@ void RenderingDeviceDriverWebGPU::buffer_write_direct(BufferID p_buffer, uint64_
 	ERR_FAIL_NULL(buf);
 	uint64_t aligned_size = (p_size + 3) & ~3ULL;
 	wgpuQueueWriteBuffer(queue, buf->handle, p_offset, p_data, aligned_size);
-	// GPU content now diverges from the shadow-flush cache; force next flush.
-	buf->last_flush_valid = false;
 }
 
 uint64_t RenderingDeviceDriverWebGPU::buffer_get_device_address(BufferID p_buffer) {
@@ -5721,8 +5682,6 @@ void RenderingDeviceDriverWebGPU::command_clear_buffer(CommandBufferID p_cmd_buf
 	uint64_t size = (p_size == BUFFER_WHOLE_SIZE) ? (buf->size - p_offset) : p_size;
 	size = (size + 3) & ~3ULL; // Must be multiple of 4.
 	wgpuCommandEncoderClearBuffer(cmd->encoder, buf->handle, p_offset, size);
-	// GPU content cleared outside the shadow-flush cache; force next flush.
-	buf->last_flush_valid = false;
 }
 
 void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) {
@@ -5760,11 +5719,6 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 		uint64_t size = (region.size + 3) & ~3ULL;
 		wgpuCommandEncoderCopyBufferToBuffer(cmd->encoder, src->handle, region.src_offset, dst->handle, region.dst_offset, size);
 	}
-	// Both buffers' GPU contents were written outside the shadow-flush cache
-	// (src via direct writeBuffer above, dst via the encoder copy). Force the
-	// next shadow flush of either to actually upload.
-	src->last_flush_valid = false;
-	dst->last_flush_valid = false;
 }
 
 void RenderingDeviceDriverWebGPU::command_copy_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<TextureCopyRegion> p_regions) {
@@ -6438,8 +6392,6 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 
 		wgpuCommandEncoderCopyTextureToBuffer(cmd->encoder, &src_copy, &dst_info, &extent);
 	}
-	// dst GPU content written outside the shadow-flush cache; force next flush.
-	dst->last_flush_valid = false;
 }
 
 // =============================================================================
@@ -8840,16 +8792,11 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 				' RP/f=' + $4 +
 				' SetVB/f=' + $5 +
 				' FI/f=' + $6 +
-				' RingOF/f=' + $7 +
-				' WBup/f=' + $8 +
-				' WBskip/f=' + $9 +
-				' WBskipMB/f=' + $10.toFixed(2));
+				' RingOF/f=' + $7);
 		}, fps, perf.draw_calls / f, perf.set_bind_group_calls / f,
 				perf.push_constant_writes / f, perf.render_passes / f,
 				perf.set_vertex_buffer_calls / f, perf.first_instance_draws / f,
-				perf.ring_overflows / f, perf.buffer_uploads_done / f,
-				perf.buffer_uploads_skipped / f,
-				(double)perf.bytes_skipped / (double)f / 1048576.0);
+				perf.ring_overflows / f);
 		perf.reset();
 		perf.frames_since_log = 0;
 		perf.last_log_time = now;

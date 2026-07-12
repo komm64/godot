@@ -64,9 +64,6 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 		uint32_t gap_bind_group_calls = 0;
 		uint32_t first_instance_draws = 0;
 		uint32_t ring_overflows = 0;
-		uint32_t buffer_uploads_skipped = 0; // shadow flushes skipped (unchanged content)
-		uint32_t buffer_uploads_done = 0;    // shadow flushes actually uploaded
-		uint64_t bytes_skipped = 0;          // bytes NOT re-uploaded thanks to the skip
 		double last_log_time = 0;
 		uint32_t frames_since_log = 0;
 		void reset() {
@@ -81,9 +78,6 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 			gap_bind_group_calls = 0;
 			first_instance_draws = 0;
 			ring_overflows = 0;
-			buffer_uploads_skipped = 0;
-			buffer_uploads_done = 0;
-			bytes_skipped = 0;
 		}
 	} perf;
 
