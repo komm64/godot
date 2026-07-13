@@ -21,6 +21,14 @@ on:
         options:
           - template_debug
           - template_release
+      disable_3d:
+        description: Strip the 3D renderer (disable_3d=yes). For 2D-only web apps (pixtube); removes the scene_forward shader whose 9-10 SSBOs exceed WebGPU's limit-8 on Mac/Firefox. Default no keeps the shared template unchanged.
+        required: false
+        type: choice
+        default: 'no'
+        options:
+          - 'no'
+          - 'yes'
   push:
     tags:
       - 'v*-komm64-webgpu*'
@@ -81,7 +89,7 @@ jobs:
       - name: Compilation
         uses: ./.github/actions/godot-build
         with:
-          scons-flags: ${{ env.SCONS_FLAGS }} ${{ (github.event_name == 'push' || inputs.target == 'template_release') && 'production=yes' || 'dev_mode=yes' }}
+          scons-flags: ${{ env.SCONS_FLAGS }} ${{ (github.event_name == 'push' || inputs.target == 'template_release') && 'production=yes' || 'dev_mode=yes' }} ${{ inputs.disable_3d == 'yes' && 'disable_3d=yes' || '' }}
           platform: web
           target: ${{ github.event_name == 'push' && 'template_release' || inputs.target }}
 
