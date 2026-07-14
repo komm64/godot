@@ -796,7 +796,7 @@ def precompile_wgsl(repo_root, output_path, glslang_path="glslangValidator"):
                 spv_bytes, error = compile_glsl_to_spirv(glsl_source, stage_type, glslang_path)
                 if spv_bytes is None:
                     shader_name = os.path.basename(glsl_rel)
-                    print(f"  FAIL: {shader_name}:{variant_name}:{stage_type} — {error[:120] if error else 'unknown'}")
+                    print(f"  FAIL: {shader_name}:{variant_name}:{stage_type} -- {error[:120] if error else 'unknown'}")
                     failed_compile += 1
                     continue
 
@@ -853,7 +853,7 @@ def build_wgsl_precompiled(target, source, env):
     wgsl_precompiled.gen.h.
     """
     output = str(target[0])
-    repo_root = str(env.Dir("#"))
+    repo_root = os.path.abspath(str(env.Dir("#")))
 
     # Build tint_convert_cli (native host tool) via build.sh.
     build_script = os.path.join(repo_root, "drivers", "webgpu", "tint_cli", "build.sh")
@@ -861,9 +861,16 @@ def build_wgsl_precompiled(target, source, env):
         print("[WGSL Precompile] ERROR: tint_cli/build.sh not found", file=sys.stderr)
         sys.exit(1)
 
+    # Native Windows Python passes backslashes through to bash, where they are
+    # interpreted as escape characters. Use a cwd-relative POSIX path so both
+    # WSL bash and Unix shells resolve the helper consistently.
+    build_script_arg = os.path.relpath(build_script, repo_root).replace(os.sep, "/")
+    if not build_script_arg.startswith("."):
+        build_script_arg = "./" + build_script_arg
+
     print("[WGSL Precompile] Building tint_convert_cli...")
     result = subprocess.run(
-        ["bash", build_script],
+        ["bash", build_script_arg],
         cwd=repo_root,
         timeout=2400,
     )
