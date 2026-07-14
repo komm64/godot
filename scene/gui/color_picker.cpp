@@ -1734,7 +1734,7 @@ void ColorPicker::_enable_input_on_popup_hide() {
 }
 
 void ColorPicker::_pick_button_pressed_legacy() {
-	if (!is_inside_tree()) {
+	if (!is_inside_tree() || legacy_picker_readback_pending) {
 		return;
 	}
 	pre_picking_color = color;
@@ -1777,17 +1777,69 @@ void ColorPicker::_pick_button_pressed_legacy() {
 		picker_preview_color->add_theme_style_override(SceneStringName(panel), picker_preview_style_box_color);
 	}
 
+	legacy_picker_readback_attempts = 0;
+	legacy_picker_readback_pending = true;
+	btn_pick->set_disabled(true);
+	_pick_button_pressed_legacy_capture();
+}
+
+void ColorPicker::_retry_pick_button_pressed_legacy() {
+	legacy_picker_readback_attempts++;
+	if (legacy_picker_readback_attempts >= LEGACY_PICKER_READBACK_MAX_ATTEMPTS || !is_inside_tree()) {
+		WARN_PRINT("ColorPicker: application window image readback did not complete.");
+		_finish_pick_button_pressed_legacy();
+		return;
+	}
+
+	// WebGPU mapAsync cannot complete during a synchronous Texture2D::get_image()
+	// call. Retry on following frames so the browser can deliver the map callback.
+	get_tree()->connect(SNAME("process_frame"), callable_mp(this, &ColorPicker::_pick_button_pressed_legacy_capture), CONNECT_ONE_SHOT);
+}
+
+void ColorPicker::_finish_pick_button_pressed_legacy() {
+	legacy_picker_readback_pending = false;
+	legacy_picker_readback_attempts = 0;
+	btn_pick->set_disabled(false);
+}
+
+void ColorPicker::_pick_button_pressed_legacy_capture() {
+	if (!is_inside_tree() || !legacy_picker_readback_pending) {
+		return;
+	}
+
 	Rect2i screen_rect;
 	if (picker_window->is_embedded()) {
-		Ref<ImageTexture> tx = ImageTexture::create_from_image(picker_window->get_embedder()->get_texture()->get_image());
-		screen_rect = picker_window->get_embedder()->get_visible_rect();
+		Viewport *embedder = picker_window->get_embedder();
+		Ref<Texture2D> source_texture;
+		if (embedder) {
+			source_texture = embedder->get_texture();
+		}
+		Ref<Image> source_image = source_texture.is_valid() ? source_texture->get_image() : Ref<Image>();
+		if (source_image.is_null() || source_image->is_empty()) {
+			_retry_pick_button_pressed_legacy();
+			return;
+		}
+
+		Ref<ImageTexture> tx = ImageTexture::create_from_image(source_image);
+		if (tx.is_null()) {
+			WARN_PRINT("ColorPicker: failed to create the application window snapshot texture.");
+			_finish_pick_button_pressed_legacy();
+			return;
+		}
+
+		screen_rect = embedder->get_visible_rect();
+		if (screen_rect.size.x <= 0 || screen_rect.size.y <= 0) {
+			WARN_PRINT("ColorPicker: application window has an invalid size.");
+			_finish_pick_button_pressed_legacy();
+			return;
+		}
 		picker_window->set_position(Point2i());
 		picker_texture_rect->set_texture(tx);
 
 		Vector2 ofs = picker_window->get_mouse_position();
 		picker_preview->set_position(ofs - Vector2(28, 28));
 
-		Vector2 scale = screen_rect.size / tx->get_image()->get_size();
+		Vector2 scale = Vector2(screen_rect.size) / Vector2(source_image->get_size());
 		ofs /= scale;
 
 		Ref<AtlasTexture> atlas;
@@ -1797,10 +1849,16 @@ void ColorPicker::_pick_button_pressed_legacy() {
 		picker_texture_zoom->set_texture(atlas);
 	} else {
 		screen_rect = picker_window->get_parent_rect();
+		if (screen_rect.size.x <= 0 || screen_rect.size.y <= 0) {
+			WARN_PRINT("ColorPicker: application window has an invalid size.");
+			_finish_pick_button_pressed_legacy();
+			return;
+		}
 		picker_window->set_position(screen_rect.position);
 
 		Ref<Image> target_image = Image::create_empty(screen_rect.size.x, screen_rect.size.y, false, Image::FORMAT_RGB8);
 		DisplayServer *ds = DisplayServer::get_singleton();
+		bool captured_window = false;
 
 		// Add the Texture of each Window to the Image.
 		Vector<DisplayServer::WindowID> wl = ds->get_window_list();
@@ -1817,9 +1875,19 @@ void ColorPicker::_pick_button_pressed_legacy() {
 			}
 			img->convert(Image::FORMAT_RGB8);
 			target_image->blit_rect(img, Rect2i(Point2i(0, 0), img->get_size()), w->get_position());
+			captured_window = true;
+		}
+		if (!captured_window) {
+			_retry_pick_button_pressed_legacy();
+			return;
 		}
 
 		Ref<ImageTexture> tx = ImageTexture::create_from_image(target_image);
+		if (tx.is_null()) {
+			WARN_PRINT("ColorPicker: failed to create the application window snapshot texture.");
+			_finish_pick_button_pressed_legacy();
+			return;
+		}
 		picker_texture_rect->set_texture(tx);
 
 		Vector2 ofs = screen_rect.position - DisplayServer::get_singleton()->mouse_get_position();
@@ -1834,6 +1902,7 @@ void ColorPicker::_pick_button_pressed_legacy() {
 
 	picker_window->set_size(screen_rect.size);
 	picker_window->popup();
+	_finish_pick_button_pressed_legacy();
 }
 
 void ColorPicker::_picker_texture_input(const Ref<InputEvent> &p_event) {

@@ -196,8 +196,11 @@ private:
 	Ref<StyleBoxFlat> picker_preview_style_box_color;
 
 	// Legacy color picking.
+	static constexpr uint32_t LEGACY_PICKER_READBACK_MAX_ATTEMPTS = 120;
 	TextureRect *picker_texture_rect = nullptr;
 	Color picker_color;
+	uint32_t legacy_picker_readback_attempts = 0;
+	bool legacy_picker_readback_pending = false;
 	FileDialog *file_dialog = nullptr;
 	MenuButton *menu_btn = nullptr;
 	PopupMenu *options_menu = nullptr;
@@ -393,6 +396,9 @@ private:
 
 	// Legacy color picking.
 	void _pick_button_pressed_legacy();
+	void _pick_button_pressed_legacy_capture();
+	void _retry_pick_button_pressed_legacy();
+	void _finish_pick_button_pressed_legacy();
 	void _picker_texture_input(const Ref<InputEvent> &p_event);
 
 	inline int _get_preset_size();
