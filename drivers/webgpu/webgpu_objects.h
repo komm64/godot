@@ -108,6 +108,9 @@ struct WGTexture {
 	uint32_t base_layer = 0;
 	WGPUTextureUsage usage = 0;
 	bool is_from_swap_chain = false;
+	// Imported browser GPUTexture objects are owned by JavaScript. Godot owns
+	// the emdawnwebgpu wrapper and its views, but must not destroy the texture.
+	bool is_external = false;
 };
 
 // =============================================================================

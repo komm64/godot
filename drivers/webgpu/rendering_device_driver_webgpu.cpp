@@ -1720,8 +1720,68 @@ RDD::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &
 }
 
 RDD::TextureID RenderingDeviceDriverWebGPU::texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) {
-	// Not supported on web platform.
-	ERR_FAIL_V_MSG(TextureID(), "WebGPU: texture_create_from_extension not supported.");
+	ERR_FAIL_COND_V_MSG(p_native_texture == 0 || p_native_texture > UINT32_MAX, TextureID(), "WebGPU: external texture key must fit in a non-zero uint32_t.");
+
+	// The HTML shell and Godot share Module.preinitializedWebGPUDevice. The shell
+	// registers GPUTexture objects by integer key; emdawnwebgpu then wraps the JS
+	// object as a regular WGPUTexture handle usable by the RenderingDevice driver.
+	WGPUTexture imported_texture = (WGPUTexture)(uintptr_t)EM_ASM_PTR({
+		var textures = globalThis.GodotWebGPUExternalTextures;
+		if (!(textures instanceof Map)) {
+			console.error("WebGPU: globalThis.GodotWebGPUExternalTextures is not a Map.");
+			return 0;
+		}
+		var texture = textures.get($0);
+		if (!texture) {
+			console.error("WebGPU: no external GPUTexture registered for key " + $0 + ".");
+			return 0;
+		}
+		return WebGPU["importJsTexture"](texture);
+	}, (uint32_t)p_native_texture);
+	ERR_FAIL_NULL_V_MSG(imported_texture, TextureID(), "WebGPU: failed to import external browser GPUTexture.");
+
+	WGTexture *tex = new WGTexture();
+	tex->handle = imported_texture;
+	tex->view_source = imported_texture;
+	tex->format = wgpuTextureGetFormat(imported_texture);
+	tex->rd_format = p_format;
+	tex->dimension = wgpuTextureGetDimension(imported_texture);
+	tex->view_dimension = _texture_type_to_view_dimension(p_type);
+	tex->width = wgpuTextureGetWidth(imported_texture);
+	tex->height = wgpuTextureGetHeight(imported_texture);
+	const uint32_t depth_or_layers = wgpuTextureGetDepthOrArrayLayers(imported_texture);
+	tex->depth = (tex->dimension == WGPUTextureDimension_3D) ? depth_or_layers : 1;
+	tex->layers = (tex->dimension == WGPUTextureDimension_3D) ? 1 : depth_or_layers;
+	tex->mipmaps = wgpuTextureGetMipLevelCount(imported_texture);
+	tex->sample_count = wgpuTextureGetSampleCount(imported_texture);
+	tex->usage = wgpuTextureGetUsage(imported_texture);
+	tex->is_external = true;
+
+	const WGPUTextureFormat expected_format = _data_format_to_wgpu(p_format);
+	if (tex->format != expected_format || tex->layers != p_array_layers || tex->mipmaps != p_mipmaps) {
+		const String mismatch = vformat("WebGPU: external texture metadata mismatch (format %d/%d, layers %u/%u, mipmaps %u/%u).",
+				(int)tex->format, (int)expected_format, tex->layers, p_array_layers, tex->mipmaps, p_mipmaps);
+		wgpuTextureRelease(imported_texture);
+		delete tex;
+		ERR_FAIL_V_MSG(TextureID(), mismatch);
+	}
+
+	WGPUTextureViewDescriptor view_desc = {};
+	view_desc.format = tex->format;
+	view_desc.dimension = tex->view_dimension;
+	view_desc.baseMipLevel = 0;
+	view_desc.mipLevelCount = tex->mipmaps;
+	view_desc.baseArrayLayer = 0;
+	view_desc.arrayLayerCount = tex->layers;
+	view_desc.aspect = p_depth_stencil ? WGPUTextureAspect_DepthOnly : WGPUTextureAspect_All;
+	tex->default_view = wgpuTextureCreateView(imported_texture, &view_desc);
+	if (tex->default_view == nullptr) {
+		wgpuTextureRelease(imported_texture);
+		delete tex;
+		ERR_FAIL_V_MSG(TextureID(), "WebGPU: failed to create a view for the external browser GPUTexture.");
+	}
+
+	return TextureID(tex);
 }
 
 // Returns true if the format is an sRGB variant.
@@ -1930,7 +1990,9 @@ void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
 		// texture (shared/sliced views carry view_source instead), and RD
 		// defers driver-level frees until the frame's work completed, so an
 		// eager destroy is safe here.
-		wgpuTextureDestroy(tex->handle);
+		if (!tex->is_external) {
+			wgpuTextureDestroy(tex->handle);
+		}
 		wgpuTextureRelease(tex->handle);
 	}
 	delete tex;

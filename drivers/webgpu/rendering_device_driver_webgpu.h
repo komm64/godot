@@ -280,7 +280,8 @@ public:
 	/// Create a GPU texture. Formats mapped via pixel_formats_webgpu.h.
 	/// 3-component formats (RGB8, etc.) are promoted to RGBA equivalents.
 	virtual TextureID texture_create(const TextureFormat &p_format, const TextureView &p_view) override final;
-	/// Stub — not applicable for WebGPU web exports (no native texture interop).
+	/// Imports a browser GPUTexture registered in globalThis.GodotWebGPUExternalTextures.
+	/// p_native_texture is the integer key used by that JavaScript Map.
 	virtual TextureID texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) override final;
 	/// Create a shared texture view from an existing texture.
 	virtual TextureID texture_create_shared(TextureID p_original_texture, const TextureView &p_view) override final;
