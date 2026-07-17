@@ -5265,7 +5265,7 @@ RDD::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<Bou
 			us->rw_shadow_syncs.push_back({ orig_tex, shadow_tex });
 			// Register in the driver-level map so future texture_update calls
 			// on the source also copy to this shadow.
-			rw_shadow_copy_map[orig_tex->gpu_handle()].push_back(shadow_tex);
+			rw_shadow_copy_map[orig_tex->gpu_handle()].push_back({ orig_tex, shadow_tex });
 			us->rw_shadow_registrations.push_back({ orig_tex->gpu_handle(), shadow_tex });
 		} else {
 			wgpuTextureRelease(shadow_tex);
@@ -5551,14 +5551,14 @@ void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
 	// Deregister shadow copy targets from the driver-level map.
 	for (const WGUniformSet::RWShadowRegistration &reg : us->rw_shadow_registrations) {
 		if (rw_shadow_copy_map.has(reg.source)) {
-			LocalVector<WGPUTexture> &shadows = rw_shadow_copy_map[reg.source];
-			for (int i = (int)shadows.size() - 1; i >= 0; i--) {
-				if (shadows[i] == reg.shadow) {
-					shadows.remove_at(i);
+			LocalVector<RWShadowCopyTarget> &targets = rw_shadow_copy_map[reg.source];
+			for (int i = (int)targets.size() - 1; i >= 0; i--) {
+				if (targets[i].shadow == reg.shadow) {
+					targets.remove_at(i);
 					break;
 				}
 			}
-			if (shadows.is_empty()) {
+			if (targets.is_empty()) {
 				rw_shadow_copy_map.erase(reg.source);
 			}
 		}
@@ -5597,6 +5597,18 @@ uint32_t RenderingDeviceDriverWebGPU::uniform_sets_get_dynamic_offsets(VectorVie
 
 void RenderingDeviceDriverWebGPU::command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) {
 	// No-op: WebGPU doesn't need explicit preparation.
+}
+
+static bool rw_storage_views_match(const WGTexture *p_a, const WGTexture *p_b) {
+	if (p_a == p_b) {
+		return true;
+	}
+	return p_a && p_b && p_a->gpu_handle() == p_b->gpu_handle() &&
+			p_a->base_mipmap == p_b->base_mipmap && p_a->mipmaps == p_b->mipmaps &&
+			p_a->base_layer == p_b->base_layer && p_a->layers == p_b->layers &&
+			p_a->width == p_b->width && p_a->height == p_b->height && p_a->depth == p_b->depth &&
+			p_a->dimension == p_b->dimension && p_a->view_dimension == p_b->view_dimension &&
+			p_a->format == p_b->format && p_a->sample_count == p_b->sample_count;
 }
 
 void RenderingDeviceDriverWebGPU::_copy_texture_to_rw_shadow(WGCommandBuffer *p_cmd_buf, const WGTexture *p_source, WGPUTexture p_shadow) {
@@ -5672,18 +5684,34 @@ void RenderingDeviceDriverWebGPU::_sync_rw_storage_texture_shadows_after_compute
 			if (!sync.source || !sync.shadow) {
 				continue;
 			}
-			bool already_copied = false;
-			for (WGPUTexture copied : copied_shadows) {
-				if (copied == sync.shadow) {
-					already_copied = true;
-					break;
-				}
-			}
-			if (already_copied) {
+			// Different shaders may bind the same read_write storage texture
+			// through different uniform sets. Every set owns its own sampled
+			// shadow, so updating only the set used by the writer leaves the
+			// next shader reading stale data. Fan the write out to every shadow
+			// registered for this source texture.
+			const LocalVector<RWShadowCopyTarget> *registered =
+					rw_shadow_copy_map.getptr(sync.source->gpu_handle());
+			if (!registered) {
 				continue;
 			}
-			_copy_texture_to_rw_shadow(p_cmd_buf, sync.source, sync.shadow);
-			copied_shadows.push_back(sync.shadow);
+			for (const RWShadowCopyTarget &target : *registered) {
+				if (!rw_storage_views_match(sync.source, target.source)) {
+					continue;
+				}
+				WGPUTexture shadow = target.shadow;
+				bool already_copied = false;
+				for (WGPUTexture copied : copied_shadows) {
+					if (copied == shadow) {
+						already_copied = true;
+						break;
+					}
+				}
+				if (already_copied) {
+					continue;
+				}
+				_copy_texture_to_rw_shadow(p_cmd_buf, sync.source, shadow);
+				copied_shadows.push_back(shadow);
+			}
 		}
 	}
 
@@ -6218,14 +6246,15 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 	// race with the preceding writeTexture on some implementations.
 	WGPUTexture dst_handle = dst->gpu_handle();
 	if (use_write_texture && rw_shadow_copy_map.has(dst_handle)) {
-		const LocalVector<WGPUTexture> &shadows = rw_shadow_copy_map[dst_handle];
+		const LocalVector<RWShadowCopyTarget> &targets = rw_shadow_copy_map[dst_handle];
 		static int _shadow_write_log = 0;
 		if (_shadow_write_log < 10) {
 			WEBGPU_DIAG({ console.log('[SHADOW-WRITE] shadow_count=' + $0 + ' regions=' + $1); },
-					(int)shadows.size(), (int)p_regions.size());
+					(int)targets.size(), (int)p_regions.size());
 			_shadow_write_log++;
 		}
-		for (WGPUTexture shadow : shadows) {
+		for (const RWShadowCopyTarget &target : targets) {
+			WGPUTexture shadow = target.shadow;
 			for (uint32_t i = 0; i < p_regions.size(); i++) {
 				const BufferTextureCopyRegion &region = p_regions[i];
 
@@ -6260,8 +6289,9 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 	} else if (!use_write_texture && rw_shadow_copy_map.has(dst_handle)) {
 		// GPU buffer path: record shadow copies on the same command encoder so
 		// they execute after the preceding buffer-to-texture copy.
-		const LocalVector<WGPUTexture> &shadows = rw_shadow_copy_map[dst_handle];
-		for (WGPUTexture shadow : shadows) {
+		const LocalVector<RWShadowCopyTarget> &targets = rw_shadow_copy_map[dst_handle];
+		for (const RWShadowCopyTarget &target : targets) {
+			WGPUTexture shadow = target.shadow;
 			WGPUTexelCopyTextureInfo shd_src = {};
 			shd_src.texture = dst_handle;
 			shd_src.mipLevel = 0;

@@ -90,12 +90,18 @@ class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 	bool has_texture_formats_tier1 = false;
 	bool has_rw_storage_textures = false; // readonly-and-readwrite-storage-textures
 
-	// Source WGPUTexture → shadow WGPUTexture handles for read_write storage splits.
+	struct RWShadowCopyTarget {
+		WGTexture *source = nullptr;
+		WGPUTexture shadow = nullptr;
+	};
+
+	// Source WGPUTexture → source-view/shadow pairs for read_write storage splits.
 	// When a source texture is updated (command_copy_buffer_to_texture), the new
 	// data is also copied to every registered shadow so compute shaders see
 	// the latest contents through the read-only shadow binding. Compute writes
-	// are synchronized by post-dispatch source->shadow command-encoder copies.
-	HashMap<WGPUTexture, LocalVector<WGPUTexture>> rw_shadow_copy_map;
+	// are synchronized only to shadows of the same source view; a single owning
+	// texture can also have smaller mip or layer views registered in this map.
+	HashMap<WGPUTexture, LocalVector<RWShadowCopyTarget>> rw_shadow_copy_map;
 	bool float32_filterable_supported = false;
 	bool float32_blendable_supported = false;
 	// Optional texture-compression features (BC, ETC2, ASTC). Requested by the JS
