@@ -1206,6 +1206,10 @@ const _GodotAudio = {
 		/** @type {AudioContext} */
 		ctx: null,
 		input: null,
+		externalInput: null,
+		externalInputElement: null,
+		externalInputBypass: false,
+		externalInputBridge: null,
 		driver: null,
 		interval: 0,
 
@@ -1251,6 +1255,7 @@ const _GodotAudio = {
 			// opts['latencyHint'] = latency / 1000;
 			const ctx = new (window.AudioContext || window.webkitAudioContext)(opts);
 			GodotAudio.ctx = ctx;
+			GodotAudio.install_external_input_bridge();
 			ctx.onstatechange = function () {
 				let state = 0;
 				switch (ctx.state) {
@@ -1288,9 +1293,63 @@ const _GodotAudio = {
 			return ctx.destination.channelCount;
 		},
 
+		install_external_input_bridge: function () {
+			const bridge = {
+				version: 1,
+				prepareMediaElement: function (element) {
+					if (!GodotAudio.ctx || typeof HTMLMediaElement === 'undefined'
+							|| !(element instanceof HTMLMediaElement)) {
+						return false;
+					}
+					if (GodotAudio.externalInputElement
+							&& GodotAudio.externalInputElement !== element) {
+						return false;
+					}
+					if (!GodotAudio.externalInput) {
+						GodotAudio.externalInput = GodotAudio.ctx.createMediaElementSource(element);
+						GodotAudio.externalInputElement = element;
+					}
+					return true;
+				},
+				resume: function () {
+					if (!GodotAudio.ctx || GodotAudio.ctx.state === 'running') {
+						return Promise.resolve();
+					}
+					return GodotAudio.ctx.resume();
+				},
+				getState: function () {
+					return GodotAudio.ctx ? GodotAudio.ctx.state : 'uninitialized';
+				},
+				setBypass: function (enabled) {
+					return GodotAudio.set_external_input_bypass(Boolean(enabled));
+				},
+			};
+			GodotAudio.externalInputBridge = bridge;
+			window.GodotAudioInputBridge = bridge;
+		},
+
+		set_external_input_bypass: function (enabled) {
+			if (!GodotAudio.externalInput || !GodotAudio.ctx) {
+				return false;
+			}
+			if (enabled && !GodotAudio.externalInputBypass) {
+				GodotAudio.externalInput.connect(GodotAudio.ctx.destination);
+				GodotAudio.externalInputBypass = true;
+			} else if (!enabled && GodotAudio.externalInputBypass) {
+				GodotAudio.externalInput.disconnect(GodotAudio.ctx.destination);
+				GodotAudio.externalInputBypass = false;
+			}
+			return true;
+		},
+
 		create_input: function (callback) {
 			if (GodotAudio.input) {
 				return 0; // Already started.
+			}
+			if (GodotAudio.externalInput) {
+				GodotAudio.input = GodotAudio.externalInput;
+				callback(GodotAudio.input);
+				return 0;
 			}
 			function gotMediaInput(stream) {
 				try {
@@ -1341,6 +1400,16 @@ const _GodotAudio = {
 				GodotAudio.input.disconnect();
 				GodotAudio.input = null;
 			}
+			if (GodotAudio.externalInput) {
+				GodotAudio.externalInput.disconnect();
+				GodotAudio.externalInput = null;
+				GodotAudio.externalInputElement = null;
+				GodotAudio.externalInputBypass = false;
+			}
+			if (window.GodotAudioInputBridge === GodotAudio.externalInputBridge) {
+				delete window.GodotAudioInputBridge;
+			}
+			GodotAudio.externalInputBridge = null;
 			// Disconnect output
 			let closed = Promise.resolve();
 			if (GodotAudio.driver) {
@@ -1598,12 +1667,18 @@ const _GodotAudio = {
 	godot_audio_input_stop__sig: 'v',
 	godot_audio_input_stop: function () {
 		if (GodotAudio.input) {
-			const tracks = GodotAudio.input['mediaStream']['getTracks']();
-			for (let i = 0; i < tracks.length; i++) {
-				tracks[i]['stop']();
+			const stream = GodotAudio.input['mediaStream'];
+			if (stream && stream['getTracks']) {
+				const tracks = stream['getTracks']();
+				for (let i = 0; i < tracks.length; i++) {
+					tracks[i]['stop']();
+				}
 			}
 			GodotAudio.input.disconnect();
 			GodotAudio.input = null;
+			if (GodotAudio.externalInput && GodotAudio.externalInputBypass) {
+				GodotAudio.externalInput.connect(GodotAudio.ctx.destination);
+			}
 		}
 	},
 
