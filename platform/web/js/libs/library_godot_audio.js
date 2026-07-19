@@ -1298,11 +1298,11 @@ const _GodotAudio = {
 				version: 1,
 				prepareMediaElement: function (element) {
 					if (!GodotAudio.ctx || typeof HTMLMediaElement === 'undefined'
-							|| !(element instanceof HTMLMediaElement)) {
+						|| !(element instanceof HTMLMediaElement)) {
 						return false;
 					}
 					if (GodotAudio.externalInputElement
-							&& GodotAudio.externalInputElement !== element) {
+						&& GodotAudio.externalInputElement !== element) {
 						return false;
 					}
 					if (!GodotAudio.externalInput) {
@@ -2027,6 +2027,7 @@ const GodotAudioWorklet = {
 		promise: null,
 		worklet: null,
 		ring_buffer: null,
+		max_input_chunk_age: 0.1,
 
 		create: function (channels) {
 			const path = GodotConfig.locate_file('godot.audio.worklet.js');
@@ -2109,7 +2110,7 @@ const GodotAudioWorklet = {
 						rpos = 0;
 					}
 					if (to_write) {
-						buffer.set(recv_buf.subarray(high, to_write), rpos);
+						buffer.set(recv_buf.subarray(high, high + to_write), rpos);
 					}
 					in_callback(from, recv_buf.length);
 					rpos += to_write;
@@ -2140,8 +2141,15 @@ const GodotAudioWorklet = {
 						);
 					} else if (event.data['cmd'] === 'input') {
 						const buf = event.data['data'];
+						const input_time = event.data['time'];
+						GodotAudioWorklet.worklet.port.postMessage({ 'cmd': 'input_ack' });
 						if (buf.length > p_in_size) {
 							GodotRuntime.error('Input chunk is too big');
+							return;
+						}
+						if (typeof input_time === 'number' && GodotAudio.ctx
+							&& GodotAudio.ctx.currentTime - input_time
+							> GodotAudioWorklet.max_input_chunk_age) {
 							return;
 						}
 						GodotAudioWorklet.ring_buffer.receive(buf);
