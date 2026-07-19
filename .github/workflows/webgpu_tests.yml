@@ -131,6 +131,11 @@ jobs:
           cache-name: web-webgpu-test
         continue-on-error: true
 
+      # godot-build removes editor/ for export-template builds. This job also
+      # builds an editor afterwards so it can export the shader corpus.
+      - name: Restore editor sources
+        run: git restore --source=HEAD --worktree -- editor
+
       - name: Build Linux editor (for export + SPIR-V dump)
         run: |
           scons platform=linuxbsd target=editor dev_mode=yes tests=no debug_symbols=no -j$(nproc)
