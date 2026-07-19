@@ -146,16 +146,18 @@ jobs:
           mkdir -p webgpu_tests/test_project/export
 
           # Install WebGPU template (editor looks for web_nothreads_release.zip)
-          mkdir -p ~/.local/share/godot/export_templates/4.6.2.dev
+          mkdir -p ~/.local/share/godot/export_templates/4.6.2.stable
           cp bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
-             ~/.local/share/godot/export_templates/4.6.2.dev/web_nothreads_release.zip || true
+             ~/.local/share/godot/export_templates/4.6.2.stable/web_nothreads_release.zip
 
           # Run editor headless to import project and compile all shaders
           # GODOT_DUMP_SPIRV causes all compiled SPIR-V to be written to disk
           GODOT_DUMP_SPIRV=/tmp/spirv_dump timeout 120 \
             bin/godot.linuxbsd.editor.x86_64 \
               --headless --path webgpu_tests/test_project \
-              --export-release "WebGPU" export/index.html || true
+              --export-release "WebGPU" export/index.html
+
+          test -s webgpu_tests/test_project/export/index.html
 
           echo "SPIR-V files dumped:"
           ls -la /tmp/spirv_dump/ | head -50
@@ -166,6 +168,7 @@ jobs:
         with:
           name: spirv-dump
           path: /tmp/spirv_dump/
+          if-no-files-found: error
           retention-days: 7
 
       - name: Upload WebGPU export
@@ -173,6 +176,7 @@ jobs:
         with:
           name: webgpu-export
           path: webgpu_tests/test_project/export/
+          if-no-files-found: error
           retention-days: 7
 
   # ═══════════════════════════════════════════════════════════════════════════════
