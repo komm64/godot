@@ -82,13 +82,13 @@ static void _fence_work_done(void *p_userdata) {
 // Emscripten 4.x uses the three-argument callback while 5.x adds a message.
 // Keep both overloads so assignment to WGPUQueueWorkDoneCallback selects the
 // signature declared by the active WebGPU headers.
-static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
+[[maybe_unused]] static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
 	(void)p_status;
 	(void)p_userdata2;
 	_fence_work_done(p_userdata1);
 }
 
-static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+[[maybe_unused]] static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
 	(void)p_status;
 	(void)p_message;
 	(void)p_userdata2;
