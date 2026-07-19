@@ -62,12 +62,8 @@
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
-// Fence work-done callback: fires when wgpuQueueSubmit work completes on GPU.
-static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
-	(void)p_status;
-	(void)p_message;
-	(void)p_userdata2;
-	WGFence *fence = (WGFence *)p_userdata1;
+static void _fence_work_done(void *p_userdata) {
+	WGFence *fence = (WGFence *)p_userdata;
 	if (!fence) {
 		return;
 	}
@@ -81,6 +77,22 @@ static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStri
 	}
 
 	fence->signaled = true;
+}
+
+// Emscripten 4.x uses the three-argument callback while 5.x adds a message.
+// Keep both overloads so assignment to WGPUQueueWorkDoneCallback selects the
+// signature declared by the active WebGPU headers.
+static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
+	(void)p_status;
+	(void)p_userdata2;
+	_fence_work_done(p_userdata1);
+}
+
+static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	(void)p_status;
+	(void)p_message;
+	(void)p_userdata2;
+	_fence_work_done(p_userdata1);
 }
 
 // Parse "@group(G[u]) @binding(B[u])" from a WGSL string.
