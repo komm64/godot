@@ -104,6 +104,11 @@ jobs:
       - name: Verify Emscripten setup
         run: emcc -v
 
+      - name: Install glslangValidator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools
+
       - name: Restore Godot build cache
         uses: ./.github/actions/godot-cache-restore
         with:
