@@ -93,6 +93,8 @@ class RingBuffer {
 	}
 }
 
+const MAX_PENDING_INPUT_CHUNKS = 32;
+
 class GodotProcessor extends AudioWorkletProcessor {
 	constructor() {
 		super();
@@ -104,6 +106,7 @@ class GodotProcessor extends AudioWorkletProcessor {
 		this.output_buffer = new Float32Array();
 		this.input = null;
 		this.input_buffer = new Float32Array();
+		this.pending_input_chunks = 0;
 		this.port.onmessage = (event) => {
 			const cmd = event.data['cmd'];
 			const data = event.data['data'];
@@ -137,8 +140,11 @@ class GodotProcessor extends AudioWorkletProcessor {
 			this.notifier = null;
 		} else if (p_cmd === 'start_nothreads') {
 			this.output = new RingBuffer(p_data[0], p_data[0].length, false);
+			this.pending_input_chunks = 0;
 		} else if (p_cmd === 'chunk') {
 			this.output.write(p_data);
+		} else if (p_cmd === 'input_ack') {
+			this.pending_input_chunks = Math.max(0, this.pending_input_chunks - 1);
 		}
 	}
 
@@ -161,8 +167,18 @@ class GodotProcessor extends AudioWorkletProcessor {
 				this.input_buffer = new Float32Array(chunk);
 			}
 			if (!this.threads) {
-				GodotProcessor.write_input(this.input_buffer, input);
-				this.port.postMessage({ 'cmd': 'input', 'data': this.input_buffer });
+				// Keep the worklet-to-main-thread queue bounded. Browsers may throttle the
+				// main thread while a tab is hidden even though the audio thread continues,
+				// otherwise stale input can accumulate and be processed after focus returns.
+				if (this.pending_input_chunks < MAX_PENDING_INPUT_CHUNKS) {
+					GodotProcessor.write_input(this.input_buffer, input);
+					this.port.postMessage({
+						'cmd': 'input',
+						'data': this.input_buffer,
+						'time': currentTime,
+					});
+					this.pending_input_chunks++;
+				}
 			} else if (this.input.space_left() >= chunk) {
 				GodotProcessor.write_input(this.input_buffer, input);
 				this.input.write(this.input_buffer);
