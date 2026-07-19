@@ -62,9 +62,8 @@
 // Forward declaration for timestamp readback callback (defined below command_timestamp_query_pool_reset).
 static void _timestamp_readback_callback(WGPUMapAsyncStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
 
-// Fence work-done callback: fires when wgpuQueueSubmit work completes on GPU.
-static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
-	WGFence *fence = (WGFence *)p_userdata1;
+static void _fence_work_done(void *p_userdata) {
+	WGFence *fence = (WGFence *)p_userdata;
 	if (!fence) {
 		return;
 	}
@@ -78,6 +77,22 @@ static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_
 	}
 
 	fence->signaled = true;
+}
+
+// Emscripten 4.x uses the three-argument callback while 5.x adds a message.
+// Keep both overloads so assignment to WGPUQueueWorkDoneCallback selects the
+// signature declared by the active WebGPU headers.
+[[maybe_unused]] static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, void *p_userdata1, void *p_userdata2) {
+	(void)p_status;
+	(void)p_userdata2;
+	_fence_work_done(p_userdata1);
+}
+
+[[maybe_unused]] static void _fence_work_done_callback(WGPUQueueWorkDoneStatus p_status, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	(void)p_status;
+	(void)p_message;
+	(void)p_userdata2;
+	_fence_work_done(p_userdata1);
 }
 
 // Parse "@group(G[u]) @binding(B[u])" from a WGSL string.
@@ -5819,6 +5834,12 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 	}
 }
 
+static _FORCE_INLINE_ uint32_t _texture_copy_origin_z(const WGTexture *p_texture, uint32_t p_layer, uint32_t p_offset_z) {
+	// WebGPU folds a 3D texture's Z offset and a layered texture's array layer
+	// into the same origin.z field. RenderingDevice keeps them separate.
+	return p_texture->dimension == WGPUTextureDimension_3D ? p_offset_z : p_layer;
+}
+
 void RenderingDeviceDriverWebGPU::command_copy_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<TextureCopyRegion> p_regions) {
 	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
 	WGTexture *src = (WGTexture *)(p_src_texture.id);
@@ -5835,13 +5856,15 @@ void RenderingDeviceDriverWebGPU::command_copy_texture(CommandBufferID p_cmd_buf
 		WGPUTexelCopyTextureInfo src_copy = {};
 		src_copy.texture = src->gpu_handle();
 		src_copy.mipLevel = region.src_subresources.mipmap;
-		src_copy.origin = { (uint32_t)region.src_offset.x, (uint32_t)region.src_offset.y, region.src_subresources.base_layer };
+		src_copy.origin = { (uint32_t)region.src_offset.x, (uint32_t)region.src_offset.y,
+			_texture_copy_origin_z(src, region.src_subresources.base_layer, (uint32_t)region.src_offset.z) };
 		src_copy.aspect = WGPUTextureAspect_All;
 
 		WGPUTexelCopyTextureInfo dst_copy = {};
 		dst_copy.texture = dst->gpu_handle();
 		dst_copy.mipLevel = region.dst_subresources.mipmap;
-		dst_copy.origin = { (uint32_t)region.dst_offset.x, (uint32_t)region.dst_offset.y, region.dst_subresources.base_layer };
+		dst_copy.origin = { (uint32_t)region.dst_offset.x, (uint32_t)region.dst_offset.y,
+			_texture_copy_origin_z(dst, region.dst_subresources.base_layer, (uint32_t)region.dst_offset.z) };
 		dst_copy.aspect = WGPUTextureAspect_All;
 
 		WGPUExtent3D extent = { (uint32_t)region.size.x, (uint32_t)region.size.y, (uint32_t)region.size.z };
@@ -6201,7 +6224,8 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 		WGPUTexelCopyTextureInfo dst_copy = {};
 		dst_copy.texture = dst->gpu_handle();
 		dst_copy.mipLevel = region.texture_subresource.mipmap;
-		dst_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y, region.texture_subresource.layer };
+		dst_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y,
+			_texture_copy_origin_z(dst, region.texture_subresource.layer, (uint32_t)region.texture_offset.z) };
 		dst_copy.aspect = WGPUTextureAspect_All;
 
 		WGPUExtent3D extent = { copy_w, copy_h, (uint32_t)region.texture_region_size.z };
@@ -6268,7 +6292,8 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 				WGPUTexelCopyTextureInfo shd_copy = {};
 				shd_copy.texture = shadow;
 				shd_copy.mipLevel = region.texture_subresource.mipmap;
-				shd_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y, region.texture_subresource.layer };
+				shd_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y,
+					_texture_copy_origin_z(dst, region.texture_subresource.layer, (uint32_t)region.texture_offset.z) };
 				shd_copy.aspect = WGPUTextureAspect_All;
 
 				uint32_t s_aligned_bpr = ((region.row_pitch + 255) / 256) * 256;
@@ -6347,7 +6372,8 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture_layered(Command
 	dst_copy.texture = dst->gpu_handle();
 	dst_copy.mipLevel = p_base_region.texture_subresource.mipmap;
 	// .origin.z is the starting array layer; extent.depthOrArrayLayers covers N.
-	dst_copy.origin = { (uint32_t)p_base_region.texture_offset.x, (uint32_t)p_base_region.texture_offset.y, p_base_region.texture_subresource.layer };
+	dst_copy.origin = { (uint32_t)p_base_region.texture_offset.x, (uint32_t)p_base_region.texture_offset.y,
+		_texture_copy_origin_z(dst, p_base_region.texture_subresource.layer, (uint32_t)p_base_region.texture_offset.z) };
 	dst_copy.aspect = WGPUTextureAspect_All;
 
 	WGPUExtent3D extent = { copy_w, copy_h, p_layer_count };
@@ -6474,7 +6500,8 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 		WGPUTexelCopyTextureInfo src_copy = {};
 		src_copy.texture = src->gpu_handle();
 		src_copy.mipLevel = region.texture_subresource.mipmap;
-		src_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y, region.texture_subresource.layer };
+		src_copy.origin = { (uint32_t)region.texture_offset.x, (uint32_t)region.texture_offset.y,
+			_texture_copy_origin_z(src, region.texture_subresource.layer, (uint32_t)region.texture_offset.z) };
 		src_copy.aspect = WGPUTextureAspect_All;
 
 		// WGPUTexelCopyBufferInfo combines the buffer handle + layout (Dawn API)
