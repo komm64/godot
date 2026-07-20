@@ -118,10 +118,16 @@ layout(location = 0) out highp float sdf_buf;
 void main() {
 #ifdef MODE_SHADOW
 	bool front_facing = gl_FrontFacing;
-	if (constants.cull_mode == POLYGON_CULL_BACK && !front_facing) {
-		discard;
-	} else if (constants.cull_mode == POLYGON_CULL_FRONT && front_facing) {
-		discard;
+	// Keep these tests nested. Tint lowers scalar logical AND to WGSL's
+	// non-short-circuit boolean `&`, which some Firefox 140/Naga builds reject.
+	if (constants.cull_mode == POLYGON_CULL_BACK) {
+		if (!front_facing) {
+			discard;
+		}
+	} else if (constants.cull_mode == POLYGON_CULL_FRONT) {
+		if (front_facing) {
+			discard;
+		}
 	}
 	distance_buf = depth / constants.z_far;
 #else
