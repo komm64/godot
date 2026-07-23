@@ -1342,6 +1342,43 @@ const _GodotAudio = {
 			return true;
 		},
 
+		connect_input: function (input) {
+			const driver = GodotAudio.driver;
+			const connect = function () {
+				if (GodotAudio.input !== input || !driver
+					|| typeof driver.get_node !== 'function') {
+					return false;
+				}
+				const node = driver.get_node();
+				if (!node) {
+					return false;
+				}
+				input.connect(node);
+				return true;
+			};
+			if (connect()) {
+				return;
+			}
+			// AudioWorklet creation is asynchronous. In a no-thread build the
+			// external media input can start before the worklet node exists.
+			// Keep the input identity guard so a stopped/replaced input is never
+			// connected when the deferred driver initialization completes.
+			const ready = driver && driver.promise;
+			if (!ready || typeof ready.then !== 'function') {
+				GodotRuntime.error('Audio input driver node is not ready.');
+				return;
+			}
+			ready.then(function () {
+				if (GodotAudio.input === input && !connect()) {
+					GodotRuntime.error('Audio input driver node is unavailable after initialization.');
+				}
+			}).catch(function (error) {
+				if (GodotAudio.input === input) {
+					GodotRuntime.error('Error connecting deferred audio input.', error);
+				}
+			});
+		},
+
 		create_input: function (callback) {
 			if (GodotAudio.input) {
 				return 0; // Already started.
@@ -1659,7 +1696,7 @@ const _GodotAudio = {
 	godot_audio_input_start__sig: 'i',
 	godot_audio_input_start: function () {
 		return GodotAudio.create_input(function (input) {
-			input.connect(GodotAudio.driver.get_node());
+			GodotAudio.connect_input(input);
 		});
 	},
 
