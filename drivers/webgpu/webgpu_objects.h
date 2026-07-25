@@ -334,8 +334,11 @@ struct WGCommandQueue {
 	WGPUQueue queue = nullptr;
 };
 
+struct WGCommandBuffer;
+
 struct WGCommandPool {
 	RDD::CommandBufferType buffer_type = RDD::COMMAND_BUFFER_TYPE_PRIMARY;
+	LocalVector<WGCommandBuffer *> command_buffers;
 };
 
 struct WGQueryPool; // Forward declaration for WGCommandBuffer.
