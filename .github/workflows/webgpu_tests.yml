@@ -5,11 +5,13 @@ on:
   push:
     branches: [webgpu-4.6.2]
     paths:
+      - '.github/workflows/webgpu_tests.yml'
       - 'drivers/webgpu/**'
       - 'webgpu_tests/**'
       - 'servers/rendering/**'
   pull_request:
     paths:
+      - '.github/workflows/webgpu_tests.yml'
       - 'drivers/webgpu/**'
       - 'webgpu_tests/**'
       - 'servers/rendering/**'
@@ -24,11 +26,12 @@ env:
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════════
-  # Shader Corpus: Standalone SPIR-V → WGSL validation (fast, no build needed)
+  # Shader Corpus: SPIR-V → WGSL validation with the native Tint CLI
   # ═══════════════════════════════════════════════════════════════════════════════
   shader-corpus:
     runs-on: ubuntu-24.04
     name: Shader Corpus (SPIR-V → WGSL)
+    needs: [build-webgpu]
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -40,6 +43,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Download native Tint CLI
+        uses: actions/download-artifact@v4
+        with:
+          name: tint-cli
+          path: bin/
+
+      - name: Verify native Tint CLI
+        run: |
+          chmod +x bin/tint_convert_cli
+          test -x bin/tint_convert_cli
 
       - name: Install glslangValidator
         run: |
@@ -104,10 +118,10 @@ jobs:
       - name: Verify Emscripten setup
         run: emcc -v
 
-      - name: Install glslangValidator
+      - name: Install shader and software-rendering tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslang-tools
+          sudo apt-get install -y glslang-tools mesa-vulkan-drivers xvfb
 
       - name: Restore Godot build cache
         uses: ./.github/actions/godot-cache-restore
@@ -125,6 +139,21 @@ jobs:
           platform: web
           target: template_release
 
+      - name: Ensure native Tint CLI
+        run: |
+          if [ ! -x bin/tint_convert_cli ]; then
+            drivers/webgpu/tint_cli/build.sh
+          fi
+          test -x bin/tint_convert_cli
+
+      - name: Upload native Tint CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: tint-cli
+          path: bin/tint_convert_cli
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Save Godot build cache
         uses: ./.github/actions/godot-cache-save
         with:
@@ -140,9 +169,29 @@ jobs:
         run: |
           scons platform=linuxbsd target=editor dev_mode=yes tests=no debug_symbols=no -j$(nproc)
 
-      - name: Export test project with SPIR-V dump
+      - name: Run shader coverage project and dump SPIR-V
         run: |
           mkdir -p /tmp/spirv_dump
+
+          # Exporting a project does not execute its rendering code. Run the
+          # coverage scene with Mesa's Vulkan software driver so every shader
+          # compiled by RenderingDevice reaches the GODOT_DUMP_SPIRV hook.
+          GODOT_DUMP_SPIRV=/tmp/spirv_dump \
+            timeout 300 xvfb-run --auto-servernum \
+              bin/godot.linuxbsd.editor.x86_64 \
+                --display-driver x11 \
+                --rendering-driver vulkan \
+                --path webgpu_tests/test_project
+
+          SPIRV_COUNT=$(find /tmp/spirv_dump -maxdepth 1 -type f -name '*.spv' | wc -l)
+          echo "SPIR-V files dumped: ${SPIRV_COUNT}"
+          if [ "${SPIRV_COUNT}" -lt 250 ]; then
+            echo "::error::The shader coverage project produced only ${SPIRV_COUNT} SPIR-V files; expected at least 250"
+            exit 1
+          fi
+
+      - name: Export WebGPU test project
+        run: |
           mkdir -p webgpu_tests/test_project/export
 
           # Install WebGPU template (editor looks for web_nothreads_release.zip)
@@ -150,18 +199,12 @@ jobs:
           cp bin/godot.web.template_release.wasm32.nothreads.dlink.zip \
              ~/.local/share/godot/export_templates/4.6.2.stable/web_nothreads_release.zip
 
-          # Run editor headless to import project and compile all shaders
-          # GODOT_DUMP_SPIRV causes all compiled SPIR-V to be written to disk
-          GODOT_DUMP_SPIRV=/tmp/spirv_dump timeout 120 \
+          timeout 120 \
             bin/godot.linuxbsd.editor.x86_64 \
               --headless --path webgpu_tests/test_project \
               --export-release "WebGPU" export/index.html
 
           test -s webgpu_tests/test_project/export/index.html
-
-          echo "SPIR-V files dumped:"
-          ls -la /tmp/spirv_dump/ | head -50
-          echo "Total: $(ls /tmp/spirv_dump/*.spv 2>/dev/null | wc -l) files"
 
       - name: Upload SPIR-V dump
         uses: actions/upload-artifact@v4
@@ -204,8 +247,16 @@ jobs:
           name: spirv-dump
           path: /tmp/spirv_dump/
 
+      - name: Download native Tint CLI
+        uses: actions/download-artifact@v4
+        with:
+          name: tint-cli
+          path: bin/
+
       - name: Validate all SPIR-V through Tint
         run: |
+          chmod +x bin/tint_convert_cli
+          test -x bin/tint_convert_cli
           echo "Validating engine SPIR-V files through Tint..."
           node webgpu_tests/shader_corpus/validate_spirv_dump.mjs /tmp/spirv_dump/
 
@@ -343,7 +394,7 @@ jobs:
   test-summary:
     runs-on: ubuntu-24.04
     name: Test Summary
-    needs: [shader-corpus, driver-unit-tests, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
+    needs: [shader-corpus, driver-unit-tests, build-webgpu, validate-spirv, smoke-test, scene-smoketest, resource-lifecycle, screenshot-comparison]
     if: always()
     steps:
       - name: Check results
@@ -354,6 +405,7 @@ jobs:
           echo ""
           echo "  Shader Corpus:        ${{ needs.shader-corpus.result }}"
           echo "  Driver Unit Tests:    ${{ needs.driver-unit-tests.result }}"
+          echo "  WebGPU Build:         ${{ needs.build-webgpu.result }}"
           echo "  SPIR-V Validation:    ${{ needs.validate-spirv.result }}"
           echo "  Smoke Test:           ${{ needs.smoke-test.result }}"
           echo "  Scene Smoketest:      ${{ needs.scene-smoketest.result }}"
@@ -363,28 +415,32 @@ jobs:
 
           FAILED=0
 
-          if [ "${{ needs.shader-corpus.result }}" = "failure" ]; then
-            echo "::error::Shader corpus tests failed"
+          if [ "${{ needs.shader-corpus.result }}" != "success" ]; then
+            echo "::error::Shader corpus tests did not succeed (${{ needs.shader-corpus.result }})"
             FAILED=1
           fi
-          if [ "${{ needs.driver-unit-tests.result }}" = "failure" ]; then
-            echo "::error::Driver unit tests failed"
+          if [ "${{ needs.driver-unit-tests.result }}" != "success" ]; then
+            echo "::error::Driver unit tests did not succeed (${{ needs.driver-unit-tests.result }})"
             FAILED=1
           fi
-          if [ "${{ needs.validate-spirv.result }}" = "failure" ]; then
-            echo "::error::Engine SPIR-V validation failed — Tint cannot convert one or more shaders"
+          if [ "${{ needs.build-webgpu.result }}" != "success" ]; then
+            echo "::error::WebGPU build and artifact generation did not succeed (${{ needs.build-webgpu.result }})"
             FAILED=1
           fi
-          if [ "${{ needs.smoke-test.result }}" = "failure" ]; then
-            echo "::error::Headless smoke test failed — shader compilation or WebGPU errors in browser"
+          if [ "${{ needs.validate-spirv.result }}" != "success" ]; then
+            echo "::error::Engine SPIR-V validation did not succeed (${{ needs.validate-spirv.result }})"
             FAILED=1
           fi
-          if [ "${{ needs.scene-smoketest.result }}" = "failure" ]; then
-            echo "::error::Scene smoketest failed — one or more scenes have GPU/shader errors in Chrome or Firefox"
+          if [ "${{ needs.smoke-test.result }}" != "success" ]; then
+            echo "::error::Headless smoke test did not succeed (${{ needs.smoke-test.result }})"
             FAILED=1
           fi
-          if [ "${{ needs.resource-lifecycle.result }}" = "failure" ]; then
-            echo "::error::Resource lifecycle tests failed"
+          if [ "${{ needs.scene-smoketest.result }}" != "success" ]; then
+            echo "::error::Scene smoketest did not succeed (${{ needs.scene-smoketest.result }})"
+            FAILED=1
+          fi
+          if [ "${{ needs.resource-lifecycle.result }}" != "success" ]; then
+            echo "::error::Resource lifecycle tests did not succeed (${{ needs.resource-lifecycle.result }})"
             FAILED=1
           fi
           # Screenshot comparison failures are warnings, not blockers
