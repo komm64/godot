@@ -2944,7 +2944,9 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 		}
 	}
 
-	// Clear finished command buffers (they are consumed by submit).
+	// Release finished command buffers after submit. Queue submission retains
+	// everything needed for execution, but does not transfer ownership of the
+	// command buffer handles to the queue.
 	for (uint32_t i = 0; i < p_cmd_buffers.size(); i++) {
 		WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffers[i].id);
 		if (cmd) {
@@ -2968,6 +2970,9 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 				}
 			}
 			cmd->written_query_pools.clear();
+			if (cmd->finished_buffer) {
+				wgpuCommandBufferRelease(cmd->finished_buffer);
+			}
 			cmd->finished_buffer = nullptr;
 		}
 	}
@@ -2986,18 +2991,52 @@ RDD::CommandPoolID RenderingDeviceDriverWebGPU::command_pool_create(CommandQueue
 	return CommandPoolID(pool);
 }
 
+static void _command_buffer_reset(WGCommandBuffer *p_cmd) {
+	p_cmd->end_active_encoder();
+
+	if (p_cmd->encoder) {
+		wgpuCommandEncoderRelease(p_cmd->encoder);
+		p_cmd->encoder = nullptr;
+	}
+	if (p_cmd->finished_buffer) {
+		wgpuCommandBufferRelease(p_cmd->finished_buffer);
+		p_cmd->finished_buffer = nullptr;
+	}
+
+	p_cmd->written_query_pools.clear();
+
+	p_cmd->push_constants_dirty = false;
+	p_cmd->push_constant_data_len = 0;
+	p_cmd->invalidate_bind_groups();
+}
+
 bool RenderingDeviceDriverWebGPU::command_pool_reset(CommandPoolID p_cmd_pool) {
-	// Nothing to reset — each command buffer creates its own encoder.
+	WGCommandPool *pool = (WGCommandPool *)(p_cmd_pool.id);
+	ERR_FAIL_NULL_V(pool, false);
+
+	for (WGCommandBuffer *cmd : pool->command_buffers) {
+		_command_buffer_reset(cmd);
+	}
 	return true;
 }
 
 void RenderingDeviceDriverWebGPU::command_pool_free(CommandPoolID p_cmd_pool) {
 	WGCommandPool *pool = (WGCommandPool *)(p_cmd_pool.id);
+	ERR_FAIL_NULL(pool);
+
+	for (WGCommandBuffer *cmd : pool->command_buffers) {
+		_command_buffer_reset(cmd);
+		delete cmd;
+	}
 	delete pool;
 }
 
 RDD::CommandBufferID RenderingDeviceDriverWebGPU::command_buffer_create(CommandPoolID p_cmd_pool) {
+	WGCommandPool *pool = (WGCommandPool *)(p_cmd_pool.id);
+	ERR_FAIL_NULL_V(pool, CommandBufferID());
+
 	WGCommandBuffer *cmd = new WGCommandBuffer();
+	pool->command_buffers.push_back(cmd);
 	return CommandBufferID(cmd);
 }
 
@@ -3005,14 +3044,13 @@ bool RenderingDeviceDriverWebGPU::command_buffer_begin(CommandBufferID p_cmd_buf
 	WGCommandBuffer *cmd = (WGCommandBuffer *)(p_cmd_buffer.id);
 	ERR_FAIL_NULL_V(cmd, false);
 
+	_command_buffer_reset(cmd);
+
 	WGPUCommandEncoderDescriptor desc = {};
 	cmd->encoder = wgpuDeviceCreateCommandEncoder(device, &desc);
 	ERR_FAIL_COND_V(cmd->encoder == nullptr, false);
 
 	cmd->active_encoder = WGCommandBuffer::NONE;
-	cmd->push_constants_dirty = false;
-	cmd->push_constant_data_len = 0;
-	cmd->invalidate_bind_groups();
 
 	return true;
 }
