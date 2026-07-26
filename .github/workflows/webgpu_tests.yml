@@ -154,6 +154,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: web-webgpu-test
+        continue-on-error: true
+
       # godot-build removes editor/ for export-template builds. This job also
       # builds an editor afterwards so it can export the shader corpus.
       - name: Restore editor sources
@@ -162,12 +168,6 @@ jobs:
       - name: Build Linux editor (for export + SPIR-V dump)
         run: |
           scons platform=linuxbsd target=editor dev_mode=yes tests=no debug_symbols=no -j$(nproc)
-
-      - name: Save Godot build cache
-        uses: ./.github/actions/godot-cache-save
-        with:
-          cache-name: web-webgpu-test
-        continue-on-error: true
 
       - name: Run shader coverage project and dump SPIR-V
         run: |

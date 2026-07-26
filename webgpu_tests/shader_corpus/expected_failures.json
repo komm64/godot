@@ -5,6 +5,16 @@
     "ClusterRenderShaderRD_0.frag.spv",
     "ClusterRenderShaderRD_1.frag.spv",
     "ClusterStoreShaderRD_0.comp.spv",
+    "Fsr2AccumulatePassShaderRD_0.comp.spv",
+    "Fsr2AccumulatePassShaderRD_1.comp.spv",
+    "Fsr2AccumulatePassShaderRD_2.comp.spv",
+    "Fsr2AccumulatePassShaderRD_3.comp.spv",
+    "Fsr2AutogenReactivePassShaderRD_1.comp.spv",
+    "Fsr2ComputeLuminancePyramidPassShaderRD_0.comp.spv",
+    "Fsr2RcasPassShaderRD_0.comp.spv",
+    "Fsr2ReconstructPreviousDepthPassShaderRD_0.comp.spv",
+    "Fsr2ReconstructPreviousDepthPassShaderRD_1.comp.spv",
+    "Fsr2TcrAutogenPassShaderRD_1.comp.spv",
     "FsrUpscaleShaderRD_0.comp.spv",
     "SceneForwardClusteredShaderRD_17.frag.spv",
     "SceneForwardClusteredShaderRD_18.frag.spv",
@@ -46,6 +56,18 @@
     ],
     "InvalidTypeWidth (16-bit types)": [
       "FsrUpscaleShaderRD_0.comp.spv"
+    ],
+    "FSR2 Vulkan-only variants (WebGPU runtime smoke-covered)": [
+      "Fsr2AccumulatePassShaderRD_0.comp.spv",
+      "Fsr2AccumulatePassShaderRD_1.comp.spv",
+      "Fsr2AccumulatePassShaderRD_2.comp.spv",
+      "Fsr2AccumulatePassShaderRD_3.comp.spv",
+      "Fsr2AutogenReactivePassShaderRD_1.comp.spv",
+      "Fsr2ComputeLuminancePyramidPassShaderRD_0.comp.spv",
+      "Fsr2RcasPassShaderRD_0.comp.spv",
+      "Fsr2ReconstructPreviousDepthPassShaderRD_0.comp.spv",
+      "Fsr2ReconstructPreviousDepthPassShaderRD_1.comp.spv",
+      "Fsr2TcrAutogenPassShaderRD_1.comp.spv"
     ],
     "UnsupportedStorageClass (Vulkan-only)": [
       "SceneForwardClusteredShaderRD_17.frag.spv",
