@@ -292,7 +292,7 @@ jobs:
 
       - name: Run smoke test
         working-directory: webgpu_tests/test_project
-        run: node smoke_test.mjs ./export/
+        run: xvfb-run --auto-servernum node smoke_test.mjs ./export/
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # Scene Smoketest: 18 demos/benchmarks across Chrome + Firefox
