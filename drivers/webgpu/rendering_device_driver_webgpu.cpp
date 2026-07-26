@@ -6083,16 +6083,26 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 		// Fast path: clear via a zero-draw render pass (requires RenderAttachment usage).
 		for (uint32_t mip = p_subresources.base_mipmap; mip < p_subresources.base_mipmap + p_subresources.mipmap_count; mip++) {
 			for (uint32_t layer = p_subresources.base_layer; layer < p_subresources.base_layer + p_subresources.layer_count; layer++) {
-				WGPUTextureViewDescriptor view_desc = {};
-				view_desc.format = tex->format;
-				view_desc.dimension = WGPUTextureViewDimension_2D;
-				view_desc.baseMipLevel = mip;
-				view_desc.mipLevelCount = 1;
-				view_desc.baseArrayLayer = layer;
-				view_desc.arrayLayerCount = 1;
-				view_desc.aspect = WGPUTextureAspect_All;
-
-				WGPUTextureView view = wgpuTextureCreateView(tex->view_source, &view_desc);
+				// A single-subresource 2D texture's default view is exactly the
+				// attachment view needed here. Reusing it avoids creating a short-lived
+				// GPUTextureView on every clear (and the corresponding JavaScript GC
+				// pressure in browser builds).
+				const bool use_default_view = tex->handle != nullptr &&
+						mip == 0 && layer == 0 &&
+						tex->mipmaps == 1 && tex->layers == 1 &&
+						tex->view_dimension == WGPUTextureViewDimension_2D;
+				WGPUTextureView view = tex->default_view;
+				if (!use_default_view) {
+					WGPUTextureViewDescriptor view_desc = {};
+					view_desc.format = tex->format;
+					view_desc.dimension = WGPUTextureViewDimension_2D;
+					view_desc.baseMipLevel = mip;
+					view_desc.mipLevelCount = 1;
+					view_desc.baseArrayLayer = layer;
+					view_desc.arrayLayerCount = 1;
+					view_desc.aspect = WGPUTextureAspect_All;
+					view = wgpuTextureCreateView(tex->view_source, &view_desc);
+				}
 
 				WGPURenderPassColorAttachment color_att = {};
 				color_att.view = view;
@@ -6108,7 +6118,9 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 				WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(cmd->encoder, &rp_desc);
 				wgpuRenderPassEncoderEnd(pass);
 				wgpuRenderPassEncoderRelease(pass);
-				wgpuTextureViewRelease(view);
+				if (!use_default_view) {
+					wgpuTextureViewRelease(view);
+				}
 			}
 		}
 	} else {
