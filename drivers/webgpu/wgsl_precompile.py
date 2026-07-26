@@ -17,6 +17,7 @@ SPIR-V → WGSL conversion for ubershaders on every page load.
 
 import json
 import os
+import shlex
 import struct
 import subprocess
 import sys
@@ -36,6 +37,11 @@ def _host_tool_environment():
 
 def _relative_posix_path(path, root):
     return os.path.relpath(path, root).replace(os.sep, "/")
+
+
+def _wsl_precompile_command(script, output, glslang):
+    arguments = (script, ".", output, glslang)
+    return "exec python3 " + " ".join(shlex.quote(argument) for argument in arguments)
 
 
 # ---------------------------------------------------------------------------
@@ -919,17 +925,9 @@ def build_wgsl_precompiled(target, source, env):
                 sys.exit(1)
             glslang_arg = path_result.stdout.strip()
 
+        command = _wsl_precompile_command(precompile_script, output_arg, glslang_arg)
         result = subprocess.run(
-            [
-                "bash",
-                "-lc",
-                'exec python3 "$@"',
-                "wgsl-precompile",
-                precompile_script,
-                ".",
-                output_arg,
-                glslang_arg,
-            ],
+            ["bash", "-lc", command],
             cwd=repo_root,
             env=host_env,
             timeout=2400,

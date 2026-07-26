@@ -15,6 +15,7 @@ Usage:
 """
 
 import os
+import shlex
 import struct
 import sys
 import tempfile
@@ -455,6 +456,24 @@ posix_path = wgsl_precompile._relative_posix_path(
 )
 assert_eq(posix_path, "drivers/webgpu/wgsl_precompile.py",
           "Helper paths use POSIX separators")
+
+wsl_command = wgsl_precompile._wsl_precompile_command(
+    "drivers/webgpu/wgsl precompile.py",
+    "drivers/webgpu/wgsl output.gen.h",
+    "/opt/glslang validator",
+)
+assert_eq(
+    shlex.split(wsl_command),
+    [
+        "exec",
+        "python3",
+        "drivers/webgpu/wgsl precompile.py",
+        ".",
+        "drivers/webgpu/wgsl output.gen.h",
+        "/opt/glslang validator",
+    ],
+    "WSL command preserves every quoted positional argument",
+)
 
 
 # =========================================================================
