@@ -2348,10 +2348,17 @@ void MaterialStorage::material_set_param(RID p_material, const StringName &p_par
 	Material *material = material_owner.get_or_null(p_material);
 	ERR_FAIL_NULL(material);
 
+	ERR_FAIL_COND(p_value.get_type() == Variant::OBJECT); // Object not allowed.
+
+	const Variant *current = material->params.getptr(p_param);
+	if ((current == nullptr && p_value.get_type() == Variant::NIL) ||
+			(current != nullptr && *current == p_value)) {
+		return;
+	}
+
 	if (p_value.get_type() == Variant::NIL) {
 		material->params.erase(p_param);
 	} else {
-		ERR_FAIL_COND(p_value.get_type() == Variant::OBJECT); //object not allowed
 		material->params[p_param] = p_value;
 	}
 
