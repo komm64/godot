@@ -6087,7 +6087,8 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 				// attachment view needed here. Reusing it avoids creating a short-lived
 				// GPUTextureView on every clear (and the corresponding JavaScript GC
 				// pressure in browser builds).
-				const bool use_default_view = mip == 0 && layer == 0 &&
+				const bool use_default_view = tex->handle != nullptr &&
+						mip == 0 && layer == 0 &&
 						tex->mipmaps == 1 && tex->layers == 1 &&
 						tex->view_dimension == WGPUTextureViewDimension_2D;
 				WGPUTextureView view = tex->default_view;
