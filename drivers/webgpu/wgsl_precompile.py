@@ -17,10 +17,32 @@ SPIR-V → WGSL conversion for ubershaders on every page load.
 
 import json
 import os
+import shlex
 import struct
 import subprocess
 import sys
 import tempfile
+
+
+_HOST_TOOLCHAIN_ENV_VARS = ("AR", "CC", "CXX", "LD", "RANLIB")
+
+
+def _host_tool_environment():
+    """Return an environment without the target compiler selected by SCons."""
+    host_env = os.environ.copy()
+    for variable in _HOST_TOOLCHAIN_ENV_VARS:
+        host_env.pop(variable, None)
+    return host_env
+
+
+def _relative_posix_path(path, root):
+    return os.path.relpath(path, root).replace(os.sep, "/")
+
+
+def _wsl_precompile_command(script, output, glslang):
+    arguments = (script, ".", output, glslang)
+    return "exec python3 " + " ".join(shlex.quote(argument) for argument in arguments)
+
 
 # ---------------------------------------------------------------------------
 # MurmurHash3 (x86_32) — matches Godot's hash_murmur3_buffer()
@@ -864,14 +886,16 @@ def build_wgsl_precompiled(target, source, env):
     # Native Windows Python passes backslashes through to bash, where they are
     # interpreted as escape characters. Use a cwd-relative POSIX path so both
     # WSL bash and Unix shells resolve the helper consistently.
-    build_script_arg = os.path.relpath(build_script, repo_root).replace(os.sep, "/")
+    build_script_arg = _relative_posix_path(build_script, repo_root)
     if not build_script_arg.startswith("."):
         build_script_arg = "./" + build_script_arg
 
     print("[WGSL Precompile] Building tint_convert_cli...")
+    host_env = _host_tool_environment()
     result = subprocess.run(
         ["bash", build_script_arg],
         cwd=repo_root,
+        env=host_env,
         timeout=2400,
     )
     if result.returncode != 0:
@@ -879,6 +903,40 @@ def build_wgsl_precompiled(target, source, env):
         sys.exit(1)
 
     glslang = env.get("GLSLANG", "glslangValidator")
+    if os.name == "nt":
+        # bash.exe is WSL on Windows. The helper it just built is therefore an
+        # ELF host executable; run the remaining Python pipeline inside the
+        # same WSL environment instead of trying to launch the helper from
+        # native Windows Python.
+        precompile_script = _relative_posix_path(__file__, repo_root)
+        output_arg = _relative_posix_path(output, repo_root)
+        glslang_arg = str(glslang)
+        if os.path.isabs(glslang_arg):
+            path_result = subprocess.run(
+                ["bash", "-lc", 'wslpath -a "$1"', "wslpath", glslang_arg],
+                cwd=repo_root,
+                env=host_env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if path_result.returncode != 0:
+                print("[WGSL Precompile] ERROR: could not translate GLSLANG path for WSL", file=sys.stderr)
+                sys.exit(1)
+            glslang_arg = path_result.stdout.strip()
+
+        command = _wsl_precompile_command(precompile_script, output_arg, glslang_arg)
+        result = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=repo_root,
+            env=host_env,
+            timeout=2400,
+        )
+        if result.returncode != 0:
+            print("[WGSL Precompile] ERROR: WSL shader precompile failed", file=sys.stderr)
+            sys.exit(1)
+        return
+
     precompile_wgsl(repo_root, output, glslang)
 
 
