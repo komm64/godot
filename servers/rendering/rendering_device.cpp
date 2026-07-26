@@ -3802,7 +3802,7 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 				continue;
 			}
 			String stage_ext = (p_spirv[i].shader_stage < 5) ? stage_suffixes[p_spirv[i].shader_stage] : "spv";
-			String safe_name = p_shader_name.is_empty() ? "unnamed" : p_shader_name.replace("/", "_").replace("\\", "_");
+			String safe_name = p_shader_name.is_empty() ? "unnamed" : p_shader_name.validate_filename();
 			String path = dump_dir.path_join(safe_name + "." + stage_ext + ".spv");
 			Ref<FileAccess> f = FileAccess::open(path, FileAccess::WRITE);
 			if (f.is_valid()) {
