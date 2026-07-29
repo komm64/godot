@@ -66,7 +66,13 @@ protected:
 
 	void _start(const CreationParameters &c) {
 		free();
+#ifdef WEB_ENABLED
+		// WebGPU objects cannot be accessed from Emscripten pthread workers.
+		// Keep deferred creation synchronous on the rendering thread for Web.
+		_create(c);
+#else
 		task = WorkerThreadPool::get_singleton()->add_template_task(this, &PipelineDeferredRD::_create, c, true, "PipelineCompilation");
+#endif
 	}
 
 	void _wait() {
