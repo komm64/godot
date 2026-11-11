@@ -4820,7 +4820,7 @@ static void _fixed_tick_wait_until(uint64_t p_usec) {
 
 // Number of ticks to run this iteration. Waits for the next one if none is due.
 // Ticks more than a quarter second behind are dropped, not caught up.
-static int _fixed_tick_steps(uint64_t p_now) {
+static int _fixed_tick_steps(uint64_t p_now, bool p_drop_pending) {
 	if (fixed_ticks_run == 0) {
 		fixed_tick_origin = p_now;
 	}
@@ -4830,8 +4830,7 @@ static int _fixed_tick_steps(uint64_t p_now) {
 		due = fixed_ticks_run + 1;
 	}
 	uint64_t steps = due - fixed_ticks_run;
-	if (Engine::get_singleton()->_drop_pending_ticks) {
-		Engine::get_singleton()->_drop_pending_ticks = false;
+	if (p_drop_pending) {
 		steps = 1;
 	}
 	if (steps > MAX(uint64_t(1), uint64_t(fixed_tick_rate * 0.25))) {
@@ -4887,7 +4886,8 @@ bool Main::iteration() {
 	// With a fixed tick, each due tick is one physics step plus one process step.
 	int tick_steps = 1;
 	if (fixed_tick_rate > 0.0) {
-		tick_steps = _fixed_tick_steps(ticks);
+		tick_steps = _fixed_tick_steps(ticks, Engine::get_singleton()->_drop_pending_ticks);
+		Engine::get_singleton()->_drop_pending_ticks = false;
 		physics_step = 1.0 / fixed_tick_rate;
 		process_step = physics_step;
 		scaled_step = tick_steps * process_step * time_scale;
