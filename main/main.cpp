@@ -4830,6 +4830,10 @@ static int _fixed_tick_steps(uint64_t p_now) {
 		due = fixed_ticks_run + 1;
 	}
 	uint64_t steps = due - fixed_ticks_run;
+	if (Engine::get_singleton()->_drop_pending_ticks) {
+		Engine::get_singleton()->_drop_pending_ticks = false;
+		steps = 1;
+	}
 	if (steps > MAX(uint64_t(1), uint64_t(fixed_tick_rate * 0.25))) {
 		steps = 1;
 	}

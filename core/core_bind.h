@@ -607,6 +607,7 @@ public:
 
 	bool is_in_physics_frame() const;
 	bool is_drawing_step() const;
+	void drop_pending_ticks();
 
 	bool has_singleton(const StringName &p_name) const;
 	Object *get_singleton_object(const StringName &p_name) const;

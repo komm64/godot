@@ -19,6 +19,12 @@
 				[b]Warning:[/b] When [param include_variables] is [code]true[/code], any captured variables can potentially (e.g. with GDScript backtraces) be their actual values, including any object references. This means that storing such a [ScriptBacktrace] will prevent those objects from being deallocated, so it's generally recommended not to do so.
 			</description>
 		</method>
+		<method name="drop_pending_ticks">
+			<return type="void" />
+			<description>
+				With [member ProjectSettings.application/run/fixed_tick_rate] set, the next loop iteration runs one tick instead of catching up the ticks that fell due meanwhile. Call it after a known stall that is not game time, such as loading or saving. Does nothing without a fixed tick rate.
+			</description>
+		</method>
 		<method name="get_architecture_name" qualifiers="const">
 			<return type="String" />
 			<description>
