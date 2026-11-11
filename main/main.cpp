@@ -4900,6 +4900,7 @@ bool Main::iteration() {
 	XRServer::get_singleton()->_process();
 #endif // XR_DISABLED
 
+	uint64_t process_begin = 0;
 	for (int tick_step = 0; tick_step < tick_steps && !exit; ++tick_step) {
 		if (tick_step > 0) {
 			Engine::get_singleton()->_process_frames++;
@@ -4996,7 +4997,7 @@ bool Main::iteration() {
 			Input::get_singleton()->flush_buffered_events();
 		}
 
-		uint64_t process_begin = OS::get_singleton()->get_ticks_usec();
+		process_begin = OS::get_singleton()->get_ticks_usec();
 
 		GodotProfileZoneGrouped(_profile_zone, "process");
 		if (OS::get_singleton()->get_main_loop()->process(process_step * time_scale)) {
