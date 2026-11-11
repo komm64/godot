@@ -4905,7 +4905,11 @@ bool Main::iteration() {
 #endif // XR_DISABLED
 
 	uint64_t process_begin = 0;
+	// drop_pending_ticks() during a tick also ends this iteration's remaining ticks.
 	for (int tick_step = 0; tick_step < tick_steps && !exit; ++tick_step) {
+		if (tick_step > 0 && Engine::get_singleton()->_drop_pending_ticks) {
+			break;
+		}
 		if (tick_step > 0) {
 			Engine::get_singleton()->_process_frames++;
 		}
