@@ -541,6 +541,8 @@ private:
 	uint64_t snapshot_seq = 0;
 
 	RID _snapshot_record(RID p_rid, const String &p_method, const Vector<Variant> &p_args);
+	void _snapshot_buffer_write(RID p_buffer, uint32_t p_offset, uint32_t p_size, const uint8_t *p_data);
+	void _snapshot_texture_write(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data);
 	int64_t _snapshot_record_format(int64_t p_id, const String &p_method, const Vector<Variant> &p_args);
 	RID _framebuffer_create_empty(const Size2i &p_size, TextureSamples p_samples, int64_t p_format_check);
 	int64_t _framebuffer_format_create_empty(TextureSamples p_samples);
@@ -1791,6 +1793,8 @@ private:
 	RID _uniform_set_create(const TypedArray<RDUniform> &p_uniforms, RID p_shader, uint32_t p_shader_set);
 
 	Error _buffer_update_bind(RID p_buffer, uint32_t p_offset, uint32_t p_size, const Vector<uint8_t> &p_data);
+	Error _buffer_clear_bind(RID p_buffer, uint32_t p_offset, uint32_t p_size);
+	Error _texture_update_bind(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data);
 
 	RID _render_pipeline_create(RID p_shader, FramebufferFormatID p_framebuffer_format, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, const Ref<RDPipelineRasterizationState> &p_rasterization_state, const Ref<RDPipelineMultisampleState> &p_multisample_state, const Ref<RDPipelineDepthStencilState> &p_depth_stencil_state, const Ref<RDPipelineColorBlendState> &p_blend_state, BitField<PipelineDynamicStateFlags> p_dynamic_state_flags, uint32_t p_for_render_pass, const TypedArray<RDPipelineSpecializationConstant> &p_specialization_constants);
 	RID _compute_pipeline_create(RID p_shader, const TypedArray<RDPipelineSpecializationConstant> &p_specialization_constants);
