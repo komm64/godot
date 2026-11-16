@@ -278,4 +278,7 @@ GDScriptFunctionState::~GDScriptFunctionState() {
 		scripts_list.remove_from_list();
 		instances_list.remove_from_list();
 	}
+	// komm64: a cancelled call can lose its last reference while its
+	// connections are cleared, before its stack is; release the values it held.
+	_clear_stack();
 }
