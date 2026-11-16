@@ -319,7 +319,7 @@
 			<return type="Array" />
 			<param index="0" name="values" type="Dictionary" />
 			<description>
-				Splits [param values] into [code][plain, other][/code]. [code]plain[/code] holds the entries a save can store as they are: no [Object], [Callable], [Signal] or [RID] anywhere inside, and no [Dictionary] with a [code]"__ref"[/code] key. Its [Array]s and [Dictionary]s are deep copies. [code]other[/code] holds the rest, as they are.
+				Returns [code][values, others][/code]: [code]values[/code] is [param values] in the same order with its plain [Array]s and [Dictionary]s deep-copied, and [code]others[/code] lists the keys whose values are not plain. A plain value is one a save can store as it is: no [Object], [Callable], [Signal] or [RID] anywhere inside, and no [Dictionary] with a [code]"__ref"[/code] key. A save then encodes only the values under [code]others[/code].
 			</description>
 		</method>
 		<method name="unregister_script_language">

@@ -2031,20 +2031,21 @@ static bool _snapshot_is_plain(const Variant &p_value, int p_depth) {
 }
 
 Array Engine::snapshot_split_plain(const Dictionary &p_values) const {
-	Dictionary plain;
-	Dictionary other;
+	Dictionary values;
+	Array others;
 	for (const KeyValue<Variant, Variant> &kv : p_values) {
-		if (_snapshot_is_plain(kv.value, 0)) {
-			// A copy, so the save does not change with the live container.
-			const Variant::Type t = kv.value.get_type();
-			plain[kv.key] = t == Variant::ARRAY || t == Variant::DICTIONARY ? kv.value.duplicate(true) : kv.value;
+		const Variant::Type t = kv.value.get_type();
+		if (!_snapshot_is_plain(kv.value, 0)) {
+			others.push_back(kv.key);
+			values[kv.key] = kv.value;
 		} else {
-			other[kv.key] = kv.value;
+			// A copy, so the save does not change with the live container.
+			values[kv.key] = t == Variant::ARRAY || t == Variant::DICTIONARY ? kv.value.duplicate(true) : kv.value;
 		}
 	}
 	Array out;
-	out.push_back(plain);
-	out.push_back(other);
+	out.push_back(values);
+	out.push_back(others);
 	return out;
 }
 
