@@ -2053,7 +2053,7 @@ Dictionary Engine::snapshot_get_clock() const {
 // returned it) and go on from there.
 void Engine::snapshot_set_clock(const Dictionary &p_clock) {
 	if (p_clock.has("ticks_usec")) {
-		::Time::get_singleton()->snapshot_ticks_offset_usec = int64_t(p_clock["ticks_usec"]) - int64_t(OS::get_singleton()->get_ticks_usec());
+		::Time::get_singleton()->snapshot_ticks_offset_usec = int64_t(p_clock["ticks_usec"]) - int64_t(::OS::get_singleton()->get_ticks_usec());
 	}
 	if (p_clock.has("process_frames")) {
 		snapshot_process_offset = int64_t(p_clock["process_frames"]) - int64_t(::Engine::get_singleton()->get_process_frames());
