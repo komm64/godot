@@ -1079,6 +1079,7 @@ void GDScript::_bind_methods() {
 	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_make_await", "info"), &GDScript::snapshot_make_await);
 	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_set_await_stack", "state", "stack"), &GDScript::snapshot_set_await_stack);
 	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_make_await_token"), &GDScript::snapshot_make_await_token);
+	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_cancel_static_awaits", "keep"), &GDScript::snapshot_cancel_static_awaits);
 }
 
 // The functions whose lambdas a script's lambdas are named under: the implicit
@@ -1382,6 +1383,32 @@ bool GDScript::snapshot_set_await_stack(Object *p_state, const Array &p_stack) {
 		v[i + GDScriptFunction::FIXED_ADDRESSES_MAX] = p_stack[i];
 	}
 	return true;
+}
+
+// Drops the calls suspended in an await that run on no object (static
+// functions, lambdas without self) in every script except those whose file is
+// in `keep`, so none resumes on a loaded game.
+void GDScript::snapshot_cancel_static_awaits(const PackedStringArray &p_keep) {
+	MutexLock lock(GDScriptLanguage::get_singleton()->mutex);
+	// Held while dropping them: a dropped stack may hold the last reference
+	// to another dropped call.
+	Vector<Ref<GDScriptFunctionState>> dropped;
+	for (SelfList<GDScript> *E = GDScriptLanguage::get_singleton()->script_list.first(); E; E = E->next()) {
+		GDScript *s = E->self();
+		if (p_keep.has(s->get_root_script()->get_path())) {
+			continue;
+		}
+		for (SelfList<GDScriptFunctionState> *F = s->pending_func_states.first(); F; F = F->next()) {
+			if (F->self()->state.instance == nullptr) {
+				dropped.push_back(Ref<GDScriptFunctionState>(F->self()));
+			}
+		}
+	}
+	for (Ref<GDScriptFunctionState> &state : dropped) {
+		state->scripts_list.remove_from_list();
+		state->_clear_connections();
+		state->_clear_stack();
+	}
 }
 
 // A state that only emits "completed": stands for the first call of a chain

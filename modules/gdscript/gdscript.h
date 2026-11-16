@@ -261,6 +261,7 @@ public:
 	static Variant snapshot_make_await(const Dictionary &p_info);
 	static bool snapshot_set_await_stack(Object *p_state, const Array &p_stack);
 	static Variant snapshot_make_await_token();
+	static void snapshot_cancel_static_awaits(const PackedStringArray &p_keep);
 	String get_fully_qualified_name() const { return fully_qualified_name; }
 	const HashMap<StringName, Ref<GDScript>> &get_subclasses() const { return subclasses; }
 	const HashMap<StringName, Variant> &get_constants() const { return constants; }

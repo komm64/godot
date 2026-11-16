@@ -23,6 +23,13 @@
 				[/codeblock]
 			</description>
 		</method>
+		<method name="snapshot_cancel_static_awaits" qualifiers="static">
+			<return type="void" />
+			<param index="0" name="keep" type="PackedStringArray" />
+			<description>
+				Drops the calls suspended in an [code]await[/code] that run on no object (static functions and lambdas without [code]self[/code]) in every script except those whose file is in [param keep], so none of them resumes on a loaded game.
+			</description>
+		</method>
 		<method name="snapshot_get_awaits" qualifiers="static">
 			<return type="Dictionary[]" />
 			<param index="0" name="owner" type="Object" />
