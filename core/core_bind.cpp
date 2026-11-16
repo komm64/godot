@@ -43,6 +43,7 @@
 #include "core/os/keyboard.h"
 #include "core/os/main_loop.h"
 #include "core/os/thread_safe.h"
+#include "core/os/time.h"
 #include "core/variant/typed_array.h"
 
 namespace CoreBind {
@@ -1922,11 +1923,11 @@ double Engine::get_frames_per_second() const {
 }
 
 uint64_t Engine::get_physics_frames() const {
-	return ::Engine::get_singleton()->get_physics_frames();
+	return uint64_t(MAX(int64_t(0), int64_t(::Engine::get_singleton()->get_physics_frames()) + snapshot_physics_offset));
 }
 
 uint64_t Engine::get_process_frames() const {
-	return ::Engine::get_singleton()->get_process_frames();
+	return uint64_t(MAX(int64_t(0), int64_t(::Engine::get_singleton()->get_process_frames()) + snapshot_process_offset));
 }
 
 void Engine::set_time_scale(double p_scale) {
@@ -1938,7 +1939,7 @@ double Engine::get_time_scale() {
 }
 
 int Engine::get_frames_drawn() {
-	return ::Engine::get_singleton()->get_frames_drawn();
+	return int(MAX(int64_t(0), int64_t(::Engine::get_singleton()->get_frames_drawn()) + snapshot_drawn_offset));
 }
 
 MainLoop *Engine::get_main_loop() const {
@@ -2036,6 +2037,33 @@ int64_t Engine::snapshot_get_random_state() const {
 
 void Engine::snapshot_set_random_state(int64_t p_state) {
 	Math::set_random_state((uint64_t)p_state);
+}
+
+// komm64: the clocks as scripts see them: ticks and frame counters.
+Dictionary Engine::snapshot_get_clock() const {
+	Dictionary out;
+	out["ticks_usec"] = int64_t(::Time::get_singleton()->_script_get_ticks_usec());
+	out["process_frames"] = int64_t(get_process_frames());
+	out["physics_frames"] = int64_t(get_physics_frames());
+	out["frames_drawn"] = int64_t(const_cast<Engine *>(this)->get_frames_drawn());
+	return out;
+}
+
+// Makes the clocks scripts see read `p_clock` now (as snapshot_get_clock()
+// returned it) and go on from there.
+void Engine::snapshot_set_clock(const Dictionary &p_clock) {
+	if (p_clock.has("ticks_usec")) {
+		::Time::get_singleton()->snapshot_ticks_offset_usec = int64_t(p_clock["ticks_usec"]) - int64_t(::OS::get_singleton()->get_ticks_usec());
+	}
+	if (p_clock.has("process_frames")) {
+		snapshot_process_offset = int64_t(p_clock["process_frames"]) - int64_t(::Engine::get_singleton()->get_process_frames());
+	}
+	if (p_clock.has("physics_frames")) {
+		snapshot_physics_offset = int64_t(p_clock["physics_frames"]) - int64_t(::Engine::get_singleton()->get_physics_frames());
+	}
+	if (p_clock.has("frames_drawn")) {
+		snapshot_drawn_offset = int64_t(p_clock["frames_drawn"]) - int64_t(::Engine::get_singleton()->get_frames_drawn());
+	}
 }
 
 Array Engine::snapshot_split_plain(const Dictionary &p_values) const {
@@ -2268,6 +2296,8 @@ void Engine::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("snapshot_collect_rids", "roots", "skip"), &Engine::snapshot_collect_rids);
 	ClassDB::bind_method(D_METHOD("snapshot_split_plain", "values"), &Engine::snapshot_split_plain);
 	ClassDB::bind_method(D_METHOD("snapshot_get_random_state"), &Engine::snapshot_get_random_state);
+	ClassDB::bind_method(D_METHOD("snapshot_get_clock"), &Engine::snapshot_get_clock);
+	ClassDB::bind_method(D_METHOD("snapshot_set_clock", "clock"), &Engine::snapshot_set_clock);
 	ClassDB::bind_method(D_METHOD("snapshot_set_random_state", "state"), &Engine::snapshot_set_random_state);
 
 	ClassDB::bind_method(D_METHOD("has_singleton", "name"), &Engine::has_singleton);
