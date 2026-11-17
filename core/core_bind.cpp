@@ -43,6 +43,8 @@
 #include "core/os/keyboard.h"
 #include "core/os/main_loop.h"
 #include "core/os/thread_safe.h"
+#include "core/object/script_instance.h"
+#include "core/object/script_language.h"
 #include "core/os/time.h"
 #include "core/variant/typed_array.h"
 
@@ -2198,6 +2200,104 @@ Dictionary Engine::snapshot_collect_rids(const Array &p_roots, const Array &p_sk
 	return out;
 }
 
+static void _snapshot_collect_value_rids(const Variant &p_value, Dictionary &r_out, int p_depth) {
+	if (p_depth > 64) {
+		return;
+	}
+	switch (p_value.get_type()) {
+		case Variant::RID: {
+			const RID rid = p_value;
+			if (rid.is_valid()) {
+				r_out[rid] = true;
+			}
+		} break;
+		case Variant::ARRAY: {
+			const Array a = p_value;
+			for (const Variant &v : a) {
+				_snapshot_collect_value_rids(v, r_out, p_depth + 1);
+			}
+		} break;
+		case Variant::DICTIONARY: {
+			const Dictionary d = p_value;
+			for (const KeyValue<Variant, Variant> &kv : d) {
+				_snapshot_collect_value_rids(kv.key, r_out, p_depth + 1);
+				_snapshot_collect_value_rids(kv.value, r_out, p_depth + 1);
+			}
+		} break;
+		default:
+			break;
+	}
+}
+
+// komm64: every valid RID a live object holds, as {rid: true}: in its script
+// variables (also inside Arrays and Dictionaries), and in the properties of
+// its class that can hold one (RID-typed, such as Texture2DRD.texture_rd_rid,
+// and stored Arrays and Dictionaries). Objects whose script lives under one
+// of `p_skip_dirs` are left out, and so are scripts' static variables. Each
+// object is looked at once, without building its property list, so a game
+// with thousands of Controls costs little.
+Dictionary Engine::snapshot_collect_held_rids(const PackedStringArray &p_skip_dirs) const {
+	LocalVector<ObjectID> ids;
+	ObjectDB::debug_objects([](Object *p_obj, void *p_ids) {
+		((LocalVector<ObjectID> *)p_ids)->push_back(p_obj->get_instance_id());
+	}, &ids);
+
+	// Per class: the properties of the class itself that can hold a RID.
+	HashMap<StringName, LocalVector<StringName>> class_props;
+	Dictionary out;
+	for (const ObjectID &id : ids) {
+		Object *obj = ObjectDB::get_instance(id);
+		if (obj == nullptr) {
+			continue;
+		}
+		ScriptInstance *si = obj->get_script_instance();
+		if (si != nullptr) {
+			const Ref<Script> script = obj->get_script();
+			const String path = script.is_valid() ? script->get_path() : String();
+			bool skipped = false;
+			for (const String &dir : p_skip_dirs) {
+				if (!dir.is_empty() && path.begins_with(dir)) {
+					skipped = true;
+					break;
+				}
+			}
+			if (skipped) {
+				continue;
+			}
+			List<PropertyInfo> plist;
+			si->get_property_list(&plist);
+			for (const PropertyInfo &pi : plist) {
+				if (pi.usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_SCRIPT_VARIABLE)) {
+					Variant value;
+					if (si->get(pi.name, value)) {
+						_snapshot_collect_value_rids(value, out, 0);
+					}
+				}
+			}
+		}
+		const StringName cls = obj->get_class_name();
+		LocalVector<StringName> *props = class_props.getptr(cls);
+		if (props == nullptr) {
+			props = &class_props.insert(cls, LocalVector<StringName>())->value;
+			List<PropertyInfo> plist;
+			::ClassDB::get_property_list(cls, &plist);
+			for (const PropertyInfo &pi : plist) {
+				if (pi.type == Variant::RID || ((pi.usage & PROPERTY_USAGE_STORAGE) && (pi.type == Variant::ARRAY || pi.type == Variant::DICTIONARY))) {
+					props->push_back(pi.name);
+				}
+			}
+		}
+		for (const StringName &name : *props) {
+			bool valid = false;
+			const Variant value = obj->get(name, &valid);
+			if (valid) {
+				_snapshot_collect_value_rids(value, out, 0);
+			}
+		}
+	}
+	return out;
+}
+
 bool Engine::has_singleton(const StringName &p_name) const {
 	return ::Engine::get_singleton()->has_singleton(p_name);
 }
@@ -2337,6 +2437,7 @@ void Engine::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_drawing_step"), &Engine::is_drawing_step);
 	ClassDB::bind_method(D_METHOD("drop_pending_ticks"), &Engine::drop_pending_ticks);
 	ClassDB::bind_method(D_METHOD("snapshot_collect_rids", "roots", "skip"), &Engine::snapshot_collect_rids);
+	ClassDB::bind_method(D_METHOD("snapshot_collect_held_rids", "skip_dirs"), &Engine::snapshot_collect_held_rids);
 	ClassDB::bind_method(D_METHOD("snapshot_split_plain", "values"), &Engine::snapshot_split_plain);
 	ClassDB::bind_method(D_METHOD("snapshot_get_container_id", "value"), &Engine::snapshot_get_container_id);
 	ClassDB::bind_method(D_METHOD("snapshot_is_plain_leaf", "value"), &Engine::snapshot_is_plain_leaf);

@@ -307,6 +307,13 @@
 				Registers the given [Object] [param instance] as a singleton, available globally under [param name]. Useful for plugins.
 			</description>
 		</method>
+		<method name="snapshot_collect_held_rids" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="skip_dirs" type="PackedStringArray" />
+			<description>
+				Returns every valid [RID] a live object holds, as [code]{rid: true}[/code]: in its script variables (also inside [Array]s and [Dictionary]s), and in the properties of its class that can hold one, such as [member Texture2DRD.texture_rd_rid]. Objects whose script lives under one of [param skip_dirs] are left out, and so are scripts' static variables. Each object is looked at once, without building its property list. For finding out which [RenderingDevice] objects a game still holds.
+			</description>
+		</method>
 		<method name="snapshot_collect_rids" qualifiers="const">
 			<return type="Dictionary" />
 			<param index="0" name="roots" type="Array" />
