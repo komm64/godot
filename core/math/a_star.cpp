@@ -301,8 +301,12 @@ Error AStar3D::snapshot_set_state(const Dictionary &p_state) {
 	if (capacity > 0) {
 		points.reserve(capacity);
 	}
+	Error err = OK;
 	for (int64_t i = 0; i < count; i++) {
-		ERR_FAIL_COND_V(ids[i] < 0 || points.has(ids[i]), ERR_INVALID_DATA);
+		if (ids[i] < 0 || points.has(ids[i])) {
+			err = ERR_INVALID_DATA;
+			break;
+		}
 		Point *pt = memnew(Point);
 		pt->id = ids[i];
 		pt->pos = positions[i];
@@ -310,7 +314,6 @@ Error AStar3D::snapshot_set_state(const Dictionary &p_state) {
 		pt->enabled = enabled[i];
 		points.insert_new(pt->id, pt);
 	}
-	Error err = OK;
 	for (int64_t i = 0; i < count && err == OK; i++) {
 		Point *a = points[ids[i]];
 		const PackedInt64Array to = neighbors[i];
