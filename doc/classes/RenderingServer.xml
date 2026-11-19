@@ -3688,6 +3688,7 @@
 			<param index="1" name="state" type="Dictionary" />
 			<description>
 				Sets back what [method snapshot_get_particles_state] returned, after the particles' settings are set. A state that does not fit them (another amount, other trails) is left out, and the particles start again.
+				2D particles that collide with the canvas SDF also need [code]"render_target"[/code] in [param state]: the render target of the viewport they are drawn in ([method viewport_get_render_target]), whose SDF they collide with. It is not part of the saved state.
 			</description>
 		</method>
 		<method name="snapshot_set_shader_time">

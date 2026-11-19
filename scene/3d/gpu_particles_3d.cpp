@@ -441,6 +441,7 @@ Dictionary GPUParticles3D::snapshot_get_state() const {
 	state["active"] = active;
 	state["signal_canceled"] = signal_canceled;
 	state["time"] = time;
+	state["seed"] = seed; // not stored unless fixed: a restart draws it
 	state["emission_time"] = emission_time;
 	state["active_time"] = active_time;
 	state["previous_position"] = previous_position;
@@ -455,6 +456,7 @@ Error GPUParticles3D::snapshot_set_state(const Dictionary &p_state) {
 	active = p_state.get("active", active);
 	signal_canceled = p_state.get("signal_canceled", signal_canceled);
 	time = p_state.get("time", time);
+	seed = uint32_t(p_state.get("seed", seed)); // the simulation's own comes with it below
 	emission_time = p_state.get("emission_time", emission_time);
 	active_time = p_state.get("active_time", active_time);
 	previous_position = p_state.get("previous_position", previous_position);

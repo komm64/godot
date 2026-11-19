@@ -573,6 +573,13 @@ Dictionary ParticlesStorage::snapshot_get_particles_state(RID p_particles) {
 	state["emitter_velocity"] = particles->emitter_velocity;
 	// Asked to step on the next update (drawn last frame).
 	state["requested"] = particles->dirty;
+	// What the last 2D draw told it to collide with: the next step uses it.
+	if (particles->has_sdf_collision) {
+		Dictionary sdf;
+		sdf["transform"] = particles->sdf_collision_transform;
+		sdf["to_screen"] = particles->sdf_collision_to_screen;
+		state["sdf_collision"] = sdf;
+	}
 	return state;
 }
 
@@ -628,6 +635,14 @@ void ParticlesStorage::snapshot_set_particles_state(RID p_particles, const Dicti
 	particles->emitter_velocity = p_state.get("emitter_velocity", Vector3());
 	particles->clear = false;
 	particles->restart_request = false;
+	// The SDF is the render target's it is drawn to, which the caller names
+	// ("render_target"): not saved, it is the same viewport's after a load.
+	const Dictionary sdf = p_state.get("sdf_collision", Dictionary());
+	const RID render_target = p_state.get("render_target", RID());
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	if (!sdf.is_empty() && render_target.is_valid() && texture_storage->render_target_is_sdf_enabled(render_target)) {
+		particles_set_canvas_sdf_collision(p_particles, true, sdf.get("transform", Transform2D()), sdf.get("to_screen", Rect2()), texture_storage->render_target_get_sdf_texture(render_target));
+	}
 	if (p_state.get("requested", false)) {
 		particles_request_process(p_particles);
 	}

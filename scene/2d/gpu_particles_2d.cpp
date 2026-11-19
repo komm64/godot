@@ -32,6 +32,7 @@
 #include "gpu_particles_2d.compat.inc"
 
 #include "scene/2d/cpu_particles_2d.h"
+#include "scene/main/viewport.h"
 #include "scene/resources/atlas_texture.h"
 #include "scene/resources/canvas_item_material.h"
 #include "scene/resources/curve_texture.h"
@@ -497,6 +498,7 @@ Dictionary GPUParticles2D::snapshot_get_state() const {
 	state["active"] = active;
 	state["signal_canceled"] = signal_canceled;
 	state["time"] = time;
+	state["seed"] = seed; // not stored unless fixed: a restart draws it
 	state["emission_time"] = emission_time;
 	state["active_time"] = active_time;
 	state["previous_position"] = previous_position;
@@ -510,12 +512,18 @@ Error GPUParticles2D::snapshot_set_state(const Dictionary &p_state) {
 	active = p_state.get("active", active);
 	signal_canceled = p_state.get("signal_canceled", signal_canceled);
 	time = p_state.get("time", time);
+	seed = uint32_t(p_state.get("seed", seed)); // the simulation's own comes with it below
 	emission_time = p_state.get("emission_time", emission_time);
 	active_time = p_state.get("active_time", active_time);
 	previous_position = p_state.get("previous_position", previous_position);
 	previous_velocity = p_state.get("previous_velocity", previous_velocity);
 	RS::get_singleton()->particles_set_emitter_velocity(particles, previous_velocity);
-	RS::get_singleton()->snapshot_set_particles_state(particles, p_state.get("particles", Dictionary()));
+	Dictionary simulation = Dictionary(p_state.get("particles", Dictionary())).duplicate();
+	if (is_inside_tree()) {
+		// What it collides with is drawn in its viewport.
+		simulation["render_target"] = RS::get_singleton()->viewport_get_render_target(get_viewport()->get_viewport_rid());
+	}
+	RS::get_singleton()->snapshot_set_particles_state(particles, simulation);
 	return OK;
 }
 
