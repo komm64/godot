@@ -182,6 +182,8 @@ public:
 	TransformAlign get_transform_align() const;
 
 	void restart(bool p_keep_seed = false);
+	Dictionary snapshot_get_state() const; // komm64
+	Error snapshot_set_state(const Dictionary &p_state);
 
 	void set_use_fixed_seed(bool p_use_fixed_seed);
 	bool get_use_fixed_seed() const;
