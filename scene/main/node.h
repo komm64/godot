@@ -50,6 +50,8 @@ SAFE_NUMERIC_TYPE_PUN_GUARANTEES(uint32_t)
 class Node : public Object {
 	GDCLASS(Node, Object);
 
+	void _set_name(const StringName &p_name, bool p_allow_internal);
+
 protected:
 	// During group processing, these are thread-safe.
 	// Outside group processing, these avoid the cost of sync by working as plain primitive types.
@@ -510,6 +512,7 @@ public:
 	StringName get_name() const;
 	String get_description() const;
 	void set_name(const StringName &p_name);
+	void snapshot_set_name(const StringName &p_name);
 
 	InternalMode get_internal_mode() const;
 
