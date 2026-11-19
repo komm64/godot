@@ -297,6 +297,8 @@ protected:
 	void _accessibility_action_menu(const Variant &p_data);
 
 public:
+	Dictionary snapshot_get_state() const; // komm64
+	Error snapshot_set_state(const Dictionary &p_state);
 	void edit(bool p_hide_focus = false);
 	void unedit();
 	bool is_editing() const;
