@@ -571,6 +571,8 @@ Dictionary ParticlesStorage::snapshot_get_particles_state(RID p_particles) {
 	state["frame_remainder"] = particles->frame_remainder;
 	state["interp_to_end"] = particles->interp_to_end;
 	state["emitter_velocity"] = particles->emitter_velocity;
+	// Asked to step on the next update (drawn last frame).
+	state["requested"] = particles->dirty;
 	return state;
 }
 
@@ -626,6 +628,9 @@ void ParticlesStorage::snapshot_set_particles_state(RID p_particles, const Dicti
 	particles->emitter_velocity = p_state.get("emitter_velocity", Vector3());
 	particles->clear = false;
 	particles->restart_request = false;
+	if (p_state.get("requested", false)) {
+		particles_request_process(p_particles);
+	}
 }
 
 void ParticlesStorage::particles_set_seed(RID p_particles, uint32_t p_seed) {

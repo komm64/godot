@@ -334,6 +334,11 @@ private:
 #endif // DISABLE_DEPRECATED
 
 public:
+	// komm64: every parameter (read-only ones too) and each state machine's
+	// playback, set back in place: the playback objects stay the same.
+	Dictionary snapshot_get_state() const;
+	Error snapshot_set_state(const Dictionary &p_state);
+
 	void set_animation_player(const NodePath &p_path);
 	NodePath get_animation_player() const;
 

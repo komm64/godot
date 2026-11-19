@@ -32,6 +32,7 @@
 #include "animation_tree.compat.inc"
 
 #include "animation_blend_tree.h"
+#include "animation_node_state_machine.h"
 #include "scene/animation/animation_player.h"
 
 void AnimationNode::get_parameter_list(List<PropertyInfo> *r_list) const {
@@ -1005,7 +1006,46 @@ String AnimationTree::get_editor_error_message() const {
 }
 #endif
 
+Dictionary AnimationTree::snapshot_get_state() const {
+	if (properties_dirty) {
+		_update_properties();
+	}
+	Dictionary params;
+	for (const KeyValue<StringName, Pair<Variant, bool>> &E : property_map) {
+		const Variant &v = E.value.first;
+		Ref<AnimationNodeStateMachinePlayback> playback = v;
+		params[E.key] = playback.is_valid() ? Variant(playback->snapshot_get_state()) : v;
+	}
+	Dictionary state;
+	state["parameters"] = params;
+	state["started"] = started;
+	return state;
+}
+
+Error AnimationTree::snapshot_set_state(const Dictionary &p_state) {
+	if (properties_dirty) {
+		_update_properties();
+	}
+	const Dictionary params = p_state.get("parameters", Dictionary());
+	for (const KeyValue<Variant, Variant> &E : params) {
+		Pair<Variant, bool> *slot = property_map.getptr(E.key);
+		if (slot == nullptr) {
+			continue; // The tree has no such parameter now.
+		}
+		Ref<AnimationNodeStateMachinePlayback> playback = slot->first;
+		if (playback.is_valid()) {
+			playback->snapshot_set_state(E.value);
+		} else {
+			slot->first = E.value;
+		}
+	}
+	started = p_state.get("started", started);
+	return OK;
+}
+
 void AnimationTree::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("snapshot_get_state"), &AnimationTree::snapshot_get_state);
+	ClassDB::bind_method(D_METHOD("snapshot_set_state", "state"), &AnimationTree::snapshot_set_state);
 	ClassDB::bind_method(D_METHOD("set_tree_root", "animation_node"), &AnimationTree::set_root_animation_node);
 	ClassDB::bind_method(D_METHOD("get_tree_root"), &AnimationTree::get_root_animation_node);
 

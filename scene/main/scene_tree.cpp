@@ -728,6 +728,8 @@ bool SceneTree::process(double p_time) {
 		for (const Callable &c : calls) {
 			c.call();
 		}
+		// What they moved is where it is before the frame is drawn.
+		flush_transform_notifications();
 	}
 
 	// This should happen last because any processing that deletes something beforehand might expect the object to be removed in the same frame.
