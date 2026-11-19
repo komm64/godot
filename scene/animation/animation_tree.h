@@ -338,6 +338,7 @@ public:
 	// playback, set back in place: the playback objects stay the same.
 	Dictionary snapshot_get_state() const;
 	Error snapshot_set_state(const Dictionary &p_state);
+	Dictionary snapshot_get_own_objects() const;
 
 	void set_animation_player(const NodePath &p_path);
 	NodePath get_animation_player() const;

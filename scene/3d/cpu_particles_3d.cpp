@@ -244,12 +244,12 @@ PackedStringArray CPUParticles3D::get_configuration_warnings() const {
 // komm64: the simulation as it stands: each particle, where the emission
 // cycle is, and what the next step starts from.
 Dictionary CPUParticles3D::snapshot_get_state() const {
+	Dictionary state = Node3D::snapshot_get_state();
 	PackedByteArray bytes;
 	bytes.resize(particles.size() * sizeof(Particle));
 	if (bytes.size()) {
 		memcpy(bytes.ptrw(), particles.ptr(), bytes.size());
 	}
-	Dictionary state;
 	state["particles"] = bytes;
 	state["active"] = active;
 	state["time"] = time;
@@ -264,6 +264,7 @@ Dictionary CPUParticles3D::snapshot_get_state() const {
 // komm64: sets them back after the stored properties, without restarting. A
 // state of another amount is left out: the particles start again.
 Error CPUParticles3D::snapshot_set_state(const Dictionary &p_state) {
+	Node3D::snapshot_set_state(p_state);
 	const PackedByteArray bytes = p_state.get("particles", PackedByteArray());
 	if (bytes.size() != particles.size() * int(sizeof(Particle))) {
 		return OK;
@@ -1587,8 +1588,6 @@ void CPUParticles3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_seed"), &CPUParticles3D::get_seed);
 
 	ClassDB::bind_method(D_METHOD("restart", "keep_seed"), &CPUParticles3D::restart, DEFVAL(false));
-	ClassDB::bind_method(D_METHOD("snapshot_get_state"), &CPUParticles3D::snapshot_get_state);
-	ClassDB::bind_method(D_METHOD("snapshot_set_state", "state"), &CPUParticles3D::snapshot_set_state);
 	ClassDB::bind_method(D_METHOD("request_particles_process", "process_time"), &CPUParticles3D::request_particles_process);
 	ClassDB::bind_method(D_METHOD("capture_aabb"), &CPUParticles3D::capture_aabb);
 

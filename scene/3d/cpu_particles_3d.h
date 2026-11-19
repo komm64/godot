@@ -332,8 +332,8 @@ public:
 
 	void restart(bool p_keep_seed = false);
 
-	Dictionary snapshot_get_state() const; // komm64
-	Error snapshot_set_state(const Dictionary &p_state);
+	Dictionary snapshot_get_state() const override; // komm64
+	Error snapshot_set_state(const Dictionary &p_state) override;
 
 	void convert_from_particles(Node *p_particles);
 

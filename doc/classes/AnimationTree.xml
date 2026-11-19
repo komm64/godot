@@ -25,6 +25,12 @@
 				Sets the process notification in which to update animations.
 			</description>
 		</method>
+		<method name="snapshot_get_own_objects" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns the objects this tree makes for itself and hands out through its parameters (each state machine's [AnimationNodeStateMachinePlayback]), keyed by parameter. [method snapshot_set_state] keeps them, so a savestate system can save what holds one as a reference to the tree's parameter instead of a copy.
+			</description>
+		</method>
 		<method name="snapshot_get_state" qualifiers="const">
 			<return type="Dictionary" />
 			<description>

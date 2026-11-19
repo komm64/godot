@@ -264,8 +264,8 @@ public:
 	void stop();
 
 	// komm64: what play() / pause() hold outside properties (frame loses storage while playing).
-	Dictionary snapshot_get_state() const;
-	Error snapshot_set_state(const Dictionary &p_state);
+	Dictionary snapshot_get_state() const override; // komm64
+	Error snapshot_set_state(const Dictionary &p_state) override;
 
 	bool is_playing() const;
 

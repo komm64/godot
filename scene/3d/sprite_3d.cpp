@@ -1337,7 +1337,7 @@ void AnimatedSprite3D::_res_changed() {
 }
 
 Dictionary AnimatedSprite3D::snapshot_get_state() const {
-	Dictionary state;
+	Dictionary state = Node3D::snapshot_get_state();
 	state["playing"] = playing;
 	state["custom_speed_scale"] = custom_speed_scale;
 	state["frame"] = frame;
@@ -1346,6 +1346,7 @@ Dictionary AnimatedSprite3D::snapshot_get_state() const {
 }
 
 Error AnimatedSprite3D::snapshot_set_state(const Dictionary &p_state) {
+	Node3D::snapshot_set_state(p_state);
 	// Set as they were, without frame_changed: no game code runs during a restore.
 	playing = p_state.get("playing", false);
 	custom_speed_scale = p_state.get("custom_speed_scale", 1.0);
@@ -1532,8 +1533,6 @@ void AnimatedSprite3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_autoplay"), &AnimatedSprite3D::get_autoplay);
 
 	ClassDB::bind_method(D_METHOD("is_playing"), &AnimatedSprite3D::is_playing);
-	ClassDB::bind_method(D_METHOD("snapshot_get_state"), &AnimatedSprite3D::snapshot_get_state);
-	ClassDB::bind_method(D_METHOD("snapshot_set_state", "state"), &AnimatedSprite3D::snapshot_set_state);
 
 	ClassDB::bind_method(D_METHOD("play", "name", "custom_speed", "from_end"), &AnimatedSprite3D::play, DEFVAL(StringName()), DEFVAL(1.0), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("play_backwards", "name"), &AnimatedSprite3D::play_backwards, DEFVAL(StringName()));

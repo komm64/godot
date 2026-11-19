@@ -437,7 +437,7 @@ PackedStringArray GPUParticles3D::get_configuration_warnings() const {
 // komm64: where a one-shot cycle is, the emitter's last place and velocity,
 // and the simulation the RenderingServer keeps for it.
 Dictionary GPUParticles3D::snapshot_get_state() const {
-	Dictionary state;
+	Dictionary state = Node3D::snapshot_get_state();
 	state["active"] = active;
 	state["signal_canceled"] = signal_canceled;
 	state["time"] = time;
@@ -451,6 +451,7 @@ Dictionary GPUParticles3D::snapshot_get_state() const {
 
 // komm64: sets them back after the stored properties, without restarting.
 Error GPUParticles3D::snapshot_set_state(const Dictionary &p_state) {
+	Node3D::snapshot_set_state(p_state);
 	active = p_state.get("active", active);
 	signal_canceled = p_state.get("signal_canceled", signal_canceled);
 	time = p_state.get("time", time);
@@ -820,8 +821,6 @@ void GPUParticles3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_skin"), &GPUParticles3D::get_skin);
 
 	ClassDB::bind_method(D_METHOD("restart", "keep_seed"), &GPUParticles3D::restart, DEFVAL(false));
-	ClassDB::bind_method(D_METHOD("snapshot_get_state"), &GPUParticles3D::snapshot_get_state);
-	ClassDB::bind_method(D_METHOD("snapshot_set_state", "state"), &GPUParticles3D::snapshot_set_state);
 	ClassDB::bind_method(D_METHOD("capture_aabb"), &GPUParticles3D::capture_aabb);
 
 	ClassDB::bind_method(D_METHOD("set_sub_emitter", "path"), &GPUParticles3D::set_sub_emitter);
