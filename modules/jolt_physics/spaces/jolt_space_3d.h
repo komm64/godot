@@ -76,7 +76,10 @@ class JoltSpace3D {
 	JoltPhysicsDirectSpaceState3D *direct_state = nullptr;
 	JoltArea3D *default_area = nullptr;
 
-	JPH::BodyID snapshot_body_id; // the id the next body made gets, while a snapshot is set
+	// While a snapshot is set: the object being put back, and the id its body
+	// gets each time it is made (it may be made again while it is put back).
+	const JoltObject3D *snapshot_object = nullptr;
+	JPH::BodyID snapshot_body_id;
 
 	float last_step = 0.0f;
 

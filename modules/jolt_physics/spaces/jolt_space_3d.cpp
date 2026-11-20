@@ -403,8 +403,7 @@ void JoltSpace3D::set_default_area(JoltArea3D *p_area) {
 
 JPH::Body *JoltSpace3D::add_object(const JoltObject3D &p_object, const JPH::BodyCreationSettings &p_settings, bool p_sleeping) {
 	JPH::BodyInterface &body_iface = get_body_iface();
-	JPH::Body *jolt_body = snapshot_body_id.IsInvalid() ? body_iface.CreateBody(p_settings) : body_iface.CreateBodyWithID(snapshot_body_id, p_settings);
-	snapshot_body_id = JPH::BodyID();
+	JPH::Body *jolt_body = &p_object == snapshot_object ? body_iface.CreateBodyWithID(snapshot_body_id, p_settings) : body_iface.CreateBody(p_settings);
 	if (unlikely(jolt_body == nullptr)) {
 		ERR_PRINT_ONCE(vformat("Failed to create underlying Jolt Physics body for '%s'. "
 							   "Consider increasing maximum number of bodies in project settings. "
@@ -425,7 +424,7 @@ JPH::Body *JoltSpace3D::add_object(const JoltObject3D &p_object, const JPH::Body
 
 JPH::Body *JoltSpace3D::add_object(const JoltObject3D &p_object, const JPH::SoftBodyCreationSettings &p_settings, bool p_sleeping) {
 	JPH::BodyInterface &body_iface = get_body_iface();
-	JPH::Body *jolt_body = body_iface.CreateSoftBody(p_settings);
+	JPH::Body *jolt_body = &p_object == snapshot_object ? body_iface.CreateSoftBodyWithID(snapshot_body_id, p_settings) : body_iface.CreateSoftBody(p_settings);
 	if (unlikely(jolt_body == nullptr)) {
 		ERR_PRINT_ONCE(vformat("Failed to create underlying Jolt Physics body for '%s'. "
 							   "Consider increasing maximum number of bodies in project settings. "
@@ -776,9 +775,10 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 		}
 	}
 	for (uint32_t i : moved) {
+		snapshot_object = objects[i];
 		snapshot_body_id = ids[i];
 		objects[i]->snapshot_put_back();
-		snapshot_body_id = JPH::BodyID();
+		snapshot_object = nullptr;
 	}
 	flush_pending_objects();
 	for (uint32_t i = 0; i < count; i++) {
