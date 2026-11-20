@@ -643,13 +643,26 @@ LocalVector<JoltObject3D *> JoltSpace3D::snapshot_objects() {
 	return out;
 }
 
+static void _snapshot_write(JPH::StateRecorder &p_recorder, const Vector3 &p_v) {
+	p_recorder.Write(p_v.x);
+	p_recorder.Write(p_v.y);
+	p_recorder.Write(p_v.z);
+}
+
+static void _snapshot_read(JPH::StateRecorder &p_recorder, Vector3 &r_v) {
+	p_recorder.Read(r_v.x);
+	p_recorder.Read(r_v.y);
+	p_recorder.Read(r_v.z);
+}
+
 // The state, the same for the same world however it was made: the objects in
 // the order of their body ids; the default area's and the objects' body ids
 // and each one's place among its owner's (in the order they were made); the
 // objects whose
 // queries (state sync, area events) are due at the next sync, in their order,
 // the objects whose contact cache a change made invalid for the next step,
-// then Jolt's own state of the system (bodies and contacts; not constraints:
+// what the last step left each body for the game to read (gravity, damping,
+// contacts, a contact's collider by its place in the list), then Jolt's own state of the system (bodies and contacts; not constraints:
 // joints are made again in their own order, and start without their warm
 // start).
 Dictionary JoltSpace3D::snapshot_get_state() {
@@ -702,6 +715,35 @@ Dictionary JoltSpace3D::snapshot_get_state() {
 	recorder.Write(invalid.size());
 	for (uint32_t i : invalid) {
 		recorder.Write(i);
+	}
+	HashMap<RID, uint32_t> by_rid;
+	for (uint32_t i = 0; i < count; i++) {
+		by_rid[objects[i]->get_rid()] = i;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		JoltBody3D *body = objects[i]->as_body();
+		if (body == nullptr) {
+			continue;
+		}
+		_snapshot_write(recorder, body->get_gravity());
+		recorder.Write(body->get_total_linear_damp());
+		recorder.Write(body->get_total_angular_damp());
+		const uint32_t contact_count = body->get_contact_count();
+		recorder.Write(contact_count);
+		for (uint32_t k = 0; k < contact_count; k++) {
+			const JoltBody3D::Contact &c = body->get_contact(k);
+			_snapshot_write(recorder, c.normal);
+			_snapshot_write(recorder, c.position);
+			_snapshot_write(recorder, c.collider_position);
+			_snapshot_write(recorder, c.velocity);
+			_snapshot_write(recorder, c.collider_velocity);
+			_snapshot_write(recorder, c.impulse);
+			recorder.Write(c.depth);
+			recorder.Write(c.shape_index);
+			recorder.Write(c.collider_shape_index);
+			const uint32_t *collider = by_rid.getptr(c.collider_rid);
+			recorder.Write(collider != nullptr ? *collider : UINT32_MAX);
+		}
 	}
 	physics_system->SaveState(recorder, JPH::EStateRecorderState(uint8_t(JPH::EStateRecorderState::Global) | uint8_t(JPH::EStateRecorderState::Bodies) | uint8_t(JPH::EStateRecorderState::Contacts)));
 	const std::string data = recorder.GetData();
@@ -766,6 +808,43 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 		recorder.Read(i);
 		ERR_FAIL_COND_V_MSG(i >= count, false, "Physics snapshot: broken contact cache list.");
 	}
+	struct Step {
+		Vector3 gravity;
+		float linear_damp = 0.0f;
+		float angular_damp = 0.0f;
+		LocalVector<JoltBody3D::Contact> contacts;
+	};
+	HashMap<uint32_t, Step> steps;
+	for (uint32_t i = 0; i < count; i++) {
+		if (objects[i]->as_body() == nullptr) {
+			continue;
+		}
+		Step &step = steps[i];
+		_snapshot_read(recorder, step.gravity);
+		recorder.Read(step.linear_damp);
+		recorder.Read(step.angular_damp);
+		uint32_t contact_count = 0;
+		recorder.Read(contact_count);
+		ERR_FAIL_COND_V_MSG(contact_count > MAX_CONTACTS_REPORTED_3D_MAX, false, "Physics snapshot: broken contacts.");
+		step.contacts.resize(contact_count);
+		for (JoltBody3D::Contact &c : step.contacts) {
+			_snapshot_read(recorder, c.normal);
+			_snapshot_read(recorder, c.position);
+			_snapshot_read(recorder, c.collider_position);
+			_snapshot_read(recorder, c.velocity);
+			_snapshot_read(recorder, c.collider_velocity);
+			_snapshot_read(recorder, c.impulse);
+			recorder.Read(c.depth);
+			recorder.Read(c.shape_index);
+			recorder.Read(c.collider_shape_index);
+			uint32_t collider = UINT32_MAX;
+			recorder.Read(collider);
+			if (collider < count) {
+				c.collider_id = objects[collider]->get_instance_id();
+				c.collider_rid = objects[collider]->get_rid();
+			}
+		}
+	}
 	// Out first, all of them: an id one wants back may be another one's now.
 	LocalVector<uint32_t> moved;
 	for (uint32_t i = 0; i < count; i++) {
@@ -792,6 +871,9 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 	physics_system->ResetContactCacheInvalidation();
 	for (uint32_t i : invalid) {
 		get_body_iface().InvalidateContactCache(ids[i]);
+	}
+	for (KeyValue<uint32_t, Step> &E : steps) {
+		objects[E.key]->as_body()->snapshot_set_step(E.value.gravity, E.value.linear_damp, E.value.angular_damp, E.value.contacts);
 	}
 	// The queries due at the next sync: those, in that order.
 	for (JoltObject3D *object : objects) {
