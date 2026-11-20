@@ -46,6 +46,7 @@
 
 #include "core/io/file_access.h"
 #include "core/templates/hash_map.h"
+#include "core/templates/hash_set.h"
 #include "core/os/time.h"
 #include "core/string/print_string.h"
 #include "core/variant/variant_utility.h"
@@ -643,14 +644,26 @@ LocalVector<JoltObject3D *> JoltSpace3D::snapshot_objects() {
 	return out;
 }
 
-// The state: the default area's and the objects' body ids, the objects whose
+// The state, the same for the same world however it was made: the objects in
+// the order of their body ids; the default area's and the objects' body ids
+// and each one's place among its owner's (in the order they were made); the
+// objects whose
 // queries (state sync, area events) are due at the next sync, in their order,
 // the objects whose contact cache a change made invalid for the next step,
 // then Jolt's own state of the system (bodies and contacts; not constraints:
 // joints are made again in their own order, and start without their warm
 // start).
 Dictionary JoltSpace3D::snapshot_get_state() {
-	const LocalVector<JoltObject3D *> objects = snapshot_objects();
+	LocalVector<JoltObject3D *> objects = snapshot_objects();
+	HashMap<const JoltObject3D *, uint32_t> rank;
+	HashMap<uint64_t, uint32_t> made;
+	for (const JoltObject3D *object : objects) {
+		rank[object] = made[uint64_t(object->get_instance_id())]++;
+	}
+	struct IdFirst {
+		bool operator()(const JoltObject3D *p_a, const JoltObject3D *p_b) const { return p_a->get_jolt_id() < p_b->get_jolt_id(); }
+	};
+	objects.sort_custom<IdFirst>();
 	JPH::StateRecorderImpl recorder;
 	const uint32_t count = objects.size();
 	recorder.Write(count);
@@ -660,6 +673,7 @@ Dictionary JoltSpace3D::snapshot_get_state() {
 	HashMap<const JoltObject3D *, uint32_t> index;
 	for (uint32_t i = 0; i < count; i++) {
 		recorder.Write(objects[i]->get_jolt_id());
+		recorder.Write(rank[objects[i]]);
 		owners.set(i, int64_t(uint64_t(objects[i]->get_instance_id())));
 		index[objects[i]] = i;
 	}
@@ -718,24 +732,24 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 	for (JoltObject3D *object : current) {
 		by_owner[uint64_t(object->get_instance_id())].push_back(object);
 	}
-	HashMap<uint64_t, uint32_t> taken;
-	LocalVector<JoltObject3D *> objects;
-	objects.resize(count);
-	for (uint32_t i = 0; i < count; i++) {
-		const uint64_t owner = uint64_t(p_owners[i]);
-		LocalVector<JoltObject3D *> *own = by_owner.getptr(owner);
-		uint32_t &k = taken[owner];
-		ERR_FAIL_COND_V_MSG(own == nullptr || k >= own->size(), false, "Physics snapshot: an owner has fewer areas and bodies than saved.");
-		objects[i] = (*own)[k++];
-	}
 	JPH::BodyID area_id;
 	recorder.Read(area_id);
 	const JPH::BodyID current_area_id = default_area != nullptr && default_area->in_space() ? default_area->get_jolt_id() : JPH::BodyID();
 	ERR_FAIL_COND_V_MSG(area_id != current_area_id, false, "Physics snapshot of another space (its default area differs).");
 	LocalVector<JPH::BodyID> ids;
 	ids.resize(count);
+	LocalVector<JoltObject3D *> objects;
+	objects.resize(count);
+	HashSet<JoltObject3D *> found;
 	for (uint32_t i = 0; i < count; i++) {
+		uint32_t k = 0;
 		recorder.Read(ids[i]);
+		recorder.Read(k);
+		LocalVector<JoltObject3D *> *own = by_owner.getptr(uint64_t(p_owners[i]));
+		ERR_FAIL_COND_V_MSG(own == nullptr || k >= own->size(), false, "Physics snapshot: an owner has fewer areas and bodies than saved.");
+		objects[i] = (*own)[k];
+		ERR_FAIL_COND_V_MSG(found.has(objects[i]), false, "Physics snapshot: broken owner places.");
+		found.insert(objects[i]);
 	}
 	uint32_t queued_count = 0;
 	recorder.Read(queued_count);
