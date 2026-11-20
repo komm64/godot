@@ -138,8 +138,9 @@ public:
 	void remove_object(const JPH::BodyID &p_jolt_id);
 	void flush_pending_objects();
 
-	PackedByteArray snapshot_get_state(const LocalVector<JoltObject3D *> &p_objects);
-	bool snapshot_set_state(const LocalVector<JoltObject3D *> &p_objects, const PackedByteArray &p_state);
+	LocalVector<JoltObject3D *> snapshot_objects();
+	Dictionary snapshot_get_state();
+	bool snapshot_set_state(const PackedInt64Array &p_owners, const PackedByteArray &p_state);
 
 	void set_is_object_sleeping(const JPH::BodyID &p_jolt_id, bool p_enable);
 

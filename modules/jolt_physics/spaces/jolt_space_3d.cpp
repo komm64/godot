@@ -621,21 +621,47 @@ void JoltSpace3D::set_max_debug_contacts(int p_count) {
 
 #endif
 
+// The space's areas and bodies but its default area, in the order they were
+// made (their RIDs').
+LocalVector<JoltObject3D *> JoltSpace3D::snapshot_objects() {
+	flush_pending_objects();
+	JPH::BodyIDVector ids;
+	physics_system->GetBodies(ids);
+	const JPH::BodyLockInterface &lock_iface = get_lock_iface();
+	LocalVector<JoltObject3D *> out;
+	for (const JPH::BodyID &id : ids) {
+		const JPH::Body *jolt_body = lock_iface.TryGetBody(id);
+		JoltObject3D *object = jolt_body != nullptr ? reinterpret_cast<JoltObject3D *>(jolt_body->GetUserData()) : nullptr;
+		if (object != nullptr && object != default_area) {
+			out.push_back(object);
+		}
+	}
+	struct MadeFirst {
+		bool operator()(const JoltObject3D *p_a, const JoltObject3D *p_b) const { return p_a->get_rid().get_id() < p_b->get_rid().get_id(); }
+	};
+	out.sort_custom<MadeFirst>();
+	return out;
+}
+
 // The state: the default area's and the objects' body ids, the objects whose
 // queries (state sync, area events) are due at the next sync, in their order,
+// the objects whose contact cache a change made invalid for the next step,
 // then Jolt's own state of the system (bodies and contacts; not constraints:
 // joints are made again in their own order, and start without their warm
 // start).
-PackedByteArray JoltSpace3D::snapshot_get_state(const LocalVector<JoltObject3D *> &p_objects) {
-	flush_pending_objects();
+Dictionary JoltSpace3D::snapshot_get_state() {
+	const LocalVector<JoltObject3D *> objects = snapshot_objects();
 	JPH::StateRecorderImpl recorder;
-	const uint32_t count = p_objects.size();
+	const uint32_t count = objects.size();
 	recorder.Write(count);
 	recorder.Write(default_area != nullptr && default_area->in_space() ? default_area->get_jolt_id() : JPH::BodyID());
+	PackedInt64Array owners;
+	owners.resize(count);
 	HashMap<const JoltObject3D *, uint32_t> index;
 	for (uint32_t i = 0; i < count; i++) {
-		recorder.Write(p_objects[i]->in_space() ? p_objects[i]->get_jolt_id() : JPH::BodyID());
-		index[p_objects[i]] = i;
+		recorder.Write(objects[i]->get_jolt_id());
+		owners.set(i, int64_t(uint64_t(objects[i]->get_instance_id())));
+		index[objects[i]] = i;
 	}
 	LocalVector<uint32_t> queued;
 	for (SelfList<JoltBody3D> *e = body_call_queries_list.first(); e != nullptr; e = e->next()) {
@@ -652,24 +678,56 @@ PackedByteArray JoltSpace3D::snapshot_get_state(const LocalVector<JoltObject3D *
 	for (uint32_t i : queued) {
 		recorder.Write(i);
 	}
+	LocalVector<uint32_t> invalid;
+	const JPH::BodyLockInterface &lock_iface = get_lock_iface();
+	for (uint32_t i = 0; i < count; i++) {
+		const JPH::Body *jolt_body = lock_iface.TryGetBody(objects[i]->get_jolt_id());
+		if (jolt_body != nullptr && jolt_body->IsCollisionCacheInvalid()) {
+			invalid.push_back(i);
+		}
+	}
+	recorder.Write(invalid.size());
+	for (uint32_t i : invalid) {
+		recorder.Write(i);
+	}
 	physics_system->SaveState(recorder, JPH::EStateRecorderState(uint8_t(JPH::EStateRecorderState::Global) | uint8_t(JPH::EStateRecorderState::Bodies) | uint8_t(JPH::EStateRecorderState::Contacts)));
 	const std::string data = recorder.GetData();
-	PackedByteArray out;
-	out.resize(data.size());
-	memcpy(out.ptrw(), data.data(), data.size());
+	PackedByteArray state;
+	state.resize(data.size());
+	memcpy(state.ptrw(), data.data(), data.size());
+	Dictionary out;
+	out["owners"] = owners;
+	out["state"] = state;
 	return out;
 }
 
-// Each object first gets the body id it had (made again with it where it has
-// another), then Jolt's state is set. Fails, before Jolt's state is touched,
-// unless the objects and the default area are the ones saved.
-bool JoltSpace3D::snapshot_set_state(const LocalVector<JoltObject3D *> &p_objects, const PackedByteArray &p_state) {
-	flush_pending_objects();
+// Each saved object is found again by its owner (the k-th of an owner's, in
+// the order they were made), gets the body id it had (made again with it
+// where it has another), then Jolt's state is set. Fails before anything is
+// changed unless the space holds the same objects by owner, and its default
+// area is the one saved.
+bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const PackedByteArray &p_state) {
 	JPH::StateRecorderImpl recorder;
 	recorder.WriteBytes(p_state.ptr(), p_state.size());
 	uint32_t count = 0;
 	recorder.Read(count);
-	ERR_FAIL_COND_V_MSG(count != p_objects.size(), false, vformat("Physics snapshot holds %d objects, %d given.", count, p_objects.size()));
+	ERR_FAIL_COND_V_MSG(count != uint32_t(p_owners.size()), false, vformat("Physics snapshot holds %d objects, %d owners given.", count, p_owners.size()));
+	const LocalVector<JoltObject3D *> current = snapshot_objects();
+	ERR_FAIL_COND_V_MSG(count != current.size(), false, vformat("Physics snapshot holds %d objects, the space %d.", count, current.size()));
+	HashMap<uint64_t, LocalVector<JoltObject3D *>> by_owner;
+	for (JoltObject3D *object : current) {
+		by_owner[uint64_t(object->get_instance_id())].push_back(object);
+	}
+	HashMap<uint64_t, uint32_t> taken;
+	LocalVector<JoltObject3D *> objects;
+	objects.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		const uint64_t owner = uint64_t(p_owners[i]);
+		LocalVector<JoltObject3D *> *own = by_owner.getptr(owner);
+		uint32_t &k = taken[owner];
+		ERR_FAIL_COND_V_MSG(own == nullptr || k >= own->size(), false, "Physics snapshot: an owner has fewer areas and bodies than saved.");
+		objects[i] = (*own)[k++];
+	}
 	JPH::BodyID area_id;
 	recorder.Read(area_id);
 	const JPH::BodyID current_area_id = default_area != nullptr && default_area->in_space() ? default_area->get_jolt_id() : JPH::BodyID();
@@ -678,7 +736,6 @@ bool JoltSpace3D::snapshot_set_state(const LocalVector<JoltObject3D *> &p_object
 	ids.resize(count);
 	for (uint32_t i = 0; i < count; i++) {
 		recorder.Read(ids[i]);
-		ERR_FAIL_COND_V_MSG(ids[i].IsInvalid() == p_objects[i]->in_space(), false, "Physics snapshot: an object is in the space in one and not the other.");
 	}
 	uint32_t queued_count = 0;
 	recorder.Read(queued_count);
@@ -688,28 +745,42 @@ bool JoltSpace3D::snapshot_set_state(const LocalVector<JoltObject3D *> &p_object
 		recorder.Read(i);
 		ERR_FAIL_COND_V_MSG(i >= count, false, "Physics snapshot: broken queue.");
 	}
+	uint32_t invalid_count = 0;
+	recorder.Read(invalid_count);
+	LocalVector<uint32_t> invalid;
+	invalid.resize(invalid_count);
+	for (uint32_t &i : invalid) {
+		recorder.Read(i);
+		ERR_FAIL_COND_V_MSG(i >= count, false, "Physics snapshot: broken contact cache list.");
+	}
 	// Out first, all of them: an id one wants back may be another one's now.
 	LocalVector<uint32_t> moved;
 	for (uint32_t i = 0; i < count; i++) {
-		if (!ids[i].IsInvalid() && p_objects[i]->get_jolt_id() != ids[i]) {
-			p_objects[i]->snapshot_take_out();
+		if (objects[i]->get_jolt_id() != ids[i]) {
+			objects[i]->snapshot_take_out();
 			moved.push_back(i);
 		}
 	}
 	for (uint32_t i : moved) {
 		snapshot_body_id = ids[i];
-		p_objects[i]->snapshot_put_back();
+		objects[i]->snapshot_put_back();
 		snapshot_body_id = JPH::BodyID();
 	}
 	flush_pending_objects();
 	for (uint32_t i = 0; i < count; i++) {
-		ERR_FAIL_COND_V_MSG(!ids[i].IsInvalid() && p_objects[i]->get_jolt_id() != ids[i], false, "Physics snapshot: a body could not get its saved id back.");
+		ERR_FAIL_COND_V_MSG(objects[i]->get_jolt_id() != ids[i], false, "Physics snapshot: a body could not get its saved id back.");
 	}
 	if (!physics_system->RestoreState(recorder)) {
 		return false;
 	}
+	// The contact caches valid as saved: the load set shapes (made the bodies'
+	// collision again), each of which made its body's invalid.
+	physics_system->ResetContactCacheInvalidation();
+	for (uint32_t i : invalid) {
+		get_body_iface().InvalidateContactCache(ids[i]);
+	}
 	// The queries due at the next sync: those, in that order.
-	for (JoltObject3D *object : p_objects) {
+	for (JoltObject3D *object : objects) {
 		if (JoltBody3D *body = object->as_body()) {
 			dequeue_call_queries(body->get_call_queries_element());
 		} else if (JoltArea3D *area = object->as_area()) {
@@ -718,9 +789,9 @@ bool JoltSpace3D::snapshot_set_state(const LocalVector<JoltObject3D *> &p_object
 	}
 	for (int64_t k = int64_t(queued.size()) - 1; k >= 0; k--) { // each goes first: the last one first
 		const uint32_t i = queued[k];
-		if (JoltBody3D *body = p_objects[i]->as_body()) {
+		if (JoltBody3D *body = objects[i]->as_body()) {
 			enqueue_call_queries(body->get_call_queries_element());
-		} else if (JoltArea3D *area = p_objects[i]->as_area()) {
+		} else if (JoltArea3D *area = objects[i]->as_area()) {
 			enqueue_call_queries(area->get_call_queries_element());
 		}
 	}

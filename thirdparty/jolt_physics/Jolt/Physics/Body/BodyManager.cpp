@@ -1132,6 +1132,19 @@ void BodyManager::InvalidateContactCacheForBody(Body &ioBody)
 	}
 }
 
+void BodyManager::ResetContactCacheInvalidation()
+{
+	lock_guard lock(mBodiesCacheInvalidMutex);
+
+	for (const BodyID &b : mBodiesCacheInvalid)
+	{
+		Body *body = TryGetBody(b);
+		if (body != nullptr && body->IsCollisionCacheInvalid())
+			body->ValidateContactCacheInternal();
+	}
+	mBodiesCacheInvalid.clear();
+}
+
 void BodyManager::ValidateContactCacheForAllBodies()
 {
 	lock_guard lock(mBodiesCacheInvalidMutex);
