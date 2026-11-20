@@ -197,6 +197,15 @@ real_t CSGShape3D::get_collision_priority() const {
 }
 #endif // PHYSICS_3D_DISABLED
 
+// komm64: the physics body a root shape with use_collision made; empty for none.
+TypedArray<RID> CSGShape3D::snapshot_get_bodies() const {
+	TypedArray<RID> bodies;
+	if (root_collision_instance.is_valid()) {
+		bodies.push_back(root_collision_instance);
+	}
+	return bodies;
+}
+
 bool CSGShape3D::is_root_shape() const {
 	return !parent_shape;
 }
@@ -996,6 +1005,7 @@ Ref<TriangleMesh> CSGShape3D::generate_triangle_mesh() const {
 
 void CSGShape3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_root_shape"), &CSGShape3D::is_root_shape);
+	ClassDB::bind_method(D_METHOD("snapshot_get_bodies"), &CSGShape3D::snapshot_get_bodies);
 
 	ClassDB::bind_method(D_METHOD("set_operation", "operation"), &CSGShape3D::set_operation);
 	ClassDB::bind_method(D_METHOD("get_operation"), &CSGShape3D::get_operation);

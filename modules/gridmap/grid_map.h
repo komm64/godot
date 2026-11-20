@@ -301,6 +301,7 @@ public:
 	float get_cell_scale() const;
 
 	TypedArray<Vector3i> get_used_cells() const;
+	TypedArray<RID> snapshot_get_bodies() const; // komm64
 	TypedArray<Vector3i> get_used_cells_by_item(int p_item) const;
 
 	Array get_meshes() const;
