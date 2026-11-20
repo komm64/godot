@@ -804,11 +804,20 @@ Dictionary JoltSpace3D::snapshot_get_state() {
 		}
 	}
 	const LocalVector<SnapshotJoint> joints = _snapshot_joints(objects);
+	HashMap<const JPH::Constraint *, uint32_t> solve_order; // the solver goes by the system's order
+	{
+		const JPH::Constraints constraints = physics_system->GetConstraints();
+		for (uint32_t k = 0; k < constraints.size(); k++) {
+			solve_order[constraints[k].GetPtr()] = k;
+		}
+	}
 	recorder.Write(joints.size());
 	for (const SnapshotJoint &j : joints) {
 		recorder.Write(j.a);
 		recorder.Write(j.b);
 		recorder.Write(j.type);
+		const uint32_t *order = j.joint->get_jolt_ref() != nullptr ? solve_order.getptr(j.joint->get_jolt_ref()) : nullptr;
+		recorder.Write(order != nullptr ? *order : UINT32_MAX);
 		std::string blob;
 		if (j.joint->get_jolt_ref() != nullptr) {
 			JPH::StateRecorderImpl joint_recorder;
@@ -924,12 +933,15 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 	ERR_FAIL_COND_V_MSG(joint_count != joints.size(), false, vformat("Physics snapshot holds %d joints, the space %d.", joint_count, joints.size()));
 	LocalVector<std::string> joint_states;
 	joint_states.resize(joint_count);
+	LocalVector<uint32_t> joint_orders;
+	joint_orders.resize(joint_count);
 	for (uint32_t i = 0; i < joint_count; i++) {
 		SnapshotJoint j;
 		recorder.Read(j.a);
 		recorder.Read(j.b);
 		recorder.Read(j.type);
 		ERR_FAIL_COND_V_MSG(j.a != joints[i].a || j.b != joints[i].b || j.type != joints[i].type, false, "Physics snapshot: the joints differ.");
+		recorder.Read(joint_orders[i]);
 		uint32_t size = 0;
 		recorder.Read(size);
 		ERR_FAIL_COND_V_MSG(size > p_state.size(), false, "Physics snapshot: broken joint state.");
@@ -963,14 +975,40 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 	for (uint32_t i : invalid) {
 		get_body_iface().InvalidateContactCache(ids[i]);
 	}
-	// Joints after the bodies are back: putting a body back makes its joints again.
+	// Joints after the bodies are back: putting a body back makes its joints
+	// again, and the system's order of them (the solver's) changes. Taken out
+	// and added again in the saved order, the joints' constraints (the only
+	// ones) are in that order.
+	struct Ordered {
+		uint32_t order = 0;
+		JPH::Constraint *constraint = nullptr;
+		bool operator<(const Ordered &p_other) const { return order < p_other.order; }
+	};
+	LocalVector<Ordered> ordered;
+	HashSet<const JPH::Constraint *> in_system;
+	for (const JPH::Ref<JPH::Constraint> &c : physics_system->GetConstraints()) {
+		in_system.insert(c.GetPtr());
+	}
 	for (uint32_t i = 0; i < joint_count; i++) {
 		JPH::Constraint *constraint = joints[i].joint->get_jolt_ref();
-		if (constraint != nullptr && !joint_states[i].empty()) {
+		if (constraint == nullptr) {
+			continue;
+		}
+		if (!joint_states[i].empty()) {
 			JPH::StateRecorderImpl joint_recorder;
 			joint_recorder.WriteBytes(joint_states[i].data(), joint_states[i].size());
 			constraint->RestoreState(joint_recorder);
 		}
+		if (in_system.has(constraint)) {
+			ordered.push_back({ joint_orders[i], constraint });
+		}
+	}
+	ordered.sort();
+	for (const Ordered &o : ordered) {
+		physics_system->RemoveConstraint(o.constraint);
+	}
+	for (const Ordered &o : ordered) {
+		physics_system->AddConstraint(o.constraint);
 	}
 	for (KeyValue<uint32_t, Step> &E : steps) {
 		objects[E.key]->as_body()->snapshot_set_step(E.value.gravity, E.value.linear_damp, E.value.angular_damp, E.value.contacts);
