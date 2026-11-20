@@ -370,8 +370,6 @@ Error RayCast3D::snapshot_set_state(const Dictionary &p_state) {
 }
 
 void RayCast3D::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("snapshot_get_state"), &RayCast3D::snapshot_get_state);
-	ClassDB::bind_method(D_METHOD("snapshot_set_state", "state"), &RayCast3D::snapshot_set_state);
 	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &RayCast3D::set_enabled);
 	ClassDB::bind_method(D_METHOD("is_enabled"), &RayCast3D::is_enabled);
 

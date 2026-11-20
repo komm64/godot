@@ -165,8 +165,6 @@ Error ShapeCast3D::snapshot_set_state(const Dictionary &p_state) {
 }
 
 void ShapeCast3D::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("snapshot_get_state"), &ShapeCast3D::snapshot_get_state);
-	ClassDB::bind_method(D_METHOD("snapshot_set_state", "state"), &ShapeCast3D::snapshot_set_state);
 #ifndef DISABLE_DEPRECATED
 	ClassDB::bind_method(D_METHOD("resource_changed", "resource"), &ShapeCast3D::resource_changed);
 #endif
