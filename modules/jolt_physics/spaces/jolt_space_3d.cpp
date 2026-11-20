@@ -720,7 +720,8 @@ static void _snapshot_read(JPH::StateRecorder &p_recorder, Vector3 &r_v) {
 // the next step; what the last step left each body for the game to read
 // (gravity, damping, contacts, a contact's collider by its place in the
 // list); each joint's solver state (its warm start, found again by its
-// bodies' places and its type); then Jolt's own state of the system (bodies
+// bodies' places and its type); the active bodies in Jolt's order (each step
+// goes by it; Jolt's own state leaves it out); then Jolt's own state of the system (bodies
 // and contacts; its constraints are the joints', made again in their own
 // order).
 Dictionary JoltSpace3D::snapshot_get_state() {
@@ -826,6 +827,28 @@ Dictionary JoltSpace3D::snapshot_get_state() {
 		}
 		recorder.Write(uint32_t(blob.size()));
 		recorder.WriteBytes(blob.data(), blob.size());
+	}
+	// The active bodies in Jolt's order (each step goes by it: the queries
+	// due are queued in it), which its own state leaves out.
+	{
+		HashMap<uint32_t, uint32_t> by_id;
+		for (uint32_t i = 0; i < count; i++) {
+			by_id[objects[i]->get_jolt_id().GetIndexAndSequenceNumber()] = i;
+		}
+		for (const JPH::EBodyType type : { JPH::EBodyType::RigidBody, JPH::EBodyType::SoftBody }) {
+			JPH::BodyIDVector active;
+			physics_system->GetActiveBodies(type, active);
+			LocalVector<uint32_t> listed;
+			for (const JPH::BodyID &id : active) {
+				if (const uint32_t *i = by_id.getptr(id.GetIndexAndSequenceNumber())) {
+					listed.push_back(*i);
+				}
+			}
+			recorder.Write(listed.size());
+			for (uint32_t i : listed) {
+				recorder.Write(i);
+			}
+		}
 	}
 	physics_system->SaveState(recorder, JPH::EStateRecorderState(uint8_t(JPH::EStateRecorderState::Global) | uint8_t(JPH::EStateRecorderState::Bodies) | uint8_t(JPH::EStateRecorderState::Contacts)));
 	const std::string data = recorder.GetData();
@@ -948,6 +971,17 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 		joint_states[i].resize(size);
 		recorder.ReadBytes(joint_states[i].data(), size);
 	}
+	LocalVector<uint32_t> active[2];
+	for (LocalVector<uint32_t> &listed : active) {
+		uint32_t active_count = 0;
+		recorder.Read(active_count);
+		ERR_FAIL_COND_V_MSG(active_count > count, false, "Physics snapshot: broken active list.");
+		listed.resize(active_count);
+		for (uint32_t &i : listed) {
+			recorder.Read(i);
+			ERR_FAIL_COND_V_MSG(i >= count, false, "Physics snapshot: broken active list.");
+		}
+	}
 	// Out first, all of them: an id one wants back may be another one's now.
 	LocalVector<uint32_t> moved;
 	for (uint32_t i = 0; i < count; i++) {
@@ -965,6 +999,27 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 	flush_pending_objects();
 	for (uint32_t i = 0; i < count; i++) {
 		ERR_FAIL_COND_V_MSG(objects[i]->get_jolt_id() != ids[i], false, "Physics snapshot: a body could not get its saved id back.");
+	}
+	// Active in the saved order: all put to sleep, then woken in it. Jolt's
+	// state then wakes none (they are as saved) and sets their velocities.
+	{
+		JPH::BodyInterface &body_iface = physics_system->GetBodyInterfaceNoLock();
+		for (const JPH::EBodyType type : { JPH::EBodyType::RigidBody, JPH::EBodyType::SoftBody }) {
+			JPH::BodyIDVector awake;
+			physics_system->GetActiveBodies(type, awake);
+			if (!awake.empty()) {
+				body_iface.DeactivateBodies(awake.data(), int(awake.size()));
+			}
+		}
+		for (const LocalVector<uint32_t> &listed : active) {
+			JPH::BodyIDVector wake;
+			for (uint32_t i : listed) {
+				wake.push_back(ids[i]);
+			}
+			if (!wake.empty()) {
+				body_iface.ActivateBodies(wake.data(), int(wake.size()));
+			}
+		}
 	}
 	if (!physics_system->RestoreState(recorder)) {
 		return false;
