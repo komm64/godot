@@ -1281,11 +1281,12 @@ float GridMap::get_cell_scale() const {
 }
 
 // komm64: the physics bodies the map made (one per octant), in the order of
-// their octants' coordinates: the same cells give the same list.
+// their octants' coordinates: the same cells give the same list. An octant
+// left with no cells is not in it: the next update takes it away.
 TypedArray<RID> GridMap::snapshot_get_bodies() const {
 	LocalVector<uint64_t> keys;
 	for (const KeyValue<OctantKey, Octant *> &E : octant_map) {
-		if (E.value->static_body.is_valid()) {
+		if (E.value->static_body.is_valid() && !E.value->cells.is_empty()) {
 			keys.push_back(E.key.key);
 		}
 	}
