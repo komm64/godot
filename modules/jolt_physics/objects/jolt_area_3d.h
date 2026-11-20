@@ -233,6 +233,7 @@ public:
 	void area_exited(const JPH::BodyID &p_body_id);
 
 	void call_queries();
+	SelfList<JoltArea3D> *get_call_queries_element() { return &call_queries_element; }
 
 	virtual bool has_custom_center_of_mass() const override { return false; }
 	virtual Vector3 get_center_of_mass_custom() const override { return Vector3(); }
