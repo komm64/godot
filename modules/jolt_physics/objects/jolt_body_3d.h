@@ -203,6 +203,7 @@ public:
 	void set_max_contacts_reported(int p_count);
 
 	int get_contact_count() const { return contact_count; }
+	const LocalVector<JoltJoint3D *> &get_joints() const { return joints; } // komm64
 	const Contact &get_contact(int p_index) { return contacts[p_index]; }
 
 	// For a space's snapshot: what the last step left for the game to read

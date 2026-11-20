@@ -643,6 +643,63 @@ LocalVector<JoltObject3D *> JoltSpace3D::snapshot_objects() {
 	return out;
 }
 
+// The joints between the listed bodies, each with its key: its bodies' places
+// in the list (UINT32_MAX for none) and its type, in the order of the keys,
+// then of when they were made.
+struct SnapshotJoint {
+	uint32_t a = UINT32_MAX;
+	uint32_t b = UINT32_MAX;
+	uint32_t type = 0;
+	JoltJoint3D *joint = nullptr;
+};
+
+static LocalVector<SnapshotJoint> _snapshot_joints(const LocalVector<JoltObject3D *> &p_objects) {
+	HashMap<const JoltObject3D *, uint32_t> index;
+	for (uint32_t i = 0; i < p_objects.size(); i++) {
+		index[p_objects[i]] = i;
+	}
+	HashSet<JoltJoint3D *> seen;
+	LocalVector<SnapshotJoint> out;
+	for (JoltObject3D *object : p_objects) {
+		const JoltBody3D *body = object->as_body();
+		if (body == nullptr) {
+			continue;
+		}
+		for (JoltJoint3D *joint : body->get_joints()) {
+			if (seen.has(joint)) {
+				continue;
+			}
+			seen.insert(joint);
+			SnapshotJoint j;
+			j.joint = joint;
+			j.type = uint32_t(joint->get_type());
+			if (const uint32_t *a = joint->get_body_a() ? index.getptr(joint->get_body_a()) : nullptr) {
+				j.a = *a;
+			}
+			if (const uint32_t *b = joint->get_body_b() ? index.getptr(joint->get_body_b()) : nullptr) {
+				j.b = *b;
+			}
+			out.push_back(j);
+		}
+	}
+	struct ByKey {
+		bool operator()(const SnapshotJoint &p_x, const SnapshotJoint &p_y) const {
+			if (p_x.a != p_y.a) {
+				return p_x.a < p_y.a;
+			}
+			if (p_x.b != p_y.b) {
+				return p_x.b < p_y.b;
+			}
+			if (p_x.type != p_y.type) {
+				return p_x.type < p_y.type;
+			}
+			return p_x.joint->get_rid().get_id() < p_y.joint->get_rid().get_id();
+		}
+	};
+	out.sort_custom<ByKey>();
+	return out;
+}
+
 static void _snapshot_write(JPH::StateRecorder &p_recorder, const Vector3 &p_v) {
 	p_recorder.Write(p_v.x);
 	p_recorder.Write(p_v.y);
@@ -658,13 +715,14 @@ static void _snapshot_read(JPH::StateRecorder &p_recorder, Vector3 &r_v) {
 // The state, the same for the same world however it was made: the objects in
 // the order of their body ids; the default area's and the objects' body ids
 // and each one's place among its owner's (in the order they were made); the
-// objects whose
-// queries (state sync, area events) are due at the next sync, in their order,
-// the objects whose contact cache a change made invalid for the next step,
-// what the last step left each body for the game to read (gravity, damping,
-// contacts, a contact's collider by its place in the list), then Jolt's own state of the system (bodies and contacts; not constraints:
-// joints are made again in their own order, and start without their warm
-// start).
+// objects whose queries (state sync, area events) are due at the next sync,
+// in their order; the objects whose contact cache a change made invalid for
+// the next step; what the last step left each body for the game to read
+// (gravity, damping, contacts, a contact's collider by its place in the
+// list); each joint's solver state (its warm start, found again by its
+// bodies' places and its type); then Jolt's own state of the system (bodies
+// and contacts; its constraints are the joints', made again in their own
+// order).
 Dictionary JoltSpace3D::snapshot_get_state() {
 	LocalVector<JoltObject3D *> objects = snapshot_objects();
 	HashMap<const JoltObject3D *, uint32_t> rank;
@@ -744,6 +802,21 @@ Dictionary JoltSpace3D::snapshot_get_state() {
 			const uint32_t *collider = by_rid.getptr(c.collider_rid);
 			recorder.Write(collider != nullptr ? *collider : UINT32_MAX);
 		}
+	}
+	const LocalVector<SnapshotJoint> joints = _snapshot_joints(objects);
+	recorder.Write(joints.size());
+	for (const SnapshotJoint &j : joints) {
+		recorder.Write(j.a);
+		recorder.Write(j.b);
+		recorder.Write(j.type);
+		std::string blob;
+		if (j.joint->get_jolt_ref() != nullptr) {
+			JPH::StateRecorderImpl joint_recorder;
+			j.joint->get_jolt_ref()->SaveState(joint_recorder);
+			blob = joint_recorder.GetData();
+		}
+		recorder.Write(uint32_t(blob.size()));
+		recorder.WriteBytes(blob.data(), blob.size());
 	}
 	physics_system->SaveState(recorder, JPH::EStateRecorderState(uint8_t(JPH::EStateRecorderState::Global) | uint8_t(JPH::EStateRecorderState::Bodies) | uint8_t(JPH::EStateRecorderState::Contacts)));
 	const std::string data = recorder.GetData();
@@ -845,6 +918,24 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 			}
 		}
 	}
+	uint32_t joint_count = 0;
+	recorder.Read(joint_count);
+	const LocalVector<SnapshotJoint> joints = _snapshot_joints(objects);
+	ERR_FAIL_COND_V_MSG(joint_count != joints.size(), false, vformat("Physics snapshot holds %d joints, the space %d.", joint_count, joints.size()));
+	LocalVector<std::string> joint_states;
+	joint_states.resize(joint_count);
+	for (uint32_t i = 0; i < joint_count; i++) {
+		SnapshotJoint j;
+		recorder.Read(j.a);
+		recorder.Read(j.b);
+		recorder.Read(j.type);
+		ERR_FAIL_COND_V_MSG(j.a != joints[i].a || j.b != joints[i].b || j.type != joints[i].type, false, "Physics snapshot: the joints differ.");
+		uint32_t size = 0;
+		recorder.Read(size);
+		ERR_FAIL_COND_V_MSG(size > p_state.size(), false, "Physics snapshot: broken joint state.");
+		joint_states[i].resize(size);
+		recorder.ReadBytes(joint_states[i].data(), size);
+	}
 	// Out first, all of them: an id one wants back may be another one's now.
 	LocalVector<uint32_t> moved;
 	for (uint32_t i = 0; i < count; i++) {
@@ -871,6 +962,15 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 	physics_system->ResetContactCacheInvalidation();
 	for (uint32_t i : invalid) {
 		get_body_iface().InvalidateContactCache(ids[i]);
+	}
+	// Joints after the bodies are back: putting a body back makes its joints again.
+	for (uint32_t i = 0; i < joint_count; i++) {
+		JPH::Constraint *constraint = joints[i].joint->get_jolt_ref();
+		if (constraint != nullptr && !joint_states[i].empty()) {
+			JPH::StateRecorderImpl joint_recorder;
+			joint_recorder.WriteBytes(joint_states[i].data(), joint_states[i].size());
+			constraint->RestoreState(joint_recorder);
+		}
 	}
 	for (KeyValue<uint32_t, Step> &E : steps) {
 		objects[E.key]->as_body()->snapshot_set_step(E.value.gravity, E.value.linear_damp, E.value.angular_damp, E.value.contacts);
