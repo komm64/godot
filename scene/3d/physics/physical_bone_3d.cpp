@@ -938,6 +938,30 @@ void PhysicalBone3D::_fix_joint_offset() {
 	}
 }
 
+// komm64: the joint's frame on the parent bone, from where the two were when
+// it was made. Made again after a load, the joint is made as it was then.
+Dictionary PhysicalBone3D::snapshot_get_state() const {
+	Dictionary state = PhysicsBody3D::snapshot_get_state();
+	if (made) {
+		Dictionary bone;
+		bone["joint_local_a"] = made_local_a;
+		state["physical_bone_3d"] = bone;
+	}
+	return state;
+}
+
+Error PhysicalBone3D::snapshot_set_state(const Dictionary &p_state) {
+	PhysicsBody3D::snapshot_set_state(p_state);
+	const Dictionary bone = p_state.get("physical_bone_3d", Dictionary());
+	if (bone.has("joint_local_a")) {
+		made_local_a = bone["joint_local_a"];
+		remake_as_made = true;
+		_reload_joint();
+		remake_as_made = false;
+	}
+	return OK;
+}
+
 void PhysicalBone3D::_reload_joint() {
 	PhysicalBoneSimulator3D *simulator = get_simulator();
 	if (!simulator || !simulator->get_skeleton()) {
@@ -951,9 +975,14 @@ void PhysicalBone3D::_reload_joint() {
 		return;
 	}
 
-	Transform3D joint_transf = get_global_transform() * joint_offset;
-	Transform3D local_a = body_a->get_global_transform().affine_inverse() * joint_transf;
-	local_a.orthonormalize();
+	Transform3D local_a = made_local_a;
+	if (!remake_as_made) {
+		Transform3D joint_transf = get_global_transform() * joint_offset;
+		local_a = body_a->get_global_transform().affine_inverse() * joint_transf;
+		local_a.orthonormalize();
+		made_local_a = local_a;
+	}
+	made = true;
 
 	switch (get_joint_type()) {
 		case JOINT_TYPE_PIN: {
