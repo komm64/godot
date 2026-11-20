@@ -213,6 +213,12 @@ public:
 	/// Restoring state for replay. Returns false if failed.
 	bool							RestoreState(StateRecorder &inStream);
 
+	/// Save the state of the body IDs: which indices are free, in the order they are given out again, and each index's sequence number
+	void							SaveBodyIDState(StateRecorder &inStream) const;
+
+	/// Restore the state of the body IDs; the same indices must be in use as when it was saved
+	bool							RestoreBodyIDState(StateRecorder &inStream);
+
 	/// Save the state of a single body for replay
 	void							SaveBodyState(const Body &inBody, StateRecorder &inStream) const;
 

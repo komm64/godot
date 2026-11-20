@@ -721,7 +721,8 @@ static void _snapshot_read(JPH::StateRecorder &p_recorder, Vector3 &r_v) {
 // (gravity, damping, contacts, a contact's collider by its place in the
 // list); each joint's solver state (its warm start, found again by its
 // bodies' places and its type); the active bodies in Jolt's order (each step
-// goes by it; Jolt's own state leaves it out); then Jolt's own state of the system (bodies
+// goes by it) and the body ids it gives out next (Jolt's own state leaves
+// both out); then Jolt's own state of the system (bodies
 // and contacts; its constraints are the joints', made again in their own
 // order).
 Dictionary JoltSpace3D::snapshot_get_state() {
@@ -850,6 +851,7 @@ Dictionary JoltSpace3D::snapshot_get_state() {
 			}
 		}
 	}
+	physics_system->SaveBodyIDState(recorder);
 	physics_system->SaveState(recorder, JPH::EStateRecorderState(uint8_t(JPH::EStateRecorderState::Global) | uint8_t(JPH::EStateRecorderState::Bodies) | uint8_t(JPH::EStateRecorderState::Contacts)));
 	const std::string data = recorder.GetData();
 	PackedByteArray state;
@@ -1000,6 +1002,8 @@ bool JoltSpace3D::snapshot_set_state(const PackedInt64Array &p_owners, const Pac
 	for (uint32_t i = 0; i < count; i++) {
 		ERR_FAIL_COND_V_MSG(objects[i]->get_jolt_id() != ids[i], false, "Physics snapshot: a body could not get its saved id back.");
 	}
+	// The ids given out next: those that would have been.
+	ERR_FAIL_COND_V_MSG(!physics_system->RestoreBodyIDState(recorder), false, "Physics snapshot: broken body id state.");
 	// Active in the saved order: all put to sleep, then woken in it. Jolt's
 	// state then wakes none (they are as saved) and sets their velocities.
 	{

@@ -510,6 +510,7 @@ Patches:
 - `0005-backport-upstream-commit-bc7f1fb8c.patch` ([GH-115305](https://github.com/godotengine/godot/pull/115305))
 - `0006-backport-upstream-commit-365a15367.patch` ([GH-115305](https://github.com/godotengine/godot/pull/115305))
 - `0007-backport-upstream-commit-e0a6a9a16.patch` ([GH-115327](https://github.com/godotengine/godot/pull/115327))
+- `0008-komm64-body-id-state.patch` (komm64: save and restore which body IDs are given out next, for snapshots)
 
 
 ## libbacktrace
