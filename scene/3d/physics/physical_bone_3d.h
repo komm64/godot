@@ -307,7 +307,7 @@ private:
 	void update_bone_id();
 	void update_offset();
 
-	void _start_physics_simulation();
+	void _start_physics_simulation(bool p_from_rest = true);
 	void _stop_physics_simulation();
 };
 

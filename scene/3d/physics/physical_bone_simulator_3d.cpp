@@ -392,5 +392,24 @@ void PhysicalBoneSimulator3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("physical_bones_remove_collision_exception", "exception"), &PhysicalBoneSimulator3D::physical_bones_remove_collision_exception);
 }
 
+// komm64: whether the bones are being simulated (it then poses the skeleton
+// from them); each bone keeps its own part.
+Dictionary PhysicalBoneSimulator3D::snapshot_get_state() const {
+	Dictionary state = SkeletonModifier3D::snapshot_get_state();
+	Dictionary sim;
+	sim["simulating"] = simulating;
+	state["physical_bone_simulator_3d"] = sim;
+	return state;
+}
+
+Error PhysicalBoneSimulator3D::snapshot_set_state(const Dictionary &p_state) {
+	SkeletonModifier3D::snapshot_set_state(p_state);
+	const Dictionary sim = p_state.get("physical_bone_simulator_3d", Dictionary());
+	if (sim.has("simulating")) {
+		simulating = sim["simulating"];
+	}
+	return OK;
+}
+
 PhysicalBoneSimulator3D::PhysicalBoneSimulator3D() {
 }
