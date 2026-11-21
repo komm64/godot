@@ -1018,6 +1018,8 @@ public:
 		VIEWPORT_CLEAR_ONLY_NEXT_FRAME
 	};
 
+	virtual ViewportClearMode viewport_snapshot_get_clear_mode(RID p_viewport) const = 0; // komm64
+
 	virtual void viewport_set_clear_mode(RID p_viewport, ViewportClearMode p_clear_mode) = 0;
 
 	virtual RID viewport_get_render_target(RID p_viewport) const = 0;

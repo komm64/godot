@@ -901,6 +901,9 @@ public:
 	Size2i get_size() const;
 	void set_size_force(const Size2i &p_size);
 
+	Dictionary snapshot_get_state() const; // komm64
+	Error snapshot_set_state(const Dictionary &p_state);
+
 	void set_size_2d_override(const Size2i &p_size);
 	Size2i get_size_2d_override() const;
 
