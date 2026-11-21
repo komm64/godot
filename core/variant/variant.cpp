@@ -1087,7 +1087,9 @@ bool Variant::is_null() const {
 
 void Variant::ObjData::ref(const ObjData &p_from) {
 	// Mirrors Ref::ref in refcounted.h
-	if (p_from.id == id) {
+	// komm64: the pointer too, the id of a freed object can name the one a
+	// snapshot load made in its place (see get_validated_object()).
+	if (p_from.id == id && p_from.obj == obj) {
 		return;
 	}
 
