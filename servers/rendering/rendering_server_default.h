@@ -718,6 +718,7 @@ public:
 
 	FUNC2(viewport_set_update_mode, RID, ViewportUpdateMode)
 	FUNC1RC(ViewportUpdateMode, viewport_get_update_mode, RID)
+	FUNC1RC(ViewportClearMode, viewport_snapshot_get_clear_mode, RID)
 
 	FUNC1RC(RID, viewport_get_render_target, RID)
 	FUNC1RC(RID, viewport_get_texture, RID)
