@@ -1372,7 +1372,7 @@ bool Variant::iter_init(Variant &r_iter, bool &valid) const {
 
 #ifdef DEBUG_ENABLED
 
-			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && ObjectDB::get_instance(_get_obj().id) == nullptr) {
+			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && get_validated_object() == nullptr) {
 				valid = false;
 				return false;
 			}
@@ -1606,7 +1606,7 @@ bool Variant::iter_next(Variant &r_iter, bool &valid) const {
 
 #ifdef DEBUG_ENABLED
 
-			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && ObjectDB::get_instance(_get_obj().id) == nullptr) {
+			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && get_validated_object() == nullptr) {
 				valid = false;
 				return false;
 			}
@@ -1800,7 +1800,7 @@ Variant Variant::iter_get(const Variant &r_iter, bool &r_valid) const {
 				return Variant();
 			}
 #ifdef DEBUG_ENABLED
-			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && ObjectDB::get_instance(_get_obj().id) == nullptr) {
+			if (EngineDebugger::is_active() && !_get_obj().id.is_ref_counted() && get_validated_object() == nullptr) {
 				r_valid = false;
 				return Variant();
 			}
