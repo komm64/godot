@@ -2212,6 +2212,9 @@ static void _snapshot_push_held(const Variant &p_value, LocalVector<Variant> &r_
 Dictionary Engine::snapshot_collect_rids(const Array &p_roots, const Array &p_skip) const {
 	Dictionary out;
 	HashSet<ObjectID> seen;
+	// Arrays and Dictionaries are walked once: they may be shared, and a
+	// lambda's captures can close a cycle through them.
+	HashSet<const void *> containers_seen;
 	for (const Variant &v : p_skip) {
 		Object *obj = v.get_validated_object();
 		if (obj) {
@@ -2235,12 +2238,20 @@ Dictionary Engine::snapshot_collect_rids(const Array &p_roots, const Array &p_sk
 			} break;
 			case Variant::ARRAY: {
 				Array a = v;
+				if (containers_seen.has(a.id())) {
+					break;
+				}
+				containers_seen.insert(a.id());
 				for (const Variant &e : a) {
 					stack.push_back(e);
 				}
 			} break;
 			case Variant::DICTIONARY: {
 				Dictionary d = v;
+				if (containers_seen.has(d.id())) {
+					break;
+				}
+				containers_seen.insert(d.id());
 				for (const KeyValue<Variant, Variant> &kv : d) {
 					stack.push_back(kv.key);
 					stack.push_back(kv.value);
