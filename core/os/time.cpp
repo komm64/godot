@@ -390,16 +390,27 @@ uint64_t Time::get_ticks_usec() const {
 	return OS::get_singleton()->get_ticks_usec();
 }
 
-int64_t Time::snapshot_script_ticks_base_usec() const {
+uint64_t Time::_script_get_ticks_usec() const {
 	const Engine *engine = Engine::get_singleton();
-	if (engine->snapshot_virtual_clock_fps > 0) {
-		return int64_t(engine->get_script_process_frames() * 1000000 / uint64_t(engine->snapshot_virtual_clock_fps));
+	const int64_t fps = engine->snapshot_virtual_clock_fps;
+	if (fps > 0) {
+		const int64_t frames = MAX(int64_t(0), int64_t(engine->get_script_process_frames()) + snapshot_ticks_offset_frames);
+		return uint64_t(frames * 1000000 / fps);
 	}
-	return int64_t(OS::get_singleton()->get_ticks_usec());
+	return uint64_t(MAX(int64_t(0), int64_t(OS::get_singleton()->get_ticks_usec()) + snapshot_ticks_offset_usec));
 }
 
-uint64_t Time::_script_get_ticks_usec() const {
-	return uint64_t(MAX(int64_t(0), snapshot_script_ticks_base_usec() + snapshot_ticks_offset_usec));
+void Time::snapshot_set_script_ticks_usec(int64_t p_ticks_usec) {
+	const Engine *engine = Engine::get_singleton();
+	const int64_t fps = engine->snapshot_virtual_clock_fps;
+	if (fps > 0) {
+		// The frame count the ticks were read at (rounded, so a save made on
+		// the virtual clock gives back its exact frame count).
+		const int64_t frames = (p_ticks_usec * fps + 500000) / 1000000;
+		snapshot_ticks_offset_frames = frames - int64_t(engine->get_script_process_frames());
+	} else {
+		snapshot_ticks_offset_usec = p_ticks_usec - int64_t(OS::get_singleton()->get_ticks_usec());
+	}
 }
 
 uint64_t Time::_script_get_ticks_msec() const {

@@ -32,6 +32,7 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/core_bind.h"
 #include "core/core_globals.h"
 #include "core/crypto/crypto.h"
 #include "core/debugger/engine_debugger.h"
@@ -291,9 +292,11 @@ static MovieWriter *movie_writer = nullptr;
 // dummy driver runs without its real-time thread and Main mixes one frame of
 // audio per process frame, so playback positions and `finished` signals follow
 // frames like the virtual clock. Frames hidden by a frozen script clock mix
-// nothing.
+// nothing. What to mix is computed from the process frame count scripts see
+// (which a StateShot load sets back), not from a count of our own: the samples
+// mixed so far, and so where AudioServer's mix blocks start, are the same
+// after a load into another process as in the process that saved.
 static bool frame_audio = false;
-static uint64_t frame_audio_frames = 0;
 static LocalVector<int32_t> frame_audio_buffer;
 
 static void _mix_frame_audio() {
@@ -302,9 +305,15 @@ static void _mix_frame_audio() {
 	}
 	AudioDriverDummy *dummy = AudioDriverDummy::get_dummy_singleton();
 	const uint64_t rate = uint64_t(dummy->get_mix_rate());
+	const uint64_t frames = CoreBind::Engine::get_singleton()->get_process_frames();
+	const uint64_t mixed = frames * rate / uint64_t(fixed_fps);
 	// Exact over time even when the rate is not a multiple of the fps.
-	const int todo = int((frame_audio_frames + 1) * rate / uint64_t(fixed_fps) - frame_audio_frames * rate / uint64_t(fixed_fps));
-	frame_audio_frames++;
+	const int todo = int((frames + 1) * rate / uint64_t(fixed_fps) - mixed);
+	AudioServer *audio = AudioServer::get_singleton();
+	const uint64_t block = audio->snapshot_get_mix_buffer_size();
+	if (block > 0) {
+		audio->snapshot_set_frames_left_to_mix(int((block - mixed % block) % block));
+	}
 	frame_audio_buffer.resize(uint32_t(todo) * dummy->get_channels());
 	dummy->mix_audio(todo, frame_audio_buffer.ptr());
 }

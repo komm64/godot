@@ -367,6 +367,11 @@ public:
 		ERR_FAIL_V(1);
 	}
 
+	// komm64: frame audio (main.cpp) lines the mix blocks up with the frame
+	// count scripts see, so a load into another process mixes the same blocks.
+	void snapshot_set_frames_left_to_mix(int p_frames) { to_mix = p_frames; }
+	uint32_t snapshot_get_mix_buffer_size() const { return buffer_size; }
+
 	// Do not use from outside audio thread.
 	bool thread_has_channel_mix_buffer(int p_bus, int p_buffer) const;
 	AudioFrame *thread_get_channel_mix_buffer(int p_bus, int p_buffer);

@@ -109,7 +109,7 @@ public:
 	// see / fps) do not move. Main counts the frames and sets the fps.
 	// get_script_*_frames() are monotonic and never offset: a load moves the
 	// clocks scripts read only through the snapshot offsets (core_bind's
-	// Engine and Time::snapshot_ticks_offset_usec).
+	// Engine and Time::snapshot_set_script_ticks_usec()).
 	bool snapshot_clock_frozen = false;
 	uint64_t snapshot_frozen_process_frames = 0;
 	uint64_t snapshot_frozen_physics_frames = 0;
