@@ -88,6 +88,13 @@ public:
 	uint64_t snapshot_get_real_ticks_usec() const;
 	// Makes the script ticks read `p_ticks_usec` now (a save's clock).
 	void snapshot_set_script_ticks_usec(int64_t p_ticks_usec);
+	// While held, the script ticks stand still; released, they go on from
+	// where they stood. Code that runs outside game time (a save's or a
+	// load's handlers) holds them, so the game never sees them run back.
+	bool snapshot_ticks_held = false;
+	int64_t snapshot_held_ticks_usec = 0;
+	void snapshot_set_ticks_held(bool p_held);
+	bool snapshot_is_ticks_held() const;
 
 	Time();
 	virtual ~Time();

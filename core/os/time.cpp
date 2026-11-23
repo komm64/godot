@@ -391,6 +391,9 @@ uint64_t Time::get_ticks_usec() const {
 }
 
 uint64_t Time::_script_get_ticks_usec() const {
+	if (snapshot_ticks_held) {
+		return uint64_t(MAX(int64_t(0), snapshot_held_ticks_usec));
+	}
 	const Engine *engine = Engine::get_singleton();
 	const int64_t fps = engine->snapshot_virtual_clock_fps;
 	if (fps > 0) {
@@ -411,6 +414,24 @@ void Time::snapshot_set_script_ticks_usec(int64_t p_ticks_usec) {
 	} else {
 		snapshot_ticks_offset_usec = p_ticks_usec - int64_t(OS::get_singleton()->get_ticks_usec());
 	}
+	snapshot_held_ticks_usec = p_ticks_usec;
+}
+
+void Time::snapshot_set_ticks_held(bool p_held) {
+	if (p_held == snapshot_ticks_held) {
+		return;
+	}
+	if (p_held) {
+		snapshot_held_ticks_usec = int64_t(_script_get_ticks_usec());
+		snapshot_ticks_held = true;
+	} else {
+		snapshot_ticks_held = false;
+		snapshot_set_script_ticks_usec(snapshot_held_ticks_usec);
+	}
+}
+
+bool Time::snapshot_is_ticks_held() const {
+	return snapshot_ticks_held;
 }
 
 uint64_t Time::_script_get_ticks_msec() const {
@@ -445,6 +466,8 @@ void Time::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_ticks_msec"), &Time::_script_get_ticks_msec);
 	ClassDB::bind_method(D_METHOD("get_ticks_usec"), &Time::_script_get_ticks_usec);
 	ClassDB::bind_method(D_METHOD("snapshot_get_real_ticks_usec"), &Time::snapshot_get_real_ticks_usec);
+	ClassDB::bind_method(D_METHOD("snapshot_set_ticks_held", "held"), &Time::snapshot_set_ticks_held);
+	ClassDB::bind_method(D_METHOD("snapshot_is_ticks_held"), &Time::snapshot_is_ticks_held);
 
 	BIND_ENUM_CONSTANT(MONTH_JANUARY);
 	BIND_ENUM_CONSTANT(MONTH_FEBRUARY);
