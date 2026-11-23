@@ -77,15 +77,17 @@ public:
 	uint64_t get_ticks_msec() const;
 	uint64_t get_ticks_usec() const;
 
-	// komm64: scripts see the ticks plus this offset, so a loaded save's
-	// clock goes on from where it was. Engine code reads the real ticks.
+	// komm64: scripts see the ticks plus an offset, so a loaded save's clock
+	// goes on from where it was. Engine code reads the real ticks. Under
+	// --fixed-fps the ticks are a virtual clock, frames / fps, and the offset
+	// is kept in frames, so a load at any frame count rounds the same way.
 	int64_t snapshot_ticks_offset_usec = 0;
+	int64_t snapshot_ticks_offset_frames = 0;
 	uint64_t _script_get_ticks_msec() const;
 	uint64_t _script_get_ticks_usec() const;
 	uint64_t snapshot_get_real_ticks_usec() const;
-	// The ticks scripts see before the offset: real ticks, or under
-	// --fixed-fps the virtual clock (Engine::get_script_process_frames() / fps).
-	int64_t snapshot_script_ticks_base_usec() const;
+	// Makes the script ticks read `p_ticks_usec` now (a save's clock).
+	void snapshot_set_script_ticks_usec(int64_t p_ticks_usec);
 
 	Time();
 	virtual ~Time();
