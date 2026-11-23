@@ -1954,7 +1954,7 @@ double Engine::get_time_scale() {
 }
 
 int Engine::get_frames_drawn() {
-	return int(MAX(int64_t(0), int64_t(::Engine::get_singleton()->get_frames_drawn()) + snapshot_drawn_offset));
+	return int(MAX(int64_t(0), int64_t(::Engine::get_singleton()->get_script_frames_drawn()) + snapshot_drawn_offset));
 }
 
 MainLoop *Engine::get_main_loop() const {
@@ -2134,7 +2134,7 @@ void Engine::snapshot_set_clock(const Dictionary &p_clock) {
 		snapshot_physics_offset = int64_t(p_clock["physics_frames"]) - int64_t(::Engine::get_singleton()->get_script_physics_frames());
 	}
 	if (p_clock.has("frames_drawn")) {
-		snapshot_drawn_offset = int64_t(p_clock["frames_drawn"]) - int64_t(::Engine::get_singleton()->get_frames_drawn());
+		snapshot_drawn_offset = int64_t(p_clock["frames_drawn"]) - int64_t(::Engine::get_singleton()->get_script_frames_drawn());
 	}
 	// Where the next physics tick falls between frames: as at the save.
 	const Dictionary phase = p_clock.get("physics_phase", Dictionary());
