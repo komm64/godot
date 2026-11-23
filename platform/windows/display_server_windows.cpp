@@ -8522,11 +8522,6 @@ DisplayServerWindows::~DisplayServerWindows() {
 		native_menu = nullptr;
 	}
 
-#ifdef GLES3_ENABLED
-	// destroy windows .. NYI?
-	// FIXME wglDeleteContext is never called
-#endif
-
 	if (windows.has(DisplayServerEnums::MAIN_WINDOW_ID)) {
 #ifdef RD_ENABLED
 		if (rendering_device) {
@@ -8535,6 +8530,18 @@ DisplayServerWindows::~DisplayServerWindows() {
 
 		if (rendering_context) {
 			rendering_context->window_destroy(DisplayServerEnums::MAIN_WINDOW_ID);
+		}
+#endif
+#ifdef GLES3_ENABLED
+		// komm64: as delete_sub_window() does, the GL managers let go of the
+		// window before it is destroyed; their destructors delete the contexts.
+#ifdef ANGLE_ENABLED
+		if (gl_manager_angle) {
+			gl_manager_angle->window_destroy(DisplayServerEnums::MAIN_WINDOW_ID);
+		}
+#endif
+		if (gl_manager_native) {
+			gl_manager_native->window_destroy(DisplayServerEnums::MAIN_WINDOW_ID);
 		}
 #endif
 		_destroy_window(DisplayServerEnums::MAIN_WINDOW_ID);
