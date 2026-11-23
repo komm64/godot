@@ -55,7 +55,10 @@ bool RandomPCG::has_fixed_seed() {
 }
 
 uint64_t RandomPCG::get_fixed_seed_stream_state() {
-	return fixed_seed_stream.state;
+	fixed_seed_lock.lock();
+	const uint64_t state = fixed_seed_stream.state;
+	fixed_seed_lock.unlock();
+	return state;
 }
 
 void RandomPCG::set_fixed_seed_stream_state(uint64_t p_state) {

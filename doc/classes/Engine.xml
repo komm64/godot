@@ -357,6 +357,7 @@
 			<return type="int" />
 			<description>
 				Returns the state of the stream that [code]randomize()[/code] calls take their seeds from when the engine was started with [code]--random-seed[/code]. Pass it to [method snapshot_set_seed_stream_state] after loading a save, so random number generators created afterwards get the same seeds.
+				[b]Note:[/b] seeds are taken in call order, so [code]randomize()[/code] calls on other threads (for example a [RandomNumberGenerator] created during threaded loading) can take them in a different order between launches.
 			</description>
 		</method>
 		<method name="snapshot_is_plain_leaf" qualifiers="const">
