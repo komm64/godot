@@ -114,6 +114,7 @@ void Engine::increment_frames_drawn() {
 	frame_server_synced = false;
 
 	frames_drawn++;
+	snapshot_frozen_frames_drawn += snapshot_clock_frozen ? 1 : 0;
 }
 
 uint64_t Engine::get_frames_drawn() {
