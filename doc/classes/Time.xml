@@ -190,6 +190,19 @@
 				Returns the microseconds since the engine started, never shifted by [method Engine.snapshot_set_clock]. [method get_ticks_usec] is the game's clock, which a loaded save sets back; code that runs beside the game (tools, transports, profilers) measures intervals with this one.
 			</description>
 		</method>
+		<method name="snapshot_is_ticks_held" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while [method snapshot_set_ticks_held] holds the game's clock.
+			</description>
+		</method>
+		<method name="snapshot_set_ticks_held">
+			<return type="void" />
+			<param index="0" name="held" type="bool" />
+			<description>
+				While [param held] is [code]true[/code], [method get_ticks_msec] and [method get_ticks_usec] stand still; when it is set back to [code]false[/code], they go on from where they stood. Code that runs outside game time (a save's or a load's handlers) holds them, so the time it takes never shows and the clock never runs back. [method Engine.snapshot_set_clock] while held moves where they stand.
+			</description>
+		</method>
 	</methods>
 	<constants>
 		<constant name="MONTH_JANUARY" value="1" enum="Month">
