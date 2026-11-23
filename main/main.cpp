@@ -287,6 +287,27 @@ static double fixed_tick_rate = 0.0;
 static uint64_t fixed_tick_origin = 0;
 static uint64_t fixed_ticks_run = 0;
 static MovieWriter *movie_writer = nullptr;
+// komm64: with --fixed-fps and --audio-driver Dummy (outside Movie Maker), the
+// dummy driver runs without its real-time thread and Main mixes one frame of
+// audio per process frame, so playback positions and `finished` signals follow
+// frames like the virtual clock. Frames hidden by a frozen script clock mix
+// nothing.
+static bool frame_audio = false;
+static uint64_t frame_audio_frames = 0;
+static LocalVector<int32_t> frame_audio_buffer;
+
+static void _mix_frame_audio() {
+	if (!frame_audio || Engine::get_singleton()->snapshot_clock_frozen) {
+		return;
+	}
+	AudioDriverDummy *dummy = AudioDriverDummy::get_dummy_singleton();
+	const uint64_t rate = uint64_t(dummy->get_mix_rate());
+	// Exact over time even when the rate is not a multiple of the fps.
+	const int todo = int((frame_audio_frames + 1) * rate / uint64_t(fixed_fps) - frame_audio_frames * rate / uint64_t(fixed_fps));
+	frame_audio_frames++;
+	frame_audio_buffer.resize(uint32_t(todo) * dummy->get_channels());
+	dummy->mix_audio(todo, frame_audio_buffer.ptr());
+}
 static bool disable_vsync = false;
 static bool print_fps = false;
 #ifdef TOOLS_ENABLED
@@ -686,7 +707,7 @@ void Main::print_help(const char *p_binary) {
 	print_help_option("--disable-vsync", "Forces disabling of vertical synchronization, even if enabled in the project settings. Does not override driver-level V-Sync enforcement.\n");
 	print_help_option("--disable-render-loop", "Disable render loop so rendering only occurs when called explicitly from script.\n");
 	print_help_option("--disable-crash-handler", "Disable crash handler when supported by the platform code.\n");
-	print_help_option("--fixed-fps <fps>", "Force a fixed number of frames per second. This setting disables real-time synchronization.\n");
+	print_help_option("--fixed-fps <fps>", "Force a fixed number of frames per second. This setting disables real-time synchronization. With --audio-driver Dummy, audio is also mixed per frame (silent).\n");
 	print_help_option("--random-seed <seed>", "Make random numbers repeat across launches: every randomize() (the startup one, the game's own, each RandomNumberGenerator) takes its seed from a stream started by <seed>.\n");
 	print_help_option("--delta-smoothing <enable>", "Enable or disable frame delta smoothing [\"enable\", \"disable\"].\n");
 	print_help_option("--print-fps", "Print the frames per second to the stdout.\n");
@@ -2848,6 +2869,10 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		// Always use dummy driver for audio driver (which is last), also in no threaded mode.
 		audio_driver_idx = AudioDriverManager::get_driver_count() - 1;
 		AudioDriverDummy::get_dummy_singleton()->set_use_threads(false);
+	} else if (fixed_fps > 0 && audio_driver_idx == AudioDriverManager::get_driver_count() - 1) {
+		// komm64: --fixed-fps with the Dummy driver mixes audio per frame.
+		AudioDriverDummy::get_dummy_singleton()->set_use_threads(false);
+		frame_audio = true;
 	}
 
 	{
@@ -5151,6 +5176,7 @@ bool Main::iteration() {
 			exit = true;
 		}
 		message_queue->flush();
+		_mix_frame_audio();
 
 #ifndef NAVIGATION_2D_DISABLED
 		GodotProfileZoneGrouped(_profile_zone, "process 2D navigation");
