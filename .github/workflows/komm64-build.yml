@@ -46,9 +46,11 @@ permissions:
 env:
   # /d1trimfile strips the checkout path from __FILE__ (error macros), so
   # shipped binaries do not carry build-machine paths (#54).
+  # debug_symbols: MSVC writes the symbols to a separate .pdb, uploaded as its
+  # own artifact (not released) so crash dumps from these builds can be read.
   SCONS_FLAGS: >-
     module_text_server_fb_enabled=yes
-    debug_symbols=no
+    debug_symbols=yes
     "ccflags=/d1trimfile:${GITHUB_WORKSPACE}\\"
     "angle_libs=${{ github.workspace }}/"
     "accesskit_sdk_path=${{ github.workspace }}/accesskit-c-0.21.2/"
@@ -178,6 +180,13 @@ jobs:
         with:
           name: komm64-godot-windows-${{ matrix.target }}
           path: out/*
+
+      - name: Upload symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: komm64-symbols-windows-${{ matrix.target }}
+          path: bin/*.pdb
+          retention-days: 90
 
       # Headless smoke gate for komm64 fork-specific render_modes / features.
       # Catches the class of bug fixed in #26 — a parser whitelist out of sync
