@@ -462,7 +462,9 @@ Error GLManagerNative_Windows::window_create(DisplayServerEnums::WindowID p_wind
 void GLManagerNative_Windows::window_destroy(DisplayServerEnums::WindowID p_window_id) {
 	GLWindow &win = get_window(p_window_id);
 	if (_current_window == &win) {
-		_current_window = nullptr;
+		// komm64: detach the context before the window and its DC go away,
+		// so it is not left current on a destroyed DC.
+		release_current();
 	}
 	_windows.erase(p_window_id);
 }
@@ -549,6 +551,16 @@ GLManagerNative_Windows::GLManagerNative_Windows() {
 
 GLManagerNative_Windows::~GLManagerNative_Windows() {
 	release_current();
+	// komm64: delete the contexts. A context left alive at exit is torn down
+	// by the driver while it unloads, which crashes some drivers (Intel ICD).
+	if (gd_wglDeleteContext) {
+		for (GLDisplay &display : _displays) {
+			if (display.hRC) {
+				gd_wglDeleteContext(display.hRC);
+				display.hRC = nullptr;
+			}
+		}
+	}
 }
 
 #endif // WINDOWS_ENABLED && GLES3_ENABLED
