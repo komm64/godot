@@ -385,12 +385,15 @@ static Variant get_documentation_default_value(const StringName &p_class_name, c
 		// Cannot get default value of classes that can't be instantiated.
 
 		// Let's see if the abstract class has an explicitly set default.
-		const HashMap<StringName, Variant> *default_properties = ClassDB::default_values.getptr(p_class_name);
-		if (default_properties) {
-			const Variant *property = default_properties->getptr(p_property_name);
-			if (property) {
-				r_default_value_valid = true;
-				return *property;
+		{
+			MutexLock lock(ClassDB::default_values_mutex);
+			const HashMap<StringName, Variant> *default_properties = ClassDB::default_values.getptr(p_class_name);
+			if (default_properties) {
+				const Variant *property = default_properties->getptr(p_property_name);
+				if (property) {
+					r_default_value_valid = true;
+					return *property;
+				}
 			}
 		}
 

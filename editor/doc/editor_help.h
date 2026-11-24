@@ -187,6 +187,9 @@ class EditorHelp : public VBoxContainer {
 	void _toggle_files_pressed();
 
 	inline static int doc_generation_count = 0;
+	// komm64: set by cleanup_doc. Work the doc threads deferred to the main thread can
+	// still run after it (Main::cleanup flushes the queue again); it must do nothing then.
+	inline static bool doc_cleaned_up = false;
 	inline static String doc_version_hash;
 	inline static Thread worker_thread;
 	inline static Thread loader_thread; // Only load scripts here to avoid deadlocking with main thread.

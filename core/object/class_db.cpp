@@ -1480,6 +1480,7 @@ void ClassDB::add_property(const StringName &p_class, const PropertyInfo &p_pinf
 }
 
 void ClassDB::set_property_default_value(const StringName &p_class, const StringName &p_name, const Variant &p_default) {
+	MutexLock lock(default_values_mutex);
 	if (!default_values.has(p_class)) {
 		default_values[p_class] = HashMap<StringName, Variant>();
 	}
@@ -2168,12 +2169,20 @@ void ClassDB::get_extensions_for_type(const StringName &p_class, List<String> *p
 
 HashMap<StringName, HashMap<StringName, Variant>> ClassDB::default_values;
 HashSet<StringName> ClassDB::default_values_cached;
+Mutex ClassDB::default_values_mutex;
 
 Variant ClassDB::class_get_default_property_value(const StringName &p_class, const StringName &p_property, bool *r_valid) {
-	if (!default_values_cached.has(p_class)) {
-		if (!default_values.has(p_class)) {
-			default_values[p_class] = HashMap<StringName, Variant>();
-		}
+	// komm64: the cache is filled on first use, also from the editor's threaded
+	// reimport. The lock covers the tables only: building the probe object can
+	// wait on the main thread (a class may call the RenderingServer), so it is
+	// built unlocked. Two threads may probe the same class; the first one wins.
+	bool cached;
+	{
+		MutexLock lock(default_values_mutex);
+		cached = default_values_cached.has(p_class);
+	}
+	if (!cached) {
+		HashMap<StringName, Variant> probed;
 
 		Object *c = nullptr;
 		bool cleanup_c = false;
@@ -2191,9 +2200,8 @@ Variant ClassDB::class_get_default_property_value(const StringName &p_class, con
 			c->get_property_list(&plist);
 			for (const PropertyInfo &E : plist) {
 				if (E.usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR)) {
-					if (!default_values[p_class].has(E.name)) {
-						Variant v = c->get(E.name);
-						default_values[p_class][E.name] = v;
+					if (!probed.has(E.name)) {
+						probed[E.name] = c->get(E.name);
 					}
 				}
 			}
@@ -2203,28 +2211,31 @@ Variant ClassDB::class_get_default_property_value(const StringName &p_class, con
 			}
 		}
 
-		default_values_cached.insert(p_class);
-	}
-
-	if (!default_values.has(p_class)) {
-		if (r_valid != nullptr) {
-			*r_valid = false;
+		MutexLock lock(default_values_mutex);
+		if (!default_values_cached.has(p_class)) {
+			HashMap<StringName, Variant> &values = default_values[p_class];
+			for (const KeyValue<StringName, Variant> &E : probed) {
+				if (!values.has(E.key)) { // Defaults set explicitly win.
+					values[E.key] = E.value;
+				}
+			}
+			default_values_cached.insert(p_class);
 		}
-		return Variant();
 	}
 
-	if (!default_values[p_class].has(p_property)) {
+	Variant var;
+	{
+		MutexLock lock(default_values_mutex);
+		const HashMap<StringName, Variant> *values = default_values.getptr(p_class);
+		const Variant *found = values ? values->getptr(p_property) : nullptr;
 		if (r_valid != nullptr) {
-			*r_valid = false;
+			*r_valid = found != nullptr;
 		}
-		return Variant();
+		if (!found) {
+			return Variant();
+		}
+		var = *found;
 	}
-
-	if (r_valid != nullptr) {
-		*r_valid = true;
-	}
-
-	Variant var = default_values[p_class][p_property];
 
 #ifdef DEBUG_ENABLED
 	// Some properties may have an instantiated Object as default value,
@@ -2300,8 +2311,11 @@ void ClassDB::unregister_extension_class(const StringName &p_class, bool p_free_
 		}
 	}
 	classes.erase(p_class);
-	default_values_cached.erase(p_class);
-	default_values.erase(p_class);
+	{
+		MutexLock lock(default_values_mutex);
+		default_values_cached.erase(p_class);
+		default_values.erase(p_class);
+	}
 #ifdef TOOLS_ENABLED
 	placeholder_extensions.erase(p_class);
 #endif
@@ -2336,6 +2350,7 @@ Object *ClassDB::_instantiate_allow_unexposed(const StringName &p_class) {
 }
 
 void ClassDB::cleanup_defaults() {
+	MutexLock lock(default_values_mutex);
 	default_values.clear();
 	default_values_cached.clear();
 }
