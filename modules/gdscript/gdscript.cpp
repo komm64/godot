@@ -57,6 +57,7 @@
 #include "core/io/file_access.h"
 #include "scene/resources/packed_scene.h"
 #include "scene/scene_string_names.h"
+#include "core/variant/callable_bind.h"
 
 #ifdef TOOLS_ENABLED
 #include "core/extension/gdextension_manager.h"
@@ -1209,14 +1210,37 @@ int64_t GDScript::_snapshot_code_hash(const GDScriptFunction *p_func) {
 
 // Where a lambda is written (as _snapshot_locate()) and what it captured, or
 // {} for anything but a GDScript lambda. snapshot_make_lambda() makes it again.
+// A lambda wrapped by bind()/unbind() is described too: "wraps" lists the
+// wrappers from the innermost out, each {"bind": Array} or {"unbind": int}.
 Dictionary GDScript::snapshot_get_lambda(const Callable &p_callable) {
+	Callable inner = p_callable;
+	Array wraps;
+	while (inner.is_custom()) {
+		if (CallableCustomBind *b = dynamic_cast<CallableCustomBind *>(inner.get_custom())) {
+			Array binds;
+			for (const Variant &v : b->get_binds()) {
+				binds.push_back(v);
+			}
+			Dictionary w;
+			w["bind"] = binds;
+			wraps.push_front(w);
+			inner = b->get_callable();
+		} else if (CallableCustomUnbind *u = dynamic_cast<CallableCustomUnbind *>(inner.get_custom())) {
+			Dictionary w;
+			w["unbind"] = u->get_unbinds();
+			wraps.push_front(w);
+			inner = u->get_callable();
+		} else {
+			break;
+		}
+	}
 	GDScriptFunction *func = nullptr;
 	Vector<Variant> captures;
 	Variant self;
-	if (const GDScriptLambdaCallable *l = GDScriptLambdaCallable::from_callable(p_callable)) {
+	if (const GDScriptLambdaCallable *l = GDScriptLambdaCallable::from_callable(inner)) {
 		func = l->get_function();
 		captures = l->get_captures();
-	} else if (const GDScriptLambdaSelfCallable *ls = GDScriptLambdaSelfCallable::from_callable(p_callable)) {
+	} else if (const GDScriptLambdaSelfCallable *ls = GDScriptLambdaSelfCallable::from_callable(inner)) {
 		func = ls->get_function();
 		captures = ls->get_captures();
 		self = ObjectDB::get_instance(ls->get_object());
@@ -1231,13 +1255,35 @@ Dictionary GDScript::snapshot_get_lambda(const Callable &p_callable) {
 	}
 	out["captures"] = caps;
 	out["self"] = self;
+	if (!wraps.is_empty()) {
+		out["wraps"] = wraps;
+	}
 	return out;
 }
 
 // The lambda snapshot_get_lambda() described, with its captures and self, or
 // an invalid Callable when the script no longer has a lambda there that takes
 // as many captures.
+
+
 Callable GDScript::snapshot_make_lambda(const Dictionary &p_info) {
+	Callable c = _snapshot_make_bare_lambda(p_info);
+	if (!c.is_valid()) {
+		return c;
+	}
+	const Array wraps = p_info.get("wraps", Array());
+	for (int i = 0; i < wraps.size(); i++) {
+		const Dictionary w = wraps[i];
+		if (w.has("bind")) {
+			c = c.bindv(w["bind"]);
+		} else {
+			c = c.unbind(w["unbind"]);
+		}
+	}
+	return c;
+}
+
+Callable GDScript::_snapshot_make_bare_lambda(const Dictionary &p_info) {
 	GDScriptFunction *func = _snapshot_resolve(p_info);
 	if (func == nullptr || PackedInt32Array(p_info.get("index", PackedInt32Array())).is_empty()) {
 		return Callable();
