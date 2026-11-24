@@ -343,7 +343,10 @@ Dictionary AudioStreamPlayerInternal::snapshot_get_state(const Ref<AudioStreamPl
 		AudioStreamPlaybackResampled *resampled = Object::cast_to<AudioStreamPlaybackResampled>(stream_playbacks[stream_playbacks.size() - 1].ptr());
 		double start = 0;
 		uint64_t mix_offset = 0;
-		if (resampled != nullptr && AudioServer::get_singleton()->is_playback_active(stream_playbacks[stream_playbacks.size() - 1]) && resampled->snapshot_get_buffer(start, mix_offset)) {
+		// A paused one (stream_paused, or the tree paused) keeps its buffer too.
+		const Ref<AudioStreamPlayback> &last = stream_playbacks[stream_playbacks.size() - 1];
+		const bool in_mix = AudioServer::get_singleton()->is_playback_active(last) || AudioServer::get_singleton()->is_playback_paused(last);
+		if (resampled != nullptr && in_mix && resampled->snapshot_get_buffer(start, mix_offset)) {
 			state["position"] = start;
 			state["mix_offset"] = int64_t(mix_offset);
 		}
