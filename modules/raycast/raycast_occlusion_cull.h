@@ -156,7 +156,7 @@ private:
 	static const int TILE_RAYS = TILE_SIZE * TILE_SIZE;
 
 	RTCDevice ebr_device = nullptr;
-	RID_PtrOwner<Occluder> occluder_owner;
+	RID_PtrOwner<Occluder, true> occluder_owner;
 	HashMap<RID, Scenario> scenarios;
 	HashMap<RID, RaycastHZBuffer> buffers;
 	RSE::ViewportOcclusionCullingBuildQuality build_quality;
