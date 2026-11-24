@@ -46,6 +46,7 @@ void BitMap::create(const Size2i &p_size) {
 	height = p_size.height;
 
 	memset(bitmask.ptrw(), 0, bitmask.size());
+	snapshot_mark_modified();
 }
 
 void BitMap::create_from_image_alpha(const Ref<Image> &p_image, float p_threshold) {
@@ -89,6 +90,7 @@ void BitMap::set_bit_rect(const Rect2i &p_rect, bool p_value) {
 			data[bbyte] = b;
 		}
 	}
+	snapshot_mark_modified();
 }
 
 int BitMap::get_true_bit_count() const {
@@ -133,6 +135,7 @@ void BitMap::set_bit(int p_x, int p_y, bool p_value) {
 	}
 
 	bitmask.write[bbyte] = b;
+	snapshot_mark_modified();
 }
 
 bool BitMap::get_bitv(const Point2i &p_pos) const {
@@ -665,6 +668,7 @@ void BitMap::resize(const Size2i &p_new_size) {
 	width = new_bitmap->width;
 	height = new_bitmap->height;
 	bitmask = new_bitmap->bitmask;
+	snapshot_mark_modified();
 }
 
 Ref<Image> BitMap::convert_to_image() const {

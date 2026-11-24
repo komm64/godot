@@ -95,6 +95,7 @@ void AnimatedTexture::set_frames(int p_frames) {
 	RWLockWrite r(rw_lock);
 
 	frame_count = p_frames;
+	snapshot_mark_modified();
 }
 
 int AnimatedTexture::get_frames() const {
@@ -108,6 +109,7 @@ void AnimatedTexture::set_current_frame(int p_frame) {
 
 	current_frame = p_frame;
 	time = 0;
+	snapshot_mark_modified();
 }
 
 int AnimatedTexture::get_current_frame() const {
@@ -117,6 +119,7 @@ int AnimatedTexture::get_current_frame() const {
 void AnimatedTexture::set_pause(bool p_pause) {
 	RWLockWrite r(rw_lock);
 	pause = p_pause;
+	snapshot_mark_modified();
 }
 
 bool AnimatedTexture::get_pause() const {
@@ -126,6 +129,7 @@ bool AnimatedTexture::get_pause() const {
 void AnimatedTexture::set_one_shot(bool p_one_shot) {
 	RWLockWrite r(rw_lock);
 	one_shot = p_one_shot;
+	snapshot_mark_modified();
 }
 
 bool AnimatedTexture::get_one_shot() const {
@@ -139,6 +143,7 @@ void AnimatedTexture::set_frame_texture(int p_frame, const Ref<Texture2D> &p_tex
 	RWLockWrite w(rw_lock);
 
 	frames[p_frame].texture = p_texture;
+	snapshot_mark_modified();
 }
 
 Ref<Texture2D> AnimatedTexture::get_frame_texture(int p_frame) const {
@@ -155,6 +160,7 @@ void AnimatedTexture::set_frame_duration(int p_frame, float p_duration) {
 	RWLockWrite r(rw_lock);
 
 	frames[p_frame].duration = p_duration;
+	snapshot_mark_modified();
 }
 
 float AnimatedTexture::get_frame_duration(int p_frame) const {
@@ -171,6 +177,7 @@ void AnimatedTexture::set_speed_scale(float p_scale) {
 	RWLockWrite r(rw_lock);
 
 	speed_scale = p_scale;
+	snapshot_mark_modified();
 }
 
 float AnimatedTexture::get_speed_scale() const {

@@ -48,10 +48,12 @@ void ImageTexture::reload_from_file() {
 
 	if (ImageLoader::load_image(path, img) == OK) {
 		set_image(img);
+		snapshot_clear_modified();
 	} else {
 		Resource::reload_from_file();
 		notify_property_list_changed();
 		emit_changed();
+		snapshot_clear_modified();
 	}
 }
 
@@ -218,6 +220,7 @@ void ImageTexture::set_size_override(const Size2i &p_size) {
 		h = s.y;
 	}
 	RenderingServer::get_singleton()->texture_set_size_override(texture, w, h);
+	snapshot_mark_modified();
 }
 
 void ImageTexture::set_path(const String &p_path, bool p_take_over) {
@@ -335,6 +338,7 @@ Error ImageTextureLayered::create_from_images(Vector<Ref<Image>> p_images) {
 	height = new_height;
 	layers = new_layers;
 	mipmaps = new_mipmaps;
+	snapshot_mark_modified();
 	return OK;
 }
 
@@ -346,6 +350,7 @@ void ImageTextureLayered::update_layer(const Ref<Image> &p_image, int p_layer) {
 	ERR_FAIL_COND_MSG(p_image->has_mipmaps() != mipmaps, "Image mipmap configuration must match texture's image mipmap configuration.");
 	ERR_FAIL_INDEX_MSG(p_layer, layers, "Layer index is out of bounds.");
 	RS::get_singleton()->texture_2d_update(texture, p_image, p_layer);
+	snapshot_mark_modified();
 }
 
 Ref<Image> ImageTextureLayered::get_layer_data(int p_layer) const {
@@ -438,6 +443,7 @@ Error ImageTexture3D::create(Image::Format p_format, int p_width, int p_height, 
 	height = p_height;
 	depth = p_depth;
 	mipmaps = p_mipmaps;
+	snapshot_mark_modified();
 
 	return OK;
 }
@@ -445,6 +451,7 @@ Error ImageTexture3D::create(Image::Format p_format, int p_width, int p_height, 
 void ImageTexture3D::update(const Vector<Ref<Image>> &p_data) {
 	ERR_FAIL_COND(!texture.is_valid());
 	RenderingServer::get_singleton()->texture_3d_update(texture, p_data);
+	snapshot_mark_modified();
 }
 
 Vector<Ref<Image>> ImageTexture3D::get_data() const {

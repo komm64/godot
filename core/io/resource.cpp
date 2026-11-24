@@ -48,6 +48,7 @@ void Resource::_add_resource_base_extension_to_classdb(const String &p_extension
 }
 
 void Resource::emit_changed() {
+	_snapshot_modified = true;
 	if (emit_changed_state != EMIT_CHANGED_UNBLOCKED) {
 		emit_changed_state = EMIT_CHANGED_BLOCKED_PENDING_EMIT;
 		return;
@@ -274,6 +275,7 @@ void Resource::reload_from_file() {
 	}
 
 	copy_from(s);
+	snapshot_clear_modified();
 }
 
 Variant Resource::_duplicate_recursive(const Variant &p_variant, const DuplicateParams &p_params, uint32_t p_usage) const {
@@ -428,6 +430,7 @@ Ref<Resource> Resource::_duplicate(const DuplicateParams &p_params) const {
 		AFTER_USER_CODE
 	}
 
+	r->_snapshot_modified = _snapshot_modified;
 	return r;
 
 #undef BEFORE_USER_CODE
@@ -524,6 +527,9 @@ void Resource::snapshot_set_read_from(const String &p_path, const StringName &p_
 	if (path.begins_with("res://")) {
 		snapshot_origin = path;
 		snapshot_origin_method = p_method;
+		if (path_cache.is_empty()) {
+			_snapshot_modified = false;
+		}
 	} else {
 		snapshot_origin = String();
 		snapshot_origin_method = StringName();
@@ -774,6 +780,7 @@ void Resource::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("duplicate", "deep"), &Resource::duplicate, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("snapshot_get_origin"), &Resource::snapshot_get_origin);
 	ClassDB::bind_method(D_METHOD("snapshot_get_origin_method"), &Resource::snapshot_get_origin_method);
+	ClassDB::bind_method(D_METHOD("snapshot_is_modified"), &Resource::snapshot_is_modified);
 	ClassDB::bind_method(D_METHOD("duplicate_deep", "deep_subresources_mode"), &Resource::_duplicate_deep_bind, DEFVAL(RESOURCE_DEEP_DUPLICATE_INTERNAL));
 
 	// TODO: Once we can break compatibility, change the binding to "copy_from". For now, we have to avoid clashing with the method from `Image`.

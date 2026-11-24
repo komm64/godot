@@ -52,6 +52,7 @@ bool MeshTexture::has_alpha() const {
 
 void MeshTexture::set_mesh(const Ref<Mesh> &p_mesh) {
 	mesh = p_mesh;
+	snapshot_mark_modified();
 }
 
 Ref<Mesh> MeshTexture::get_mesh() const {
@@ -60,6 +61,7 @@ Ref<Mesh> MeshTexture::get_mesh() const {
 
 void MeshTexture::set_image_size(const Size2 &p_size) {
 	size = p_size;
+	snapshot_mark_modified();
 }
 
 Size2 MeshTexture::get_image_size() const {
@@ -68,6 +70,7 @@ Size2 MeshTexture::get_image_size() const {
 
 void MeshTexture::set_base_texture(const Ref<Texture2D> &p_texture) {
 	base_texture = p_texture;
+	snapshot_mark_modified();
 }
 
 Ref<Texture2D> MeshTexture::get_base_texture() const {

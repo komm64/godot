@@ -238,6 +238,7 @@ void AudioStreamMP3::set_data(const Vector<uint8_t> &p_data) {
 
 	data = p_data;
 	data_len = src_data_len;
+	snapshot_mark_modified();
 }
 
 Vector<uint8_t> AudioStreamMP3::get_data() const {
@@ -246,6 +247,7 @@ Vector<uint8_t> AudioStreamMP3::get_data() const {
 
 void AudioStreamMP3::set_loop(bool p_enable) {
 	loop = p_enable;
+	snapshot_mark_modified();
 }
 
 bool AudioStreamMP3::has_loop() const {
@@ -254,6 +256,7 @@ bool AudioStreamMP3::has_loop() const {
 
 void AudioStreamMP3::set_loop_offset(double p_seconds) {
 	loop_offset = p_seconds;
+	snapshot_mark_modified();
 }
 
 double AudioStreamMP3::get_loop_offset() const {
@@ -325,7 +328,11 @@ Ref<AudioStreamMP3> AudioStreamMP3::load_from_buffer(const Vector<uint8_t> &p_st
 Ref<AudioStreamMP3> AudioStreamMP3::load_from_file(const String &p_path) {
 	const Vector<uint8_t> stream_data = FileAccess::get_file_as_bytes(p_path);
 	ERR_FAIL_COND_V_MSG(stream_data.is_empty(), Ref<AudioStreamMP3>(), vformat("Cannot open file '%s'.", p_path));
-	return load_from_buffer(stream_data);
+	Ref<AudioStreamMP3> stream = load_from_buffer(stream_data);
+	if (stream.is_valid()) {
+		stream->snapshot_clear_modified();
+	}
+	return stream;
 }
 
 void AudioStreamMP3::_bind_methods() {

@@ -142,6 +142,7 @@ void PortableCompressedTexture2D::_set_data(const Vector<uint8_t> &p_data) {
 	} else {
 		compressed_buffer.clear();
 	}
+	snapshot_mark_modified();
 }
 
 PortableCompressedTexture2D::CompressionMode PortableCompressedTexture2D::get_compression_mode() const {
@@ -327,6 +328,7 @@ bool PortableCompressedTexture2D::is_pixel_opaque(int p_x, int p_y) const {
 void PortableCompressedTexture2D::set_size_override(const Size2 &p_size) {
 	size_override = p_size;
 	RenderingServer::get_singleton()->texture_set_size_override(texture, size_override.width, size_override.height);
+	snapshot_mark_modified();
 }
 
 Size2 PortableCompressedTexture2D::get_size_override() const {
@@ -356,6 +358,7 @@ void PortableCompressedTexture2D::set_keep_compressed_buffer(bool p_keep) {
 	if (!p_keep) {
 		compressed_buffer.clear();
 	}
+	snapshot_mark_modified();
 }
 
 bool PortableCompressedTexture2D::is_keeping_compressed_buffer() const {
@@ -365,6 +368,7 @@ bool PortableCompressedTexture2D::is_keeping_compressed_buffer() const {
 void PortableCompressedTexture2D::set_basisu_compressor_params(int p_uastc_level, float p_rdo_quality_loss) {
 	basisu_params.uastc_level = p_uastc_level;
 	basisu_params.rdo_quality_loss = p_rdo_quality_loss;
+	snapshot_mark_modified();
 }
 
 void PortableCompressedTexture2D::_bind_methods() {

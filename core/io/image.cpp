@@ -1799,6 +1799,7 @@ void Image::rotate_90(ClockDirection p_direction) {
 	if (used_mipmaps) {
 		generate_mipmaps();
 	}
+	snapshot_mark_modified();
 }
 
 void Image::rotate_180() {
@@ -1833,6 +1834,7 @@ void Image::rotate_180() {
 	if (used_mipmaps) {
 		generate_mipmaps();
 	}
+	snapshot_mark_modified();
 }
 
 void Image::flip_y() {
@@ -1863,6 +1865,7 @@ void Image::flip_y() {
 	if (used_mipmaps) {
 		generate_mipmaps();
 	}
+	snapshot_mark_modified();
 }
 
 void Image::flip_x() {
@@ -1893,6 +1896,7 @@ void Image::flip_x() {
 	if (used_mipmaps) {
 		generate_mipmaps();
 	}
+	snapshot_mark_modified();
 }
 
 // Get mipmap size and offset.
@@ -2132,6 +2136,7 @@ void Image::shrink_x2() {
 	width = MAX(width / 2, 1);
 	height = MAX(height / 2, 1);
 	data = new_data;
+	snapshot_mark_modified();
 }
 
 void Image::normalize() {
@@ -2184,6 +2189,7 @@ Error Image::generate_mipmaps(bool p_renormalize) {
 	}
 
 	mipmaps = true;
+	snapshot_mark_modified();
 
 	return OK;
 }
@@ -2353,6 +2359,7 @@ Error Image::generate_mipmap_roughness(RoughnessChannel p_roughness_channel, con
 		}
 	}
 
+	snapshot_mark_modified();
 	return OK;
 }
 
@@ -2371,6 +2378,7 @@ void Image::clear_mipmaps() {
 	data.resize(ofs);
 
 	mipmaps = false;
+	snapshot_mark_modified();
 }
 
 bool Image::is_empty() const {
@@ -2423,6 +2431,7 @@ void Image::initialize_data(int p_width, int p_height, bool p_use_mipmaps, Forma
 	height = p_height;
 	mipmaps = p_use_mipmaps;
 	format = p_format;
+	snapshot_mark_modified();
 }
 
 void Image::initialize_data(int p_width, int p_height, bool p_use_mipmaps, Format p_format, const Vector<uint8_t> &p_data) {
@@ -2461,6 +2470,7 @@ void Image::initialize_data(int p_width, int p_height, bool p_use_mipmaps, Forma
 	data = p_data;
 
 	mipmaps = p_use_mipmaps;
+	snapshot_mark_modified();
 }
 
 void Image::initialize_data(const char **p_xpm) {
@@ -2772,6 +2782,9 @@ Error Image::load(const String &p_path) {
 #endif
 	Error err = ImageLoader::load_image(path, this);
 	snapshot_set_read_from(err == OK ? path : String(), SNAME("load"));
+	if (err == OK && get_path().is_empty()) {
+		snapshot_clear_modified();
+	}
 	return err;
 }
 
@@ -2789,6 +2802,7 @@ Ref<Image> Image::load_from_file(const String &p_path) {
 		ERR_FAIL_V_MSG(Ref<Image>(), vformat("Failed to load image. Error %d", err));
 	}
 	image->snapshot_set_read_from(path, SNAME("load"));
+	image->snapshot_clear_modified();
 	return image;
 }
 
@@ -2929,6 +2943,7 @@ Error Image::decompress() {
 	} else {
 		return ERR_UNAVAILABLE;
 	}
+	snapshot_mark_modified();
 	return OK;
 }
 
@@ -2968,6 +2983,7 @@ Error Image::_compress_from_channels(CompressMode p_mode, UsedChannels p_channel
 
 					// If the image was compressed successfully, we return here. If not, we fall back to the default compression scheme.
 					if (result == OK) {
+						snapshot_mark_modified();
 						return OK;
 					}
 				}
@@ -2978,6 +2994,7 @@ Error Image::_compress_from_channels(CompressMode p_mode, UsedChannels p_channel
 
 					// If the image was compressed successfully, we return here. If not, we fall back to the default compression scheme.
 					if (result == OK) {
+						snapshot_mark_modified();
 						return OK;
 					}
 				}
@@ -3014,6 +3031,7 @@ Error Image::_compress_from_channels(CompressMode p_mode, UsedChannels p_channel
 		} break;
 	}
 
+	snapshot_mark_modified();
 	return OK;
 }
 
@@ -3160,6 +3178,7 @@ void Image::blit_rect(const Ref<Image> &p_src, const Rect2i &p_src_rect, const P
 			memcpy(dst, src, pixel_size * dest_rect.size.x);
 		}
 	}
+	snapshot_mark_modified();
 }
 
 void Image::blit_rect_mask(const Ref<Image> &p_src, const Ref<Image> &p_mask, const Rect2i &p_src_rect, const Point2i &p_dest) {
@@ -3210,6 +3229,7 @@ void Image::blit_rect_mask(const Ref<Image> &p_src, const Ref<Image> &p_mask, co
 			}
 		}
 	}
+	snapshot_mark_modified();
 }
 
 void Image::blend_rect(const Ref<Image> &p_src, const Rect2i &p_src_rect, const Point2i &p_dest) {
@@ -3320,6 +3340,7 @@ void Image::fill(const Color &p_color) {
 	_set_color_at_ofs(dst_data_ptr, 0, p_color);
 
 	_repeat_pixel_over_subsequent_memory(dst_data_ptr, pixel_size, pixel_count);
+	snapshot_mark_modified();
 }
 
 void Image::fill_rect(const Rect2i &p_rect, const Color &p_color) {
@@ -3350,6 +3371,7 @@ void Image::fill_rect(const Rect2i &p_rect, const Color &p_color) {
 			memcpy(rect_first_pixel_ptr + y * width * pixel_size, rect_first_pixel_ptr, r.size.x * pixel_size);
 		}
 	}
+	snapshot_mark_modified();
 }
 
 void Image::_set_data(const Dictionary &p_data) {
@@ -3397,6 +3419,7 @@ void Image::_copy_internals_from(const Image &p_image) {
 	height = p_image.height;
 	mipmaps = p_image.mipmaps;
 	data = p_image.data;
+	snapshot_mark_modified();
 }
 
 _FORCE_INLINE_ Color color_from_rgba4444(uint16_t p_col) {
@@ -3709,6 +3732,7 @@ void Image::set_pixel(int p_x, int p_y, const Color &p_color) {
 
 	uint32_t ofs = p_y * width + p_x;
 	_set_color_at_ofs(data.ptrw(), ofs, p_color);
+	snapshot_mark_modified();
 }
 
 const uint8_t *Image::ptr() const {
@@ -3716,6 +3740,7 @@ const uint8_t *Image::ptr() const {
 }
 
 uint8_t *Image::ptrw() {
+	snapshot_mark_modified();
 	return data.ptrw();
 }
 
@@ -3743,6 +3768,7 @@ void Image::adjust_bcs(float p_brightness, float p_contrast, float p_saturation)
 		c.b = rgb.z;
 		_set_color_at_ofs(w, i, c);
 	}
+	snapshot_mark_modified();
 }
 
 Image::UsedChannels Image::detect_used_channels(CompressSource p_source) const {
@@ -4146,6 +4172,7 @@ void Image::bump_map_to_normal_map(float bump_scale) {
 	}
 	format = FORMAT_RGBA8;
 	data = result_image;
+	snapshot_mark_modified();
 }
 
 bool Image::detect_signed(bool p_include_mips) const {
@@ -4204,6 +4231,7 @@ void Image::srgb_to_linear() {
 			data_ptr[(i * 3) + 2] = srgb2lin[data_ptr[(i * 3) + 2]];
 		}
 	}
+	snapshot_mark_modified();
 }
 
 void Image::linear_to_srgb() {
@@ -4235,6 +4263,7 @@ void Image::linear_to_srgb() {
 			data_ptr[(i * 3) + 2] = lin2srgb[data_ptr[(i * 3) + 2]];
 		}
 	}
+	snapshot_mark_modified();
 }
 
 void Image::premultiply_alpha() {
@@ -4257,6 +4286,7 @@ void Image::premultiply_alpha() {
 			ptr[2] = (uint16_t(ptr[2]) * uint16_t(ptr[3]) + 255U) >> 8;
 		}
 	}
+	snapshot_mark_modified();
 }
 
 void Image::fix_alpha_edges() {
@@ -4323,6 +4353,7 @@ void Image::fix_alpha_edges() {
 			}
 		}
 	}
+	snapshot_mark_modified();
 }
 
 String Image::get_format_name(Format p_format) {
@@ -4522,6 +4553,7 @@ void Image::convert_rg_to_ra_rgba8() {
 		w[i + 1] = 0;
 		w[i + 2] = 0;
 	}
+	snapshot_mark_modified();
 }
 
 void Image::convert_ra_rgba8_to_rg() {
@@ -4535,6 +4567,7 @@ void Image::convert_ra_rgba8_to_rg() {
 		w[i + 2] = 0;
 		w[i + 3] = 255;
 	}
+	snapshot_mark_modified();
 }
 
 void Image::convert_rgba8_to_bgra8() {
@@ -4548,6 +4581,7 @@ void Image::convert_rgba8_to_bgra8() {
 		w[i] = w[i + 2]; // Swap R to B
 		w[i + 2] = r; // Swap B to R
 	}
+	snapshot_mark_modified();
 }
 
 Error Image::_load_from_buffer(const Vector<uint8_t> &p_array, ImageMemLoadFunc p_loader) {
@@ -4667,11 +4701,13 @@ Ref<Resource> Image::_duplicate(const DuplicateParams &p_params) const {
 	Ref<Image> copy;
 	copy.instantiate();
 	copy->_copy_internals_from(*this);
+	copy->_snapshot_modified = _snapshot_modified;
 	return copy;
 }
 
 void Image::set_as_black() {
 	memset(data.ptrw(), 0, data.size());
+	snapshot_mark_modified();
 }
 
 void Image::copy_internals_from(const Ref<Image> &p_image) {
@@ -4681,6 +4717,7 @@ void Image::copy_internals_from(const Ref<Image> &p_image) {
 	height = p_image->height;
 	mipmaps = p_image->mipmaps;
 	data = p_image->data;
+	snapshot_mark_modified();
 }
 
 Dictionary Image::compute_image_metrics(const Ref<Image> p_compared_image, bool p_luma_metric) {

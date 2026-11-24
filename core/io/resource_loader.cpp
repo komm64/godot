@@ -565,6 +565,7 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 		thread_load_mutex.unlock();
 		thread_load_mutex_held = false;
 
+		bool loaded_or_replaced = true;
 		if (!ignoring) {
 			ResourceCache::lock.lock(); // Check and operations must happen atomically.
 			bool pending_unlock = true;
@@ -589,6 +590,8 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 					pending_unlock = false;
 					if (replacing) {
 						old_res->copy_from(load_task.resource);
+					} else {
+						loaded_or_replaced = false;
 					}
 					load_task.resource = old_res;
 				}
@@ -604,6 +607,10 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 
 		if (xl_remapped) {
 			load_task.resource->set_as_translation_remapped(true);
+		}
+
+		if (loaded_or_replaced) {
+			load_task.resource->snapshot_clear_modified();
 		}
 
 #ifdef TOOLS_ENABLED

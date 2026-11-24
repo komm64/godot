@@ -159,6 +159,9 @@ public:
 	Ref<Resource> duplicate(bool p_deep = false) const;
 	String snapshot_get_origin() const { return snapshot_origin; }
 	StringName snapshot_get_origin_method() const { return snapshot_origin_method; }
+	bool snapshot_is_modified() const { return _snapshot_modified; }
+	void snapshot_mark_modified() { _snapshot_modified = true; }
+	void snapshot_clear_modified() { _snapshot_modified = false; }
 	// komm64: called by a method that reads this resource's contents from a file.
 	void snapshot_set_read_from(const String &p_path, const StringName &p_method);
 	Ref<Resource> duplicate_deep(ResourceDeepDuplicateMode p_deep_subresources_mode = RESOURCE_DEEP_DUPLICATE_INTERNAL) const;

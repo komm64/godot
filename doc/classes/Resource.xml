@@ -162,6 +162,12 @@
 				komm64: The method that read this resource's contents from [method snapshot_get_origin], such as [code]load_dynamic_font[/code] for a [FontFile] or [code]load[/code] for an [Image]; empty if the resource is a copy of that file. Only a file under [code]res://[/code] is kept: one elsewhere can change or go away, so a resource read from it has no origin.
 			</description>
 		</method>
+		<method name="snapshot_is_modified" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if this resource has been modified since it finished loading (via property or metadata writes, [method emit_changed], or resource-specific content mutators). Cleared when loading or reloading finishes for both the loaded resource and its loaded sub-resources, and preserved across [method duplicate].
+			</description>
+		</method>
 		<method name="take_over_path">
 			<return type="void" />
 			<param index="0" name="path" type="String" />

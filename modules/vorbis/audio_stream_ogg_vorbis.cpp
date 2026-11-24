@@ -493,6 +493,7 @@ void AudioStreamOggVorbis::set_packet_sequence(Ref<OggPacketSequence> p_packet_s
 	if (packet_sequence.is_valid()) {
 		maybe_update_info();
 	}
+	snapshot_mark_modified();
 }
 
 Ref<OggPacketSequence> AudioStreamOggVorbis::get_packet_sequence() const {
@@ -501,6 +502,7 @@ Ref<OggPacketSequence> AudioStreamOggVorbis::get_packet_sequence() const {
 
 void AudioStreamOggVorbis::set_loop(bool p_enable) {
 	loop = p_enable;
+	snapshot_mark_modified();
 }
 
 bool AudioStreamOggVorbis::has_loop() const {
@@ -509,6 +511,7 @@ bool AudioStreamOggVorbis::has_loop() const {
 
 void AudioStreamOggVorbis::set_loop_offset(double p_seconds) {
 	loop_offset = p_seconds;
+	snapshot_mark_modified();
 }
 
 double AudioStreamOggVorbis::get_loop_offset() const {
@@ -552,6 +555,7 @@ int AudioStreamOggVorbis::get_bar_beats() const {
 
 void AudioStreamOggVorbis::set_tags(const Dictionary &p_tags) {
 	tags = p_tags;
+	snapshot_mark_modified();
 }
 
 Dictionary AudioStreamOggVorbis::get_tags() const {
@@ -701,7 +705,14 @@ Ref<AudioStreamOggVorbis> AudioStreamOggVorbis::load_from_buffer(const Vector<ui
 Ref<AudioStreamOggVorbis> AudioStreamOggVorbis::load_from_file(const String &p_path) {
 	const Vector<uint8_t> stream_data = FileAccess::get_file_as_bytes(p_path);
 	ERR_FAIL_COND_V_MSG(stream_data.is_empty(), Ref<AudioStreamOggVorbis>(), vformat("Cannot open file '%s'.", p_path));
-	return load_from_buffer(stream_data);
+	Ref<AudioStreamOggVorbis> stream = load_from_buffer(stream_data);
+	if (stream.is_valid()) {
+		if (stream->packet_sequence.is_valid()) {
+			stream->packet_sequence->snapshot_clear_modified();
+		}
+		stream->snapshot_clear_modified();
+	}
+	return stream;
 }
 
 void AudioStreamOggVorbis::_bind_methods() {

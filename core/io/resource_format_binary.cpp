@@ -647,6 +647,7 @@ Error ResourceLoaderBinary::load() {
 		}
 	}
 
+	LocalVector<Ref<Resource>> loaded_resources;
 	for (int i = 0; i < internal_resources.size(); i++) {
 		bool main = i == (internal_resources.size() - 1);
 
@@ -824,6 +825,7 @@ Error ResourceLoaderBinary::load() {
 #ifdef TOOLS_ENABLED
 		res->set_edited(false);
 #endif
+		loaded_resources.push_back(res);
 
 		if (progress) {
 			*progress = (i + 1) / float(internal_resources.size());
@@ -835,6 +837,9 @@ Error ResourceLoaderBinary::load() {
 			f.unref();
 			resource = res;
 			resource->set_as_translation_remapped(translation_remapped);
+			for (Ref<Resource> &loaded : loaded_resources) {
+				loaded->snapshot_clear_modified();
+			}
 			error = OK;
 			return OK;
 		}
