@@ -2168,8 +2168,10 @@ void ClassDB::get_extensions_for_type(const StringName &p_class, List<String> *p
 
 HashMap<StringName, HashMap<StringName, Variant>> ClassDB::default_values;
 HashSet<StringName> ClassDB::default_values_cached;
+Mutex ClassDB::default_values_mutex;
 
 Variant ClassDB::class_get_default_property_value(const StringName &p_class, const StringName &p_property, bool *r_valid) {
+	MutexLock lock(default_values_mutex);
 	if (!default_values_cached.has(p_class)) {
 		if (!default_values.has(p_class)) {
 			default_values[p_class] = HashMap<StringName, Variant>();
@@ -2300,8 +2302,11 @@ void ClassDB::unregister_extension_class(const StringName &p_class, bool p_free_
 		}
 	}
 	classes.erase(p_class);
-	default_values_cached.erase(p_class);
-	default_values.erase(p_class);
+	{
+		MutexLock lock(default_values_mutex);
+		default_values_cached.erase(p_class);
+		default_values.erase(p_class);
+	}
 #ifdef TOOLS_ENABLED
 	placeholder_extensions.erase(p_class);
 #endif
@@ -2336,6 +2341,7 @@ Object *ClassDB::_instantiate_allow_unexposed(const StringName &p_class) {
 }
 
 void ClassDB::cleanup_defaults() {
+	MutexLock lock(default_values_mutex);
 	default_values.clear();
 	default_values_cached.clear();
 }

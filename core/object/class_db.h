@@ -33,6 +33,7 @@
 #include "core/object/method_bind.h"
 #include "core/object/method_bind_common.h"
 #include "core/object/object.h"
+#include "core/os/mutex.h"
 #include "core/os/rw_lock.h"
 #include "core/string/print_string.h"
 #include "core/templates/a_hash_map.h"
@@ -212,6 +213,9 @@ public:
 
 	static HashMap<StringName, HashMap<StringName, Variant>> default_values;
 	static HashSet<StringName> default_values_cached;
+	// komm64: the cache above is filled on first use, also from the editor's
+	// threaded reimport (a resource saver reads defaults on several threads).
+	static Mutex default_values_mutex;
 
 	// Native structs, used by binder
 	struct NativeStruct {
