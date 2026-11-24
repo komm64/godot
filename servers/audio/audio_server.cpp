@@ -1186,6 +1186,15 @@ void AudioServer::remove_bus_effect(int p_bus, int p_effect) {
 	unlock();
 }
 
+void AudioServer::release_bus_effects() {
+	lock();
+	for (int i = 0; i < buses.size(); i++) {
+		buses[i]->effects.clear();
+		_update_bus_effects(i);
+	}
+	unlock();
+}
+
 int AudioServer::get_bus_effect_count(int p_bus) {
 	ERR_FAIL_INDEX_V(p_bus, buses.size(), 0);
 

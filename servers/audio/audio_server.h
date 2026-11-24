@@ -420,6 +420,9 @@ public:
 
 	void add_bus_effect(int p_bus, const Ref<AudioEffect> &p_effect, int p_at_pos = -1);
 	void remove_bus_effect(int p_bus, int p_effect);
+	// komm64: drops every bus's effects. A bus effect can be an extension's
+	// class: Main lets go of them before the extensions are deinitialized.
+	void release_bus_effects();
 
 	int get_bus_effect_count(int p_bus);
 	Ref<AudioEffect> get_bus_effect(int p_bus, int p_effect);
