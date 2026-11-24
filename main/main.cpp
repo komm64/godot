@@ -5405,6 +5405,13 @@ void Main::cleanup(bool p_force) {
 	//clear global shader variables before scene and other graphics stuff are deinitialized.
 	rendering_server->global_shader_parameters_clear();
 
+	// komm64: a bus effect can be an extension's class (an AudioEffect from a
+	// GDExtension); the buses let go of them before the extensions go, not in
+	// AudioServer::finish() after.
+	if (audio_server) {
+		audio_server->release_bus_effects();
+	}
+
 #ifndef XR_DISABLED
 	if (xr_server) {
 		// Now that we're unregistering properly in plugins we need to keep access to xr_server for a little longer
