@@ -109,7 +109,8 @@ public:
 
 	// p_starting: a playback play() made that starts on the next physics frame (2D / 3D players), from p_start_from.
 	Dictionary snapshot_get_state(const Ref<AudioStreamPlayback> &p_starting = Ref<AudioStreamPlayback>(), float p_start_from = 0.0);
-	Error snapshot_set_state(const Dictionary &p_state);
+	// p_start_immediate: starts a playback in the AudioServer immediately (used by 2D / 3D players for non-starting voices).
+	Error snapshot_set_state(const Dictionary &p_state, const Callable &p_start_immediate = Callable());
 
 	void set_playback_type(AudioServer::PlaybackType p_playback_type);
 	AudioServer::PlaybackType get_playback_type() const;

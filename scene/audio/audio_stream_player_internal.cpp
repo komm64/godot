@@ -334,53 +334,112 @@ bool AudioStreamPlayerInternal::has_stream_playback() {
 
 Dictionary AudioStreamPlayerInternal::snapshot_get_state(const Ref<AudioStreamPlayback> &p_starting, float p_start_from) {
 	Dictionary state;
-	// A paused playback (stream_paused, or the tree paused) is still playing: it resumes where it stopped.
-	state["playing"] = p_starting.is_valid() || is_playing() || get_stream_paused();
-	state["position"] = p_starting.is_valid() ? p_start_from : get_playback_position();
-	// A started playback has read ahead into its buffer: started again where
-	// the buffered frames begin, at the same read point, it plays on as saved.
-	if (!p_starting.is_valid() && !stream_playbacks.is_empty()) {
-		AudioStreamPlaybackResampled *resampled = Object::cast_to<AudioStreamPlaybackResampled>(stream_playbacks[stream_playbacks.size() - 1].ptr());
+	Array playbacks;
+	bool any_paused = false;
+	bool finishing = false;
+	bool found_starting = false;
+
+	for (const Ref<AudioStreamPlayback> &playback : stream_playbacks) {
+		if (playback.is_null()) {
+			continue;
+		}
+		if (playback == p_starting) {
+			found_starting = true;
+			Dictionary entry;
+			entry["position"] = p_start_from;
+			entry["starting"] = true;
+			playbacks.push_back(entry);
+			continue;
+		}
+		const bool pb_active = AudioServer::get_singleton()->is_playback_active(playback);
+		const bool pb_paused = AudioServer::get_singleton()->is_playback_paused(playback);
+		if (!pb_active && !pb_paused) {
+			// A playback that ended in the mix and is not yet reaped: finished is still to come.
+			finishing = true;
+			continue;
+		}
+		if (pb_paused) {
+			any_paused = true;
+		}
+		Dictionary entry;
+		entry["position"] = AudioServer::get_singleton()->get_playback_position(playback);
+		// A started playback has read ahead into its buffer: started again where
+		// the buffered frames begin, at the same read point, it plays on as saved.
+		// A paused one (stream_paused, or the tree paused) keeps its buffer too.
+		AudioStreamPlaybackResampled *resampled = Object::cast_to<AudioStreamPlaybackResampled>(playback.ptr());
 		double start = 0;
 		uint64_t mix_offset = 0;
-		// A paused one (stream_paused, or the tree paused) keeps its buffer too.
-		const Ref<AudioStreamPlayback> &last = stream_playbacks[stream_playbacks.size() - 1];
-		const bool in_mix = AudioServer::get_singleton()->is_playback_active(last) || AudioServer::get_singleton()->is_playback_paused(last);
-		if (resampled != nullptr && in_mix && resampled->snapshot_get_buffer(start, mix_offset)) {
-			state["position"] = start;
-			state["mix_offset"] = int64_t(mix_offset);
+		if (resampled != nullptr && resampled->snapshot_get_buffer(start, mix_offset)) {
+			entry["position"] = start;
+			entry["mix_offset"] = int64_t(mix_offset);
 		}
-	}
-	state["stream_paused"] = get_stream_paused();
-	// A playback that ended in the mix and is not yet reaped: finished is still to come.
-	bool finishing = false;
-	for (const Ref<AudioStreamPlayback> &playback : stream_playbacks) {
-		if (playback.is_valid() && playback != p_starting && !AudioServer::get_singleton()->is_playback_active(playback) && !AudioServer::get_singleton()->is_playback_paused(playback)) {
-			finishing = true;
+		if (pb_paused) {
+			entry["paused"] = true;
 		}
+		playbacks.push_back(entry);
 	}
+
+	if (p_starting.is_valid() && !found_starting) {
+		Dictionary entry;
+		entry["position"] = p_start_from;
+		entry["starting"] = true;
+		playbacks.push_back(entry);
+	}
+
+	state["playbacks"] = playbacks;
+	state["stream_paused"] = any_paused;
 	state["finishing"] = finishing;
 	return state;
 }
 
-Error AudioStreamPlayerInternal::snapshot_set_state(const Dictionary &p_state) {
-	if (p_state.get("playing", false)) {
-		play_callable.call((float)p_state.get("position", 0.0));
-		if (p_state.has("mix_offset") && !stream_playbacks.is_empty()) {
-			AudioStreamPlaybackResampled *resampled = Object::cast_to<AudioStreamPlaybackResampled>(stream_playbacks[stream_playbacks.size() - 1].ptr());
+Error AudioStreamPlayerInternal::snapshot_set_state(const Dictionary &p_state, const Callable &p_start_immediate) {
+	stop_callable.call();
+	const Callable &start_callable = p_start_immediate.is_valid() ? p_start_immediate : play_callable;
+
+	auto restore_voice = [&](const Dictionary &p_entry, bool p_default_paused) {
+		const float pos = (float)p_entry.get("position", 0.0);
+		const bool starting = p_entry.get("starting", false);
+		Ref<AudioStreamPlayback> prev_last = stream_playbacks.is_empty() ? Ref<AudioStreamPlayback>() : stream_playbacks[stream_playbacks.size() - 1];
+		if (starting) {
+			play_callable.call(pos);
+		} else {
+			start_callable.call(pos);
+		}
+		if (stream_playbacks.is_empty() || stream_playbacks[stream_playbacks.size() - 1] == prev_last) {
+			return;
+		}
+		Ref<AudioStreamPlayback> pb = stream_playbacks[stream_playbacks.size() - 1];
+		if (!starting && p_entry.has("mix_offset") && pb.is_valid()) {
+			AudioStreamPlaybackResampled *resampled = Object::cast_to<AudioStreamPlaybackResampled>(pb.ptr());
 			if (resampled != nullptr) {
-				resampled->snapshot_set_buffer(double(p_state.get("position", 0.0)), uint64_t(int64_t(p_state["mix_offset"])));
+				resampled->snapshot_set_buffer(double(p_entry.get("position", 0.0)), uint64_t(int64_t(p_entry["mix_offset"])));
 			}
 		}
-		set_stream_paused(p_state.get("stream_paused", false));
-	} else {
-		stop_callable.call();
+		if (!starting && p_entry.get("paused", p_default_paused) && pb.is_valid()) {
+			AudioServer::get_singleton()->set_playback_paused(pb, true);
+			if (_is_sample() && pb->get_sample_playback().is_valid()) {
+				AudioServer::get_singleton()->set_sample_playback_pause(pb->get_sample_playback(), true);
+			}
+		}
+	};
+
+	if (p_state.has("playbacks")) {
+		const Array playbacks = p_state["playbacks"];
+		for (int i = 0; i < playbacks.size(); i++) {
+			if (playbacks[i].get_type() != Variant::DICTIONARY) {
+				continue;
+			}
+			restore_voice(playbacks[i], false);
+		}
+	} else if (p_state.get("playing", false)) {
+		restore_voice(p_state, p_state.get("stream_paused", false));
 	}
+
 	if (p_state.get("finishing", false) && stream.is_valid()) {
 		// An ended playback, reaped by the next process(), which emits finished.
 		Ref<AudioStreamPlayback> ended = stream->instantiate_playback();
 		if (ended.is_valid()) {
-			stream_playbacks.push_back(ended);
+			stream_playbacks.insert(0, ended);
 			active.set();
 			_set_process(true);
 		}

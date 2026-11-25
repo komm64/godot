@@ -695,9 +695,38 @@ Dictionary AudioStreamPlayer3D::snapshot_get_state() const {
 	return state;
 }
 
+void AudioStreamPlayer3D::_snapshot_start_playback(float p_from_pos) {
+	Ref<AudioStreamPlayback> stream_playback = internal->play_basic();
+	if (stream_playback.is_null()) {
+		return;
+	}
+	if (bus_volumes.is_empty()) {
+		Vector<AudioFrame> zero;
+		zero.resize(VOLUME_VECTOR_SIZE);
+		zero.fill(AudioFrame(0, 0));
+		HashMap<StringName, Vector<AudioFrame>> volumes;
+		volumes[internal->bus] = zero;
+		AudioServer::get_singleton()->start_playback_stream(stream_playback, volumes, p_from_pos, internal->pitch_scale, linear_attenuation, attenuation_filter_cutoff_hz);
+	} else {
+		AudioServer::get_singleton()->start_playback_stream(stream_playback, bus_volumes, p_from_pos, internal->pitch_scale, linear_attenuation, attenuation_filter_cutoff_hz);
+	}
+	internal->ensure_playback_limit();
+	force_update_panning = true;
+
+	// Sample handling.
+	if (stream_playback->get_is_sample() && stream_playback->get_sample_playback().is_valid()) {
+		Ref<AudioSamplePlayback> sample_playback = stream_playback->get_sample_playback();
+		sample_playback->offset = p_from_pos;
+		sample_playback->bus = internal->bus;
+
+		AudioServer::get_singleton()->start_sample_playback(sample_playback);
+	}
+}
+
 Error AudioStreamPlayer3D::snapshot_set_state(const Dictionary &p_state) {
 	Node3D::snapshot_set_state(p_state);
-	return internal->snapshot_set_state(p_state);
+	setplayback.unref();
+	return internal->snapshot_set_state(p_state, callable_mp(this, &AudioStreamPlayer3D::_snapshot_start_playback));
 }
 
 void AudioStreamPlayer3D::set_bus(const StringName &p_bus) {
