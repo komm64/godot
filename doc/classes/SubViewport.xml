@@ -19,11 +19,6 @@
 		<link title="3D Resolution Scaling Demo">https://godotengine.org/asset-library/asset/2805</link>
 	</tutorials>
 	<methods>
-		<method name="force_clear_now">
-			<return type="void" />
-			<description>
-			</description>
-		</method>
 		<method name="snapshot_get_state" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
