@@ -213,6 +213,7 @@ private:
 	static bool _snapshot_find_lambda(const GDScriptFunction *p_func, const GDScriptFunction *p_target, PackedInt32Array &r_path);
 	static Dictionary _snapshot_locate(GDScriptFunction *p_func);
 	static GDScriptFunction *_snapshot_resolve(const Dictionary &p_info);
+	static Callable _snapshot_make_bare_lambda(const Dictionary &p_info);
 	static int64_t _snapshot_code_hash(const GDScriptFunction *p_func);
 
 	void _get_script_property_list(List<PropertyInfo> *r_list, bool p_include_base) const;
