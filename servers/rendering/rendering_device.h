@@ -559,6 +559,7 @@ private:
 
 	RID _snapshot_record(RID p_rid, const String &p_method, const Vector<Variant> &p_args);
 	void _snapshot_buffer_write(RID p_buffer, uint32_t p_offset, uint32_t p_size, const uint8_t *p_data);
+	void _snapshot_buffer_copy(RID p_src_buffer, RID p_dst_buffer, uint32_t p_src_offset, uint32_t p_dst_offset, uint32_t p_size);
 	void _snapshot_texture_write(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data);
 	int64_t _snapshot_record_format(int64_t p_id, const String &p_method, const Vector<Variant> &p_args);
 	RID _framebuffer_create_empty(const Size2i &p_size, TextureSamples p_samples, int64_t p_format_check);
@@ -2025,6 +2026,7 @@ private:
 
 	RID _uniform_set_create(const TypedArray<RDUniform> &p_uniforms, RID p_shader, uint32_t p_shader_set);
 
+	Error _buffer_copy_bind(RID p_src_buffer, RID p_dst_buffer, uint32_t p_src_offset, uint32_t p_dst_offset, uint32_t p_size);
 	Error _buffer_update_bind(RID p_buffer, uint32_t p_offset, uint32_t p_size, const Vector<uint8_t> &p_data);
 	Error _buffer_clear_bind(RID p_buffer, uint32_t p_offset, uint32_t p_size);
 	Error _texture_update_bind(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data);
