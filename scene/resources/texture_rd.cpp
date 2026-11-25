@@ -79,6 +79,7 @@ void Texture2DRD::set_texture_rd_rid(RID p_texture_rd_rid) {
 	ERR_FAIL_NULL(RS::get_singleton());
 
 	if (p_texture_rd_rid.is_valid()) {
+		snapshot_mark_modified();
 		RS::get_singleton()->call_on_render_thread(callable_mp(this, &Texture2DRD::_set_texture_rd_rid).bind(p_texture_rd_rid));
 	} else if (texture_rid.is_valid()) {
 		RS::get_singleton()->free_rid(texture_rid);
@@ -182,6 +183,7 @@ void TextureLayeredRD::set_texture_rd_rid(RID p_texture_rd_rid) {
 	ERR_FAIL_NULL(RS::get_singleton());
 
 	if (p_texture_rd_rid.is_valid()) {
+		snapshot_mark_modified();
 		RS::get_singleton()->call_on_render_thread(callable_mp(this, &TextureLayeredRD::_set_texture_rd_rid).bind(p_texture_rd_rid));
 	} else if (texture_rid.is_valid()) {
 		RS::get_singleton()->free_rid(texture_rid);
@@ -304,6 +306,7 @@ void Texture3DRD::set_texture_rd_rid(RID p_texture_rd_rid) {
 	ERR_FAIL_NULL(RS::get_singleton());
 
 	if (p_texture_rd_rid.is_valid()) {
+		snapshot_mark_modified();
 		RS::get_singleton()->call_on_render_thread(callable_mp(this, &Texture3DRD::_set_texture_rd_rid).bind(p_texture_rd_rid));
 	} else if (texture_rid.is_valid()) {
 		RS::get_singleton()->free_rid(texture_rid);

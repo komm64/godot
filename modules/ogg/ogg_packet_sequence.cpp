@@ -41,6 +41,7 @@ void OggPacketSequence::push_page(int64_t p_granule_pos, const Vector<PackedByte
 	page_granule_positions.push_back(p_granule_pos);
 	page_data.push_back(data_stored);
 	data_version++;
+	snapshot_mark_modified();
 }
 
 void OggPacketSequence::set_packet_data(const TypedArray<Array> &p_data) {
@@ -54,6 +55,7 @@ void OggPacketSequence::set_packet_data(const TypedArray<Array> &p_data) {
 			page_data.write[page_idx].push_back(this_page_data[packet]);
 		}
 	}
+	snapshot_mark_modified();
 }
 
 TypedArray<Array> OggPacketSequence::get_packet_data() const {
@@ -75,6 +77,7 @@ void OggPacketSequence::set_packet_granule_positions(const PackedInt64Array &p_g
 		int64_t granule_pos = p_granule_positions[page_idx];
 		page_granule_positions.push_back(granule_pos);
 	}
+	snapshot_mark_modified();
 }
 
 PackedInt64Array OggPacketSequence::get_packet_granule_positions() const {
@@ -87,6 +90,7 @@ PackedInt64Array OggPacketSequence::get_packet_granule_positions() const {
 
 void OggPacketSequence::set_sampling_rate(float p_sampling_rate) {
 	sampling_rate = p_sampling_rate;
+	snapshot_mark_modified();
 }
 
 float OggPacketSequence::get_sampling_rate() const {

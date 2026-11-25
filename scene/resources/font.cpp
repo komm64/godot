@@ -2113,6 +2113,7 @@ void FontFile::set_data_ptr(const uint8_t *p_data, size_t p_size) {
 			TS->font_set_data_ptr(cache[i], data_ptr, data_size);
 		}
 	}
+	snapshot_mark_modified();
 }
 
 void FontFile::set_data(const PackedByteArray &p_data) {
@@ -2125,6 +2126,7 @@ void FontFile::set_data(const PackedByteArray &p_data) {
 			TS->font_set_data_ptr(cache[i], data_ptr, data_size);
 		}
 	}
+	snapshot_mark_modified();
 }
 
 PackedByteArray FontFile::get_data() const {
@@ -2138,26 +2140,31 @@ PackedByteArray FontFile::get_data() const {
 void FontFile::set_font_name(const String &p_name) {
 	_ensure_rid(0);
 	TS->font_set_name(cache[0], p_name);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_font_style_name(const String &p_name) {
 	_ensure_rid(0);
 	TS->font_set_style_name(cache[0], p_name);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_font_style(BitField<TextServer::FontStyle> p_style) {
 	_ensure_rid(0);
 	TS->font_set_style(cache[0], p_style);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_font_weight(int p_weight) {
 	_ensure_rid(0);
 	TS->font_set_weight(cache[0], p_weight);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_font_stretch(int p_stretch) {
 	_ensure_rid(0);
 	TS->font_set_stretch(cache[0], p_stretch);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_antialiasing(TextServer::FontAntialiasing p_antialiasing) {
@@ -2501,18 +2508,21 @@ void FontFile::clear_size_cache(int p_cache_index) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_clear_size_cache(cache[p_cache_index]);
+	snapshot_mark_modified();
 }
 
 void FontFile::remove_size_cache(int p_cache_index, const Vector2i &p_size) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_remove_size_cache(cache[p_cache_index], p_size);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_variation_coordinates(int p_cache_index, const Dictionary &p_variation_coordinates) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_variation_coordinates(cache[p_cache_index], p_variation_coordinates);
+	snapshot_mark_modified();
 }
 
 Dictionary FontFile::get_variation_coordinates(int p_cache_index) const {
@@ -2525,6 +2535,7 @@ void FontFile::set_embolden(int p_cache_index, float p_strength) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_embolden(cache[p_cache_index], p_strength);
+	snapshot_mark_modified();
 }
 
 float FontFile::get_embolden(int p_cache_index) const {
@@ -2537,6 +2548,7 @@ void FontFile::set_transform(int p_cache_index, Transform2D p_transform) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_transform(cache[p_cache_index], p_transform);
+	snapshot_mark_modified();
 }
 
 Transform2D FontFile::get_transform(int p_cache_index) const {
@@ -2549,6 +2561,7 @@ void FontFile::set_extra_spacing(int p_cache_index, TextServer::SpacingType p_sp
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_spacing(cache[p_cache_index], p_spacing, p_value);
+	snapshot_mark_modified();
 }
 
 int64_t FontFile::get_extra_spacing(int p_cache_index, TextServer::SpacingType p_spacing) const {
@@ -2567,6 +2580,7 @@ void FontFile::set_extra_baseline_offset(int p_cache_index, float p_baseline_off
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_baseline_offset(cache[p_cache_index], p_baseline_offset);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_face_index(int p_cache_index, int64_t p_index) {
@@ -2576,6 +2590,7 @@ void FontFile::set_face_index(int p_cache_index, int64_t p_index) {
 
 	_ensure_rid(p_cache_index);
 	TS->font_set_face_index(cache[p_cache_index], p_index);
+	snapshot_mark_modified();
 }
 
 int64_t FontFile::get_face_index(int p_cache_index) const {
@@ -2588,6 +2603,7 @@ void FontFile::set_cache_ascent(int p_cache_index, int p_size, real_t p_ascent) 
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_ascent(cache[p_cache_index], p_size, p_ascent);
+	snapshot_mark_modified();
 }
 
 real_t FontFile::get_cache_ascent(int p_cache_index, int p_size) const {
@@ -2600,6 +2616,7 @@ void FontFile::set_cache_descent(int p_cache_index, int p_size, real_t p_descent
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_descent(cache[p_cache_index], p_size, p_descent);
+	snapshot_mark_modified();
 }
 
 real_t FontFile::get_cache_descent(int p_cache_index, int p_size) const {
@@ -2612,6 +2629,7 @@ void FontFile::set_cache_underline_position(int p_cache_index, int p_size, real_
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_underline_position(cache[p_cache_index], p_size, p_underline_position);
+	snapshot_mark_modified();
 }
 
 real_t FontFile::get_cache_underline_position(int p_cache_index, int p_size) const {
@@ -2624,6 +2642,7 @@ void FontFile::set_cache_underline_thickness(int p_cache_index, int p_size, real
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_underline_thickness(cache[p_cache_index], p_size, p_underline_thickness);
+	snapshot_mark_modified();
 }
 
 real_t FontFile::get_cache_underline_thickness(int p_cache_index, int p_size) const {
@@ -2636,6 +2655,7 @@ void FontFile::set_cache_scale(int p_cache_index, int p_size, real_t p_scale) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_scale(cache[p_cache_index], p_size, p_scale);
+	snapshot_mark_modified();
 }
 
 real_t FontFile::get_cache_scale(int p_cache_index, int p_size) const {
@@ -2654,18 +2674,21 @@ void FontFile::clear_textures(int p_cache_index, const Vector2i &p_size) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_clear_textures(cache[p_cache_index], p_size);
+	snapshot_mark_modified();
 }
 
 void FontFile::remove_texture(int p_cache_index, const Vector2i &p_size, int p_texture_index) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_remove_texture(cache[p_cache_index], p_size, p_texture_index);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_texture_image(int p_cache_index, const Vector2i &p_size, int p_texture_index, const Ref<Image> &p_image) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_texture_image(cache[p_cache_index], p_size, p_texture_index, p_image);
+	snapshot_mark_modified();
 }
 
 Ref<Image> FontFile::get_texture_image(int p_cache_index, const Vector2i &p_size, int p_texture_index) const {
@@ -2678,6 +2701,7 @@ void FontFile::set_texture_offsets(int p_cache_index, const Vector2i &p_size, in
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_texture_offsets(cache[p_cache_index], p_size, p_texture_index, p_offset);
+	snapshot_mark_modified();
 }
 
 PackedInt32Array FontFile::get_texture_offsets(int p_cache_index, const Vector2i &p_size, int p_texture_index) const {
@@ -2696,18 +2720,21 @@ void FontFile::clear_glyphs(int p_cache_index, const Vector2i &p_size) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_clear_glyphs(cache[p_cache_index], p_size);
+	snapshot_mark_modified();
 }
 
 void FontFile::remove_glyph(int p_cache_index, const Vector2i &p_size, int32_t p_glyph) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_remove_glyph(cache[p_cache_index], p_size, p_glyph);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_glyph_advance(int p_cache_index, int p_size, int32_t p_glyph, const Vector2 &p_advance) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_glyph_advance(cache[p_cache_index], p_size, p_glyph, p_advance);
+	snapshot_mark_modified();
 }
 
 Vector2 FontFile::get_glyph_advance(int p_cache_index, int p_size, int32_t p_glyph) const {
@@ -2720,6 +2747,7 @@ void FontFile::set_glyph_offset(int p_cache_index, const Vector2i &p_size, int32
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_glyph_offset(cache[p_cache_index], p_size, p_glyph, p_offset);
+	snapshot_mark_modified();
 }
 
 Vector2 FontFile::get_glyph_offset(int p_cache_index, const Vector2i &p_size, int32_t p_glyph) const {
@@ -2732,6 +2760,7 @@ void FontFile::set_glyph_size(int p_cache_index, const Vector2i &p_size, int32_t
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_glyph_size(cache[p_cache_index], p_size, p_glyph, p_gl_size);
+	snapshot_mark_modified();
 }
 
 Vector2 FontFile::get_glyph_size(int p_cache_index, const Vector2i &p_size, int32_t p_glyph) const {
@@ -2744,6 +2773,7 @@ void FontFile::set_glyph_uv_rect(int p_cache_index, const Vector2i &p_size, int3
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_glyph_uv_rect(cache[p_cache_index], p_size, p_glyph, p_uv_rect);
+	snapshot_mark_modified();
 }
 
 Rect2 FontFile::get_glyph_uv_rect(int p_cache_index, const Vector2i &p_size, int32_t p_glyph) const {
@@ -2756,6 +2786,7 @@ void FontFile::set_glyph_texture_idx(int p_cache_index, const Vector2i &p_size, 
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_glyph_texture_idx(cache[p_cache_index], p_size, p_glyph, p_texture_idx);
+	snapshot_mark_modified();
 }
 
 int FontFile::get_glyph_texture_idx(int p_cache_index, const Vector2i &p_size, int32_t p_glyph) const {
@@ -2774,18 +2805,21 @@ void FontFile::clear_kerning_map(int p_cache_index, int p_size) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_clear_kerning_map(cache[p_cache_index], p_size);
+	snapshot_mark_modified();
 }
 
 void FontFile::remove_kerning(int p_cache_index, int p_size, const Vector2i &p_glyph_pair) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_remove_kerning(cache[p_cache_index], p_size, p_glyph_pair);
+	snapshot_mark_modified();
 }
 
 void FontFile::set_kerning(int p_cache_index, int p_size, const Vector2i &p_glyph_pair, const Vector2 &p_kerning) {
 	ERR_FAIL_COND(p_cache_index < 0);
 	_ensure_rid(p_cache_index);
 	TS->font_set_kerning(cache[p_cache_index], p_size, p_glyph_pair, p_kerning);
+	snapshot_mark_modified();
 }
 
 Vector2 FontFile::get_kerning(int p_cache_index, int p_size, const Vector2i &p_glyph_pair) const {
@@ -2812,6 +2846,7 @@ void FontFile::set_language_support_override(const String &p_language, bool p_su
 		_ensure_rid(i);
 		TS->font_set_language_support_override(cache[i], p_language, p_supported);
 	}
+	snapshot_mark_modified();
 }
 
 bool FontFile::get_language_support_override(const String &p_language) const {
@@ -2829,6 +2864,7 @@ void FontFile::remove_language_support_override(const String &p_language) {
 			_ensure_rid(i);
 			TS->font_remove_language_support_override(cache[i], p_language);
 		}
+		snapshot_mark_modified();
 	}
 }
 
@@ -2846,6 +2882,7 @@ void FontFile::set_script_support_override(const String &p_script, bool p_suppor
 		_ensure_rid(i);
 		TS->font_set_script_support_override(cache[i], p_script, p_supported);
 	}
+	snapshot_mark_modified();
 }
 
 bool FontFile::get_script_support_override(const String &p_script) const {
@@ -2863,6 +2900,7 @@ void FontFile::remove_script_support_override(const String &p_script) {
 			_ensure_rid(i);
 			TS->font_remove_script_support_override(cache[i], p_script);
 		}
+		snapshot_mark_modified();
 	}
 }
 
@@ -2880,6 +2918,7 @@ void FontFile::set_opentype_feature_overrides(const Dictionary &p_overrides) {
 		_ensure_rid(i);
 		TS->font_set_opentype_feature_overrides(cache[i], p_overrides);
 	}
+	snapshot_mark_modified();
 }
 
 Dictionary FontFile::get_opentype_feature_overrides() const {

@@ -294,7 +294,9 @@ void CompressedTexture2D::reload_from_file() {
 		return;
 	}
 
-	load(path);
+	if (load(path) == OK) {
+		snapshot_clear_modified();
+	}
 }
 
 Ref<Image> CompressedTexture2D::load_image_from_file(Ref<FileAccess> f, int p_size_limit) {
@@ -604,7 +606,9 @@ void CompressedTexture3D::reload_from_file() {
 		return;
 	}
 
-	load(path);
+	if (load(path) == OK) {
+		snapshot_clear_modified();
+	}
 }
 
 void CompressedTexture3D::_bind_methods() {
@@ -764,7 +768,9 @@ void CompressedTextureLayered::reload_from_file() {
 		return;
 	}
 
-	load(path);
+	if (load(path) == OK) {
+		snapshot_clear_modified();
+	}
 }
 
 void CompressedTextureLayered::_bind_methods() {

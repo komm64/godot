@@ -431,6 +431,7 @@ void AudioStreamPlaybackWAV::set_sample_playback(const Ref<AudioSamplePlayback> 
 
 void AudioStreamWAV::set_format(Format p_format) {
 	format = p_format;
+	snapshot_mark_modified();
 }
 
 AudioStreamWAV::Format AudioStreamWAV::get_format() const {
@@ -439,6 +440,7 @@ AudioStreamWAV::Format AudioStreamWAV::get_format() const {
 
 void AudioStreamWAV::set_loop_mode(LoopMode p_loop_mode) {
 	loop_mode = p_loop_mode;
+	snapshot_mark_modified();
 }
 
 AudioStreamWAV::LoopMode AudioStreamWAV::get_loop_mode() const {
@@ -447,6 +449,7 @@ AudioStreamWAV::LoopMode AudioStreamWAV::get_loop_mode() const {
 
 void AudioStreamWAV::set_loop_begin(int p_frame) {
 	loop_begin = p_frame;
+	snapshot_mark_modified();
 }
 
 int AudioStreamWAV::get_loop_begin() const {
@@ -455,6 +458,7 @@ int AudioStreamWAV::get_loop_begin() const {
 
 void AudioStreamWAV::set_loop_end(int p_frame) {
 	loop_end = p_frame;
+	snapshot_mark_modified();
 }
 
 int AudioStreamWAV::get_loop_end() const {
@@ -464,6 +468,7 @@ int AudioStreamWAV::get_loop_end() const {
 void AudioStreamWAV::set_mix_rate(int p_hz) {
 	ERR_FAIL_COND(p_hz == 0);
 	mix_rate = p_hz;
+	snapshot_mark_modified();
 }
 
 int AudioStreamWAV::get_mix_rate() const {
@@ -472,6 +477,7 @@ int AudioStreamWAV::get_mix_rate() const {
 
 void AudioStreamWAV::set_stereo(bool p_enable) {
 	stereo = p_enable;
+	snapshot_mark_modified();
 }
 
 bool AudioStreamWAV::is_stereo() const {
@@ -480,6 +486,7 @@ bool AudioStreamWAV::is_stereo() const {
 
 void AudioStreamWAV::set_tags(const Dictionary &p_tags) {
 	tags = p_tags;
+	snapshot_mark_modified();
 }
 
 Dictionary AudioStreamWAV::get_tags() const {
@@ -523,6 +530,7 @@ void AudioStreamWAV::set_data(const Vector<uint8_t> &p_data) {
 	data_bytes = p_data.size();
 
 	AudioServer::get_singleton()->unlock();
+	snapshot_mark_modified();
 }
 
 Vector<uint8_t> AudioStreamWAV::get_data() const {
@@ -1203,7 +1211,11 @@ Ref<AudioStreamWAV> AudioStreamWAV::load_from_buffer(const Vector<uint8_t> &p_st
 Ref<AudioStreamWAV> AudioStreamWAV::load_from_file(const String &p_path, const Dictionary &p_options) {
 	const Vector<uint8_t> stream_data = FileAccess::get_file_as_bytes(p_path);
 	ERR_FAIL_COND_V_MSG(stream_data.is_empty(), Ref<AudioStreamWAV>(), vformat("Cannot open file '%s'.", p_path));
-	return load_from_buffer(stream_data, p_options);
+	Ref<AudioStreamWAV> stream = load_from_buffer(stream_data, p_options);
+	if (stream.is_valid()) {
+		stream->snapshot_clear_modified();
+	}
+	return stream;
 }
 
 void AudioStreamWAV::_bind_methods() {

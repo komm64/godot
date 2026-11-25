@@ -64,6 +64,7 @@ void ExternalTexture::set_external_buffer_id(uint64_t p_external_buffer) {
 		external_buffer = p_external_buffer;
 		_ensure_created();
 		RenderingServer::get_singleton()->texture_external_update(texture, size.width, size.height, external_buffer);
+		snapshot_mark_modified();
 	}
 }
 

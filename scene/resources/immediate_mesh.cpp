@@ -338,6 +338,7 @@ void ImmediateMesh::clear_surfaces() {
 	uses_tangents = false;
 	uses_uvs = false;
 	uses_uv2s = false;
+	snapshot_mark_modified();
 }
 
 int ImmediateMesh::get_surface_count() const {
@@ -376,6 +377,7 @@ void ImmediateMesh::surface_set_material(int p_idx, const Ref<Material> &p_mater
 		mat = p_material->get_rid();
 	}
 	RS::get_singleton()->mesh_surface_set_material(mesh, p_idx, mat);
+	snapshot_mark_modified();
 }
 Ref<Material> ImmediateMesh::surface_get_material(int p_idx) const {
 	ERR_FAIL_INDEX_V(p_idx, int(surfaces.size()), Ref<Material>());

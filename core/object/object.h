@@ -440,6 +440,9 @@ private:
 public:
 	bool _is_queued_for_deletion : 1; // Set to true by SceneTree::queue_delete().
 
+protected:
+	bool _snapshot_modified = false;
+
 private:
 #ifdef TOOLS_ENABLED
 	bool _edited : 1;

@@ -800,6 +800,7 @@ Ref<Mesh> Mesh::create_outline(float p_margin) const {
 
 void Mesh::set_lightmap_size_hint(const Size2i &p_size) {
 	lightmap_size_hint = p_size;
+	snapshot_mark_modified();
 }
 
 Size2i Mesh::get_lightmap_size_hint() const {
@@ -1498,6 +1499,7 @@ void ArrayMesh::_set_blend_shape_names(const PackedStringArray &p_names) {
 	if (mesh.is_valid()) {
 		RS::get_singleton()->mesh_set_blend_shape_count(mesh, blend_shapes.size());
 	}
+	snapshot_mark_modified();
 }
 
 PackedStringArray ArrayMesh::_get_blend_shape_names() const {
@@ -1716,6 +1718,7 @@ void ArrayMesh::_set_surfaces(const Array &p_surfaces) {
 
 		surfaces.push_back(s);
 	}
+	snapshot_mark_modified();
 }
 
 bool ArrayMesh::_get(const StringName &p_name, Variant &r_ret) const {
@@ -1876,6 +1879,7 @@ void ArrayMesh::add_blend_shape(const StringName &p_name) {
 	if (mesh.is_valid()) {
 		RS::get_singleton()->mesh_set_blend_shape_count(mesh, blend_shapes.size());
 	}
+	snapshot_mark_modified();
 }
 
 int ArrayMesh::get_blend_shape_count() const {
@@ -1901,6 +1905,7 @@ void ArrayMesh::set_blend_shape_name(int p_index, const StringName &p_name) {
 	}
 
 	blend_shapes.write[p_index] = shape_name;
+	snapshot_mark_modified();
 }
 
 void ArrayMesh::clear_blend_shapes() {
@@ -1911,6 +1916,7 @@ void ArrayMesh::clear_blend_shapes() {
 	if (mesh.is_valid()) {
 		RS::get_singleton()->mesh_set_blend_shape_count(mesh, 0);
 	}
+	snapshot_mark_modified();
 }
 
 void ArrayMesh::set_blend_shape_mode(BlendShapeMode p_mode) {
@@ -1918,6 +1924,7 @@ void ArrayMesh::set_blend_shape_mode(BlendShapeMode p_mode) {
 	if (mesh.is_valid()) {
 		RS::get_singleton()->mesh_set_blend_shape_mode(mesh, (RSE::BlendShapeMode)p_mode);
 	}
+	snapshot_mark_modified();
 }
 
 ArrayMesh::BlendShapeMode ArrayMesh::get_blend_shape_mode() const {
@@ -2022,6 +2029,7 @@ void ArrayMesh::clear_surfaces() {
 	RS::get_singleton()->mesh_clear(mesh);
 	surfaces.clear();
 	aabb = AABB();
+	snapshot_mark_modified();
 }
 
 void ArrayMesh::surface_remove(int p_surface) {
@@ -2286,6 +2294,7 @@ void ArrayMesh::set_shadow_mesh(const Ref<ArrayMesh> &p_mesh) {
 	} else {
 		RS::get_singleton()->mesh_set_shadow_mesh(mesh, RID());
 	}
+	snapshot_mark_modified();
 }
 
 Ref<ArrayMesh> ArrayMesh::get_shadow_mesh() const {

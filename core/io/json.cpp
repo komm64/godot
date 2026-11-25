@@ -567,6 +567,7 @@ Error JSON::_parse_object(Dictionary &object, const char32_t *p_str, int &index,
 void JSON::set_data(const Variant &p_data) {
 	data = p_data;
 	text.clear();
+	snapshot_mark_modified();
 }
 
 Error JSON::_parse_string(const String &p_json, Variant &r_ret, String &r_err_str, int &r_err_line) {
@@ -604,6 +605,7 @@ Error JSON::parse(const String &p_json_string, bool p_keep_text) {
 	Error err = _parse_string(p_json_string, data, err_str, err_line);
 	if (err == Error::OK) {
 		err_line = 0;
+		snapshot_mark_modified();
 	}
 	if (p_keep_text) {
 		text = p_json_string;

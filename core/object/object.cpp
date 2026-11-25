@@ -238,6 +238,7 @@ void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid
 
 	if (script_instance) {
 		if (script_instance->set(p_name, p_value)) {
+			_snapshot_modified = true;
 			if (r_valid) {
 				*r_valid = true;
 			}
@@ -247,6 +248,7 @@ void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid
 
 	if (_extension && _extension->set) {
 		if (_extension->set(_extension_instance, (GDExtensionConstStringNamePtr)&p_name, (GDExtensionConstVariantPtr)&p_value)) {
+			_snapshot_modified = true;
 			if (r_valid) {
 				*r_valid = true;
 			}
@@ -256,13 +258,21 @@ void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid
 
 	// Try built-in setter.
 	{
-		if (ClassDB::set_property(this, p_name, p_value, r_valid)) {
+		bool valid = false;
+		if (ClassDB::set_property(this, p_name, p_value, &valid)) {
+			if (valid) {
+				_snapshot_modified = true;
+			}
+			if (r_valid) {
+				*r_valid = valid;
+			}
 			return;
 		}
 	}
 
 	if (p_name == CoreStringName(script)) {
 		set_script(p_value);
+		_snapshot_modified = true;
 		if (r_valid) {
 			*r_valid = true;
 		}
@@ -272,6 +282,7 @@ void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid
 		Variant **V = metadata_properties.getptr(p_name);
 		if (V) {
 			**V = p_value;
+			_snapshot_modified = true;
 			if (r_valid) {
 				*r_valid = true;
 			}
@@ -279,6 +290,7 @@ void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid
 		} else if (p_name.operator String().begins_with("metadata/")) {
 			// Must exist, otherwise duplicate() will not work.
 			set_meta(p_name.operator String().replace_first("metadata/", ""), p_value);
+			_snapshot_modified = true;
 			if (r_valid) {
 				*r_valid = true;
 			}
@@ -291,6 +303,7 @@ void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid
 		bool valid;
 		script_instance->property_set_fallback(p_name, p_value, &valid);
 		if (valid) {
+			_snapshot_modified = true;
 			if (r_valid) {
 				*r_valid = true;
 			}
@@ -302,6 +315,7 @@ void Object::set(const StringName &p_name, const Variant &p_value, bool *r_valid
 	// Something inside the object... :|
 	bool success = _setv(p_name, p_value);
 	if (success) {
+		_snapshot_modified = true;
 		if (r_valid) {
 			*r_valid = true;
 		}
@@ -1128,6 +1142,7 @@ void Object::set_meta(const StringName &p_name, const Variant &p_value) {
 
 			const String &sname = p_name;
 			metadata_properties.erase("metadata/" + sname);
+			_snapshot_modified = true;
 			if (!sname.begins_with("_")) {
 				// Metadata starting with _ don't show up in the inspector, so no need to update.
 				notify_property_list_changed();
@@ -1139,12 +1154,14 @@ void Object::set_meta(const StringName &p_name, const Variant &p_value) {
 	HashMap<StringName, Variant>::Iterator E = metadata.find(p_name);
 	if (E) {
 		E->value = p_value;
+		_snapshot_modified = true;
 	} else {
 		ERR_FAIL_COND_MSG(!p_name.operator String().is_valid_ascii_identifier(), vformat("Invalid metadata identifier: '%s'.", p_name));
 		Variant *V = &metadata.insert(p_name, p_value)->value;
 
 		const String &sname = p_name;
 		metadata_properties["metadata/" + sname] = V;
+		_snapshot_modified = true;
 		if (!sname.begins_with("_")) {
 			notify_property_list_changed();
 		}
