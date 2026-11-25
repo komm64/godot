@@ -80,6 +80,7 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 
 	Vector<int> opcodes;
 	Vector<int> line_operands; // komm64: where write_newline() put a line number
+	Vector<int> member_operands; // komm64: where a member variable's address is
 	List<RBMap<StringName, int>> stack_id_stack;
 	RBMap<StringName, int> stack_identifiers;
 	List<int> stack_identifiers_counts;
@@ -393,6 +394,9 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	}
 
 	void append(const Address &p_address) {
+		if (p_address.mode == Address::MEMBER) {
+			member_operands.push_back(opcodes.size());
+		}
 		opcodes.push_back(address_of(p_address));
 	}
 

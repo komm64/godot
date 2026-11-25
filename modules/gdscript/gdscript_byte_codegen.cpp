@@ -227,15 +227,28 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 		function->_code_size = opcodes.size();
 
 		// komm64: identifies the code for resuming a suspended call after a
-		// load. Line numbers are left out, so editing lines above the function
-		// (which moves them) does not make a saved call stop; where line
-		// opcodes are stays in, as the positions a call resumes at depend on it.
+		// load. Line numbers are left out and member variables count by name,
+		// so an update that moves lines above the function or adds a member
+		// before the ones it uses does not make a saved call stop (neither is
+		// in its stack). Where line opcodes are stays in, as the positions a
+		// call resumes at depend on it.
+		HashMap<int, StringName> member_names;
+		if (!member_operands.is_empty() && function->_script != nullptr) {
+			for (const KeyValue<StringName, GDScript::MemberInfo> &E : function->_script->member_indices) {
+				member_names[E.value.index] = E.key;
+			}
+		}
 		uint32_t h = 0;
 		int next_line = 0;
+		int next_member = 0;
 		for (int i = 0; i < opcodes.size(); i++) {
 			if (next_line < line_operands.size() && line_operands[next_line] == i) {
 				next_line++;
 				h = hash_murmur3_one_32(0, h);
+			} else if (next_member < member_operands.size() && member_operands[next_member] == i) {
+				next_member++;
+				const StringName *name = member_names.getptr(opcodes[i] & GDScriptFunction::ADDR_MASK);
+				h = hash_murmur3_one_32(name != nullptr ? name->hash() : (uint32_t)opcodes[i], h);
 			} else {
 				h = hash_murmur3_one_32((uint32_t)opcodes[i], h);
 			}
