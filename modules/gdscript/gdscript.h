@@ -256,6 +256,8 @@ public:
 	bool is_root_script() const { return _owner == nullptr; }
 	static Dictionary snapshot_get_lambda(const Callable &p_callable);
 	static Callable snapshot_make_lambda(const Dictionary &p_info);
+	static Dictionary snapshot_get_held_scripts();
+	static void snapshot_release_script(const Ref<GDScript> &p_script);
 	static TypedArray<Dictionary> snapshot_get_awaits(Object *p_owner);
 	static Variant snapshot_make_await(const Dictionary &p_info);
 	static bool snapshot_set_await_stack(Object *p_state, const Array &p_stack);
