@@ -383,6 +383,7 @@ private:
 	Vector<GDScriptFunction *> lambdas;
 
 	int _code_size = 0;
+	uint32_t _snapshot_code_hash = 0; // komm64: the code without its line numbers, see GDScriptByteCodeGenerator
 	int _default_arg_count = 0;
 	int _constant_count = 0;
 	int _global_names_count = 0;

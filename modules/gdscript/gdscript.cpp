@@ -1155,14 +1155,31 @@ Dictionary GDScript::_snapshot_locate(GDScriptFunction *p_func) {
 		out["class"] = classes;
 		out["function"] = root->get_name();
 		out["index"] = path;
+		if (!path.is_empty()) {
+			Vector<GDScriptFunction *> all;
+			_snapshot_collect_lambdas(root, all);
+			out["lambdas"] = all.size();
+			out["hash"] = _snapshot_code_hash(p_func);
+		}
 		return out;
 	}
 	return Dictionary();
 }
 
+void GDScript::_snapshot_collect_lambdas(const GDScriptFunction *p_func, Vector<GDScriptFunction *> &r_out) {
+	for (GDScriptFunction *l : p_func->lambdas) {
+		r_out.push_back(l);
+		_snapshot_collect_lambdas(l, r_out);
+	}
+}
+
 // The function _snapshot_locate() named, or null when the script no longer
-// has one there.
-GDScriptFunction *GDScript::_snapshot_resolve(const Dictionary &p_info) {
+// has one there. A lambda is found by its code where the script changed since
+// (a lambda added before it moves its index): the one at its index if the
+// code is the same, else the only one in its function with that code. With
+// p_allow_edited, one whose code was edited (the function has as many lambdas
+// as before) is taken at its index.
+GDScriptFunction *GDScript::_snapshot_resolve(const Dictionary &p_info, bool p_allow_edited) {
 	const String path = p_info.get("script", String());
 	Ref<GDScript> root;
 	if (ResourceLoader::exists(path)) {
@@ -1190,22 +1207,69 @@ GDScriptFunction *GDScript::_snapshot_resolve(const Dictionary &p_info) {
 		return nullptr;
 	}
 	const PackedInt32Array index = p_info.get("index", PackedInt32Array());
+	GDScriptFunction *root_func = func;
 	for (int i : index) {
 		if (i < 0 || i >= func->lambdas.size()) {
-			return nullptr;
+			func = nullptr;
+			break;
 		}
 		func = func->lambdas[i];
 	}
-	return func;
+	if (index.is_empty() || !p_info.has("hash")) {
+		return func;
+	}
+	const int64_t want = p_info["hash"];
+	if (func != nullptr && _snapshot_code_hash(func) == want) {
+		return func;
+	}
+	Vector<GDScriptFunction *> all;
+	_snapshot_collect_lambdas(root_func, all);
+	GDScriptFunction *found = nullptr;
+	for (GDScriptFunction *l : all) {
+		if (_snapshot_code_hash(l) == want) {
+			if (found != nullptr) {
+				found = nullptr; // two lambdas with this code: cannot tell which
+				break;
+			}
+			found = l;
+		}
+	}
+	if (found != nullptr) {
+		return found;
+	}
+	if (p_allow_edited && (int)p_info.get("lambdas", -1) == all.size()) {
+		return func;
+	}
+	return nullptr;
 }
 
 // Identifies the compiled code: a suspended call is only resumed in the code
-// it stopped in.
+// it stopped in. Its constants and the names it uses are part of it (two
+// lambdas can differ only there); an object constant counts by its path, as
+// its address differs from run to run.
 int64_t GDScript::_snapshot_code_hash(const GDScriptFunction *p_func) {
 	uint32_t h = hash_murmur3_one_32(p_func->_stack_size);
 	h = hash_murmur3_one_32(p_func->_instruction_args_size, h);
-	if (p_func->_code_size > 0) {
-		h = hash_murmur3_buffer(p_func->_code_ptr, p_func->_code_size * sizeof(int), h);
+	h = hash_murmur3_one_32(p_func->_snapshot_code_hash, h);
+	for (int i = 0; i < p_func->_constant_count; i++) {
+		const Variant &v = p_func->_constants_ptr[i];
+		h = hash_murmur3_one_32(v.get_type(), h);
+		switch (v.get_type()) {
+			case Variant::OBJECT: {
+				const Resource *res = Object::cast_to<Resource>(v.get_validated_object());
+				h = hash_murmur3_one_32(res != nullptr ? res->get_path().hash() : 0, h);
+			} break;
+			case Variant::ARRAY:
+			case Variant::DICTIONARY:
+			case Variant::CALLABLE:
+			case Variant::SIGNAL:
+				break; // may hold objects
+			default:
+				h = hash_murmur3_one_32(v.hash(), h);
+		}
+	}
+	for (int i = 0; i < p_func->_global_names_count; i++) {
+		h = hash_murmur3_one_32(p_func->_global_names_ptr[i].hash(), h);
 	}
 	return h;
 }
@@ -1349,7 +1413,7 @@ Callable GDScript::snapshot_make_lambda(const Dictionary &p_info) {
 }
 
 Callable GDScript::_snapshot_make_bare_lambda(const Dictionary &p_info) {
-	GDScriptFunction *func = _snapshot_resolve(p_info);
+	GDScriptFunction *func = _snapshot_resolve(p_info, true);
 	if (func == nullptr || PackedInt32Array(p_info.get("index", PackedInt32Array())).is_empty()) {
 		return Callable();
 	}
