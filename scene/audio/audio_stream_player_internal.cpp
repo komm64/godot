@@ -396,43 +396,38 @@ Error AudioStreamPlayerInternal::snapshot_set_state(const Dictionary &p_state, c
 	stop_callable.call();
 	const Callable &start_callable = p_start_immediate.is_valid() ? p_start_immediate : play_callable;
 
-	auto restore_voice = [&](const Dictionary &p_entry, bool p_default_paused) {
-		const float pos = (float)p_entry.get("position", 0.0);
-		const bool starting = p_entry.get("starting", false);
-		Ref<AudioStreamPlayback> prev_last = stream_playbacks.is_empty() ? Ref<AudioStreamPlayback>() : stream_playbacks[stream_playbacks.size() - 1];
-		if (starting) {
-			play_callable.call(pos);
-		} else {
-			start_callable.call(pos);
-		}
-		if (stream_playbacks.is_empty() || stream_playbacks[stream_playbacks.size() - 1] == prev_last) {
-			return;
-		}
-		Ref<AudioStreamPlayback> pb = stream_playbacks[stream_playbacks.size() - 1];
-		if (!starting && p_entry.has("mix_offset") && pb.is_valid()) {
-			AudioStreamPlaybackResampled *resampled = Object::cast_to<AudioStreamPlaybackResampled>(pb.ptr());
-			if (resampled != nullptr) {
-				resampled->snapshot_set_buffer(double(p_entry.get("position", 0.0)), uint64_t(int64_t(p_entry["mix_offset"])));
-			}
-		}
-		if (!starting && p_entry.get("paused", p_default_paused) && pb.is_valid()) {
-			AudioServer::get_singleton()->set_playback_paused(pb, true);
-			if (_is_sample() && pb->get_sample_playback().is_valid()) {
-				AudioServer::get_singleton()->set_sample_playback_pause(pb->get_sample_playback(), true);
-			}
-		}
-	};
-
-	if (p_state.has("playbacks")) {
+	if (p_state.has("playbacks") && p_state["playbacks"].get_type() == Variant::ARRAY) {
 		const Array playbacks = p_state["playbacks"];
 		for (int i = 0; i < playbacks.size(); i++) {
 			if (playbacks[i].get_type() != Variant::DICTIONARY) {
 				continue;
 			}
-			restore_voice(playbacks[i], false);
+			const Dictionary entry = playbacks[i];
+			const float pos = (float)entry.get("position", 0.0);
+			const bool starting = entry.get("starting", false);
+			Ref<AudioStreamPlayback> prev_last = stream_playbacks.is_empty() ? Ref<AudioStreamPlayback>() : stream_playbacks[stream_playbacks.size() - 1];
+			if (starting) {
+				play_callable.call(pos);
+			} else {
+				start_callable.call(pos);
+			}
+			if (stream_playbacks.is_empty() || stream_playbacks[stream_playbacks.size() - 1] == prev_last) {
+				continue;
+			}
+			Ref<AudioStreamPlayback> pb = stream_playbacks[stream_playbacks.size() - 1];
+			if (!starting && entry.has("mix_offset") && pb.is_valid()) {
+				AudioStreamPlaybackResampled *resampled = Object::cast_to<AudioStreamPlaybackResampled>(pb.ptr());
+				if (resampled != nullptr) {
+					resampled->snapshot_set_buffer(double(entry.get("position", 0.0)), uint64_t(int64_t(entry["mix_offset"])));
+				}
+			}
+			if (!starting && entry.get("paused", false) && pb.is_valid()) {
+				AudioServer::get_singleton()->set_playback_paused(pb, true);
+				if (_is_sample() && pb->get_sample_playback().is_valid()) {
+					AudioServer::get_singleton()->set_sample_playback_pause(pb->get_sample_playback(), true);
+				}
+			}
 		}
-	} else if (p_state.get("playing", false)) {
-		restore_voice(p_state, p_state.get("stream_paused", false));
 	}
 
 	if (p_state.get("finishing", false) && stream.is_valid()) {

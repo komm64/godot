@@ -326,39 +326,43 @@ func _test_audio_polyphony_2d_3d() -> void:
 
 
 func _test_audio_voice_lifecycle() -> void:
-	var wav := _make_wav(0.35)
+	# The mixer runs on wall-clock time (also with the Dummy driver), not per
+	# process frame, so wait on time; each check has >= 0.15 s of margin.
+	var wav := _make_wav(1.0)
 	var asp := AudioStreamPlayer.new()
 	asp.stream = wav
 	asp.max_polyphony = 3
 	root.add_child(asp)
 
 	asp.play(0.0)
-	asp.play(0.12)
-	asp.play(0.24)
+	asp.play(0.4)
+	asp.play(0.8)
 	var state := asp.snapshot_get_state()
 	asp.stop()
 	asp.snapshot_set_state(state)
+	var t0 := Time.get_ticks_msec()
 
-	# At 60 fixed fps, 10 frames = 0.167s: voice 2 (0.24 + 0.167 > 0.35) should finish,
-	# while voices 0 and 1 remain active.
-	for _i in range(10):
-		await process_frame
+	# At 0.35 s: voice 2 (0.8 + 0.35 > 1.0) finished; voices 0 and 1 remain.
+	await _wait_until(t0, 350)
 	var mid1 := asp.snapshot_get_state()
 	_check(asp.is_playing() and mid1["playbacks"].size() == 2,
-		"lifecycle after 10 frames: 2 voices left (got %d)" % mid1["playbacks"].size())
+		"lifecycle at 0.35 s: 2 voices left (got %d)" % mid1["playbacks"].size())
 
-	# 8 more frames (+0.133s, total 0.30s): voice 1 (0.12 + 0.30 > 0.35) finishes, voice 0 remains.
-	for _i in range(8):
-		await process_frame
+	# At 0.8 s: voice 1 (0.4 + 0.8 > 1.0) finished; voice 0 remains.
+	await _wait_until(t0, 800)
 	var mid2 := asp.snapshot_get_state()
 	_check(asp.is_playing() and mid2["playbacks"].size() == 1,
-		"lifecycle after 18 frames: 1 voice left (got %d)" % mid2["playbacks"].size())
+		"lifecycle at 0.8 s: 1 voice left (got %d)" % mid2["playbacks"].size())
 
-	# 10 more frames (+0.167s, total 0.467s): voice 0 finishes too.
-	for _i in range(10):
-		await process_frame
+	# At 1.4 s: voice 0 finished too.
+	await _wait_until(t0, 1400)
 	var end_state := asp.snapshot_get_state()
 	_check(not asp.is_playing() and end_state["playbacks"].is_empty(),
-		"lifecycle after 28 frames: all voices finished (got %d)" % end_state["playbacks"].size())
+		"lifecycle at 1.4 s: all voices finished (got %d)" % end_state["playbacks"].size())
 
 	asp.queue_free()
+
+
+func _wait_until(t0: int, ms: int) -> void:
+	while Time.get_ticks_msec() - t0 < ms:
+		await process_frame
