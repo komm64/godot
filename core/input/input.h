@@ -127,6 +127,11 @@ private:
 	bool legacy_just_pressed_behavior = false;
 	bool disable_input = false;
 	bool ignore_joypad_on_unfocused_application = false;
+	// komm64: while on, events from the devices (keyboard, mouse, touch,
+	// joypads) are dropped; those a script (or other bound code) parses pass.
+	bool ignore_device_input = false;
+	int script_event_depth = 0;
+	void _parse_input_event_bind(const Ref<InputEvent> &p_event);
 	bool application_focused = true;
 	bool embedder_focused = false;
 
@@ -433,6 +438,8 @@ public:
 	void vibrate_handheld(int p_duration_ms = 500, float p_amplitude = -1.0);
 
 	void set_ignore_joypad_on_unfocused_application(bool p_ignore);
+	void set_ignore_device_input(bool p_ignore);
+	bool is_ignoring_device_input() const;
 	bool is_ignoring_joypad_on_unfocused_application() const;
 
 	void set_mouse_position(const Point2 &p_posf);
