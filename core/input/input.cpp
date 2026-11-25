@@ -196,7 +196,9 @@ void Input::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_default_cursor_shape", "shape"), &Input::set_default_cursor_shape, DEFVAL(CURSOR_ARROW));
 	ClassDB::bind_method(D_METHOD("get_current_cursor_shape"), &Input::get_current_cursor_shape);
 	ClassDB::bind_method(D_METHOD("set_custom_mouse_cursor", "image", "shape", "hotspot"), &Input::set_custom_mouse_cursor, DEFVAL(CURSOR_ARROW), DEFVAL(Vector2()));
-	ClassDB::bind_method(D_METHOD("parse_input_event", "event"), &Input::parse_input_event);
+	ClassDB::bind_method(D_METHOD("parse_input_event", "event"), &Input::_parse_input_event_bind);
+	ClassDB::bind_method(D_METHOD("set_ignore_device_input", "enable"), &Input::set_ignore_device_input);
+	ClassDB::bind_method(D_METHOD("is_ignoring_device_input"), &Input::is_ignoring_device_input);
 	ClassDB::bind_method(D_METHOD("set_use_accumulated_input", "enable"), &Input::set_use_accumulated_input);
 	ClassDB::bind_method(D_METHOD("is_using_accumulated_input"), &Input::is_using_accumulated_input);
 	ClassDB::bind_method(D_METHOD("flush_buffered_events"), &Input::flush_buffered_events);
@@ -207,6 +209,7 @@ void Input::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "mouse_mode"), "set_mouse_mode", "get_mouse_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_accumulated_input"), "set_use_accumulated_input", "is_using_accumulated_input");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ignore_device_input"), "set_ignore_device_input", "is_ignoring_device_input");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "emulate_mouse_from_touch"), "set_emulate_mouse_from_touch", "is_emulating_mouse_from_touch");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "emulate_touch_from_mouse"), "set_emulate_touch_from_mouse", "is_emulating_touch_from_mouse");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ignore_joypad_on_unfocused_application"), "set_ignore_joypad_on_unfocused_application", "is_ignoring_joypad_on_unfocused_application");
@@ -1521,6 +1524,10 @@ void Input::parse_input_event(RequiredParam<InputEvent> rp_event) {
 
 	EXTRACT_PARAM_OR_FAIL(p_event, rp_event);
 
+	if (ignore_device_input && script_event_depth == 0 && p_event->get_device() != InputEvent::DEVICE_ID_INTERNAL) {
+		return; // komm64: from a device while automation drives the input
+	}
+
 #ifdef DEBUG_ENABLED
 	uint64_t curr_frame = Engine::get_singleton()->get_process_frames();
 	if (curr_frame != last_parsed_frame) {
@@ -1595,6 +1602,45 @@ void Input::set_use_accumulated_input(bool p_enable) {
 
 bool Input::is_using_accumulated_input() {
 	return use_accumulated_input;
+}
+
+// komm64: what scripts (and other bound code) parse always passes, so a
+// tool that drives the game can keep the devices out while it runs.
+void Input::_parse_input_event_bind(const Ref<InputEvent> &p_event) {
+	_THREAD_SAFE_METHOD_
+	script_event_depth++;
+	parse_input_event(p_event);
+	script_event_depth--;
+}
+
+// komm64: while on, input from the devices (keyboard, mouse, touch, pen,
+// joypads) is dropped, and turning it on lets go of everything held, so a key
+// held at that moment is not stuck down. Input that scripts parse passes.
+void Input::set_ignore_device_input(bool p_ignore) {
+	_THREAD_SAFE_METHOD_
+	if (ignore_device_input == p_ignore) {
+		return;
+	}
+	ignore_device_input = p_ignore;
+	if (!p_ignore) {
+		return;
+	}
+	flush_buffered_events();
+	keys_pressed.clear();
+	physical_keys_pressed.clear();
+	key_label_pressed.clear();
+	mouse_button_mask = MouseButtonMask::NONE;
+	joy_buttons_pressed.clear();
+	_joy_axis.clear();
+	for (KeyValue<StringName, Input::ActionState> &E : action_states) {
+		if (E.value.cache.pressed) {
+			action_release(E.key);
+		}
+	}
+}
+
+bool Input::is_ignoring_device_input() const {
+	return ignore_device_input;
 }
 
 void Input::release_pressed_events() {

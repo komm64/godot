@@ -836,6 +836,9 @@
 		<member name="emulate_touch_from_mouse" type="bool" setter="set_emulate_touch_from_mouse" getter="is_emulating_touch_from_mouse">
 			If [code]true[/code], sends touch input events when clicking or dragging the mouse. See also [member ProjectSettings.input_devices/pointing/emulate_touch_from_mouse].
 		</member>
+		<member name="ignore_device_input" type="bool" setter="set_ignore_device_input" getter="is_ignoring_device_input">
+			If [code]true[/code], input events from the devices (keyboard, mouse, touch, pen and joypads) are dropped, while events passed to [method parse_input_event] by scripts and other bound code still arrive. A tool that drives the game (a replay, an automated test) turns it on so that keys pressed on the machine do not reach the game. Turning it on releases every key, button, axis and action held at that moment.
+		</member>
 		<member name="ignore_joypad_on_unfocused_application" type="bool" setter="set_ignore_joypad_on_unfocused_application" getter="is_ignoring_joypad_on_unfocused_application">
 			If [code]true[/code], joypad input (including motion sensors) and LED light changes will be ignored and joypad vibration will be stopped when the application is not focused.
 		</member>
