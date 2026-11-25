@@ -848,8 +848,7 @@ RenderingDevice::Buffer *RenderingDevice::_get_buffer_from_owner(RID p_buffer) {
 	} else if (uniform_buffer_owner.owns(p_buffer)) {
 		buffer = uniform_buffer_owner.get_or_null(p_buffer);
 	} else if (texture_buffer_owner.owns(p_buffer)) {
-		DEV_ASSERT(false && "FIXME: Broken.");
-		//buffer = texture_buffer_owner.get_or_null(p_buffer)->buffer;
+		buffer = texture_buffer_owner.get_or_null(p_buffer);
 	} else if (storage_buffer_owner.owns(p_buffer)) {
 		buffer = storage_buffer_owner.get_or_null(p_buffer);
 	}
@@ -9164,7 +9163,7 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("uniform_set_create", "uniforms", "shader", "shader_set"), &RenderingDevice::_uniform_set_create);
 	ClassDB::bind_method(D_METHOD("uniform_set_is_valid", "uniform_set"), &RenderingDevice::uniform_set_is_valid);
 
-	ClassDB::bind_method(D_METHOD("buffer_copy", "src_buffer", "dst_buffer", "src_offset", "dst_offset", "size"), &RenderingDevice::buffer_copy);
+	ClassDB::bind_method(D_METHOD("buffer_copy", "src_buffer", "dst_buffer", "src_offset", "dst_offset", "size"), &RenderingDevice::_buffer_copy_bind);
 	ClassDB::bind_method(D_METHOD("buffer_update", "buffer", "offset", "size_bytes", "data"), &RenderingDevice::_buffer_update_bind);
 	ClassDB::bind_method(D_METHOD("buffer_clear", "buffer", "offset", "size_bytes"), &RenderingDevice::_buffer_clear_bind);
 	ClassDB::bind_method(D_METHOD("buffer_get_data", "buffer", "offset_bytes", "size_bytes"), &RenderingDevice::buffer_get_data, DEFVAL(0), DEFVAL(0));
@@ -10036,6 +10035,61 @@ void RenderingDevice::_snapshot_buffer_write(RID p_buffer, uint32_t p_offset, ui
 	record->args = args;
 }
 
+void RenderingDevice::_snapshot_buffer_copy(RID p_src_buffer, RID p_dst_buffer, uint32_t p_src_offset, uint32_t p_dst_offset, uint32_t p_size) {
+	if (p_size == 0) {
+		return;
+	}
+	Vector<uint8_t> copied;
+	bool need_gpu_readback = false;
+	{
+		_THREAD_SAFE_METHOD_
+		const SnapshotRecord *dst_record = snapshot_records.getptr(p_dst_buffer);
+		const Buffer *dst_buffer = _get_buffer_from_owner(p_dst_buffer);
+		if (dst_record == nullptr || dst_buffer == nullptr || !dst_record->method.ends_with("buffer_create")) {
+			return;
+		}
+		const auto is_storage_record = [](const SnapshotRecord &p_record) -> bool {
+			if (p_record.method == "storage_buffer_create") {
+				return true;
+			}
+			if (p_record.method == "vertex_buffer_create" && p_record.args.size() > 2) {
+				return (int64_t(p_record.args[2]) & BUFFER_CREATION_AS_STORAGE_BIT) != 0;
+			}
+			if (p_record.method == "index_buffer_create" && p_record.args.size() > 4) {
+				return (int64_t(p_record.args[4]) & BUFFER_CREATION_AS_STORAGE_BIT) != 0;
+			}
+			return false;
+		};
+		const SnapshotRecord *src_record = snapshot_records.getptr(p_src_buffer);
+		const Buffer *src_buffer = _get_buffer_from_owner(p_src_buffer);
+		const bool src_has_record = src_record != nullptr && src_buffer != nullptr && src_record->method.ends_with("buffer_create");
+		const bool src_gpu_writable = !src_has_record || is_storage_record(*src_record) || src_record->method == "texture_buffer_create";
+		const bool dst_is_storage = is_storage_record(*dst_record);
+		if (!src_has_record || (src_gpu_writable && !dst_is_storage)) {
+			need_gpu_readback = true;
+		} else {
+			const int src_index = (src_record->method == "index_buffer_create" || src_record->method == "texture_buffer_create") ? 2 : 1;
+			const Vector<uint8_t> src_bytes = src_record->args[src_index];
+			ERR_FAIL_COND(uint64_t(p_src_offset) + p_size > uint64_t(src_buffer->size));
+			copied.resize(p_size);
+			const int64_t available = src_bytes.size() > int64_t(p_src_offset) ? MIN(int64_t(p_size), src_bytes.size() - int64_t(p_src_offset)) : 0;
+			if (available > 0) {
+				memcpy(copied.ptrw(), src_bytes.ptr() + p_src_offset, available);
+			}
+			if (available < int64_t(p_size)) {
+				memset(copied.ptrw() + available, 0, p_size - available);
+			}
+		}
+	}
+	if (need_gpu_readback) {
+		copied = buffer_get_data(p_dst_buffer, p_dst_offset, p_size);
+		if (copied.size() != int64_t(p_size)) {
+			return;
+		}
+	}
+	_snapshot_buffer_write(p_dst_buffer, p_dst_offset, p_size, copied.ptr());
+}
+
 void RenderingDevice::_snapshot_texture_write(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data) {
 	_THREAD_SAFE_METHOD_
 	SnapshotRecord *record = snapshot_records.getptr(p_texture);
@@ -10084,7 +10138,7 @@ Array RenderingDevice::snapshot_get_content(RID p_rid) {
 		}
 	} else if (record->method == "vertex_buffer_create" || record->method == "uniform_buffer_create" || record->method == "storage_buffer_create") {
 		args[1] = buffer_get_data(p_rid);
-	} else if (record->method == "index_buffer_create") {
+	} else if (record->method == "index_buffer_create" || record->method == "texture_buffer_create") {
 		args[2] = buffer_get_data(p_rid);
 	}
 	return args;
@@ -10417,6 +10471,14 @@ RID RenderingDevice::_uniform_set_create(const TypedArray<RDUniform> &p_uniforms
 		uniforms[i] = uniform->base;
 	}
 	return _snapshot_record(uniform_set_create(uniforms, p_shader, p_shader_set), "uniform_set_create", varray(p_uniforms, p_shader, p_shader_set));
+}
+
+Error RenderingDevice::_buffer_copy_bind(RID p_src_buffer, RID p_dst_buffer, uint32_t p_src_offset, uint32_t p_dst_offset, uint32_t p_size) {
+	Error err = buffer_copy(p_src_buffer, p_dst_buffer, p_src_offset, p_dst_offset, p_size);
+	if (err == OK) {
+		_snapshot_buffer_copy(p_src_buffer, p_dst_buffer, p_src_offset, p_dst_offset, p_size);
+	}
+	return err;
 }
 
 Error RenderingDevice::_buffer_update_bind(RID p_buffer, uint32_t p_offset, uint32_t p_size, const Vector<uint8_t> &p_data) {
