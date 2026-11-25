@@ -1204,10 +1204,7 @@ GDScriptFunction *GDScript::_snapshot_resolve(const Dictionary &p_info) {
 int64_t GDScript::_snapshot_code_hash(const GDScriptFunction *p_func) {
 	uint32_t h = hash_murmur3_one_32(p_func->_stack_size);
 	h = hash_murmur3_one_32(p_func->_instruction_args_size, h);
-	if (p_func->_code_size > 0) {
-		h = hash_murmur3_buffer(p_func->_code_ptr, p_func->_code_size * sizeof(int), h);
-	}
-	return h;
+	return hash_murmur3_one_32(p_func->_snapshot_code_hash, h);
 }
 
 // Where a lambda is written (as _snapshot_locate()) and what it captured, or

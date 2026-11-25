@@ -79,6 +79,7 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
 	GDScriptFunction *function = nullptr;
 
 	Vector<int> opcodes;
+	Vector<int> line_operands; // komm64: where write_newline() put a line number
 	List<RBMap<StringName, int>> stack_id_stack;
 	RBMap<StringName, int> stack_identifiers;
 	List<int> stack_identifiers_counts;
