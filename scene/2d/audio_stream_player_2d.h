@@ -65,6 +65,7 @@ private:
 
 	StringName _get_actual_bus();
 	void _update_panning();
+	void _snapshot_start_playback(float p_from_pos);
 
 	static void _listener_changed_cb(void *self) { reinterpret_cast<AudioStreamPlayer2D *>(self)->force_update_panning = true; }
 

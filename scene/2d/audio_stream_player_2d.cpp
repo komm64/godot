@@ -284,8 +284,32 @@ Dictionary AudioStreamPlayer2D::snapshot_get_state() {
 	return internal->snapshot_get_state(starting ? setplayback : Ref<AudioStreamPlayback>(), starting ? setplay.get() : 0.0);
 }
 
+void AudioStreamPlayer2D::_snapshot_start_playback(float p_from_pos) {
+	Ref<AudioStreamPlayback> stream_playback = internal->play_basic();
+	if (stream_playback.is_null()) {
+		return;
+	}
+	if (volume_vector.size() != AudioServer::MAX_CHANNELS_PER_BUS) {
+		volume_vector.resize(AudioServer::MAX_CHANNELS_PER_BUS);
+		volume_vector.fill(AudioFrame(0, 0));
+	}
+	AudioServer::get_singleton()->start_playback_stream(stream_playback, internal->bus, volume_vector, p_from_pos, internal->pitch_scale);
+	internal->ensure_playback_limit();
+	force_update_panning = true;
+
+	// Sample handling.
+	if (stream_playback->get_is_sample() && stream_playback->get_sample_playback().is_valid()) {
+		Ref<AudioSamplePlayback> sample_playback = stream_playback->get_sample_playback();
+		sample_playback->offset = p_from_pos;
+		sample_playback->bus = internal->bus;
+
+		AudioServer::get_singleton()->start_sample_playback(sample_playback);
+	}
+}
+
 Error AudioStreamPlayer2D::snapshot_set_state(const Dictionary &p_state) {
-	return internal->snapshot_set_state(p_state);
+	setplayback.unref();
+	return internal->snapshot_set_state(p_state, callable_mp(this, &AudioStreamPlayer2D::_snapshot_start_playback));
 }
 
 void AudioStreamPlayer2D::set_bus(const StringName &p_bus) {

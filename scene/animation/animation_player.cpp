@@ -746,6 +746,27 @@ Dictionary AnimationPlayer::snapshot_get_state() const {
 		// Just started (its first key not processed yet), or sought and not processed since.
 		state["started"] = playback.started;
 		state["seeked"] = playback.seeked;
+		Array blends;
+		for (const Blend &b : playback.blend) {
+			if (!b.data.is_enabled || !animation_set.has(b.data.animation_name)) {
+				continue;
+			}
+			Dictionary bd;
+			bd["animation"] = StringName(b.data.animation_name);
+			bd["position"] = b.data.pos;
+			bd["custom_speed"] = b.data.speed_scale;
+			bd["start_time"] = b.data.start_time;
+			bd["end_time"] = b.data.end_time;
+			bd["blend_time"] = b.blend_time;
+			bd["blend_left"] = b.blend_left;
+			blends.push_back(bd);
+		}
+		state["blend"] = blends;
+		Array queue;
+		for (const StringName &queued : playback_queue) {
+			queue.push_back(queued);
+		}
+		state["queue"] = queue;
 	}
 	return state;
 }
@@ -767,6 +788,7 @@ Error AnimationPlayer::snapshot_set_state(const Dictionary &p_state) {
 		c.current.speed_scale = 1;
 		c.started = false;
 		c.seeked = false;
+		c.internal_seeked = false;
 		playing = false;
 		_set_process(false);
 		return OK;
@@ -781,6 +803,34 @@ Error AnimationPlayer::snapshot_set_state(const Dictionary &p_state) {
 	c.current.end_time = p_state.get("end_time", -1.0);
 	c.started = p_state.get("started", false);
 	c.seeked = p_state.get("seeked", false);
+	c.internal_seeked = false;
+	const Array blends = p_state.get("blend", Array());
+	for (int i = 0; i < blends.size(); i++) {
+		if (blends[i].get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		const Dictionary bd = blends[i];
+		const StringName b_anim = bd.get("animation", StringName());
+		const double b_blend_time = bd.get("blend_time", 0.0);
+		if (b_anim == StringName() || !animation_set.has(b_anim) || b_blend_time <= 0.0) {
+			continue;
+		}
+		Blend b;
+		b.data.is_enabled = true;
+		b.data.animation_name = b_anim;
+		b.data.animation_length = animation_set[b_anim].animation->get_length();
+		b.data.pos = bd.get("position", 0.0);
+		b.data.speed_scale = bd.get("custom_speed", 1.0);
+		b.data.start_time = bd.get("start_time", -1.0);
+		b.data.end_time = bd.get("end_time", -1.0);
+		b.blend_time = b_blend_time;
+		b.blend_left = bd.get("blend_left", 0.0);
+		c.blend.push_back(b);
+	}
+	const Array queue = p_state.get("queue", Array());
+	for (int i = 0; i < queue.size(); i++) {
+		playback_queue.push_back(StringName(queue[i]));
+	}
 	playing = p_state.get("playing", false);
 	_set_process(playing);
 	return OK;

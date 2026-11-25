@@ -283,7 +283,7 @@
 		<method name="snapshot_get_state" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns the runtime playback state ([code]playing[/code], [code]animation[/code], [code]position[/code], [code]custom_speed[/code], the section's [code]start_time[/code] and [code]end_time[/code], and whether it has just [code]started[/code] or been [code]seeked[/code] and not processed since) for savestate systems. Stored properties such as [member AnimationMixer.speed_scale] are not included. A blend in progress and queued animations are not included.
+				Returns the runtime playback state ([code]playing[/code], [code]animation[/code], [code]position[/code], [code]custom_speed[/code], the section's [code]start_time[/code] and [code]end_time[/code], whether it has just [code]started[/code] or been [code]seeked[/code] and not processed since, any [code]blend[/code] in progress, and the playback [code]queue[/code]) for savestate systems. Stored properties such as [member AnimationMixer.speed_scale] are not included.
 			</description>
 		</method>
 		<method name="snapshot_set_state">

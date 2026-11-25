@@ -99,6 +99,7 @@ private:
 	Area3D *_get_overriding_area();
 #endif // PHYSICS_3D_DISABLED
 	Vector<AudioFrame> _update_panning();
+	void _snapshot_start_playback(float p_from_pos);
 
 	uint32_t area_mask = 0;
 
