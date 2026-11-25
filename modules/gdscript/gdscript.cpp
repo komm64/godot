@@ -1089,6 +1089,8 @@ void GDScript::_bind_methods() {
 	ClassDB::bind_vararg_method(METHOD_FLAGS_DEFAULT, "new", &GDScript::_new, MethodInfo("new"));
 	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_get_lambda", "callable"), &GDScript::snapshot_get_lambda);
 	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_make_lambda", "info"), &GDScript::snapshot_make_lambda);
+	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_get_held_scripts"), &GDScript::snapshot_get_held_scripts);
+	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_release_script", "script"), &GDScript::snapshot_release_script);
 	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_get_awaits", "owner"), &GDScript::snapshot_get_awaits);
 	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_make_await", "info"), &GDScript::snapshot_make_await);
 	ClassDB::bind_static_method("GDScript", D_METHOD("snapshot_set_await_stack", "state", "stack"), &GDScript::snapshot_set_await_stack);
@@ -1259,6 +1261,69 @@ Dictionary GDScript::snapshot_get_lambda(const Callable &p_callable) {
 		out["wraps"] = wraps;
 	}
 	return out;
+}
+
+// The scripts GDScriptCache keeps alive whether or not anything else holds
+// them (every loaded file script, and every script or inner class with static
+// variables), by fully qualified name.
+Dictionary GDScript::snapshot_get_held_scripts() {
+	Dictionary out;
+	if (GDScriptCache::singleton == nullptr) {
+		return out;
+	}
+	MutexLock lock(GDScriptCache::mutex);
+	HashSet<GDScript *> seen;
+	for (const HashMap<String, Ref<GDScript>> *cache : { &GDScriptCache::singleton->full_gdscript_cache, &GDScriptCache::singleton->shallow_gdscript_cache, &GDScriptCache::singleton->static_gdscript_cache }) {
+		for (const KeyValue<String, Ref<GDScript>> &E : *cache) {
+			if (E.value.is_valid() && !seen.has(E.value.ptr())) {
+				seen.insert(E.value.ptr());
+				out[E.value->get_fully_qualified_name()] = E.value;
+			}
+		}
+	}
+	return out;
+}
+
+// Lets go of a script, with its inner classes, as if it had never been
+// loaded: loading its path again compiles it anew, and it is freed with its
+// static variables. Only for a script nothing in use holds: its functions,
+// constants and static variables are cleared, which also breaks the
+// references a script with static functions or _static_init() has to itself.
+void GDScript::snapshot_release_script(const Ref<GDScript> &p_script) {
+	ERR_FAIL_COND(p_script.is_null());
+	if (GDScriptCache::singleton == nullptr) {
+		return;
+	}
+	const String path = p_script->get_script_path();
+	const String fqn = p_script->get_fully_qualified_name();
+	p_script->clear();
+	if (!p_script->get_path().is_empty()) {
+		p_script->Resource::set_path(""); // out of ResourceCache: load() makes a new one
+	}
+	Vector<Ref<GDScript>> dropped; // let go after the lock: freeing may use the cache
+	{
+		MutexLock lock(GDScriptCache::mutex);
+		Vector<String> keys;
+		for (const KeyValue<String, Ref<GDScript>> &E : GDScriptCache::singleton->static_gdscript_cache) {
+			if (E.key == fqn || E.key.begins_with(fqn + "::")) {
+				keys.push_back(E.key);
+			}
+		}
+		for (const String &key : keys) {
+			dropped.push_back(GDScriptCache::singleton->static_gdscript_cache[key]);
+			GDScriptCache::singleton->static_gdscript_cache.erase(key);
+		}
+		for (HashMap<String, Ref<GDScript>> *cache : { &GDScriptCache::singleton->full_gdscript_cache, &GDScriptCache::singleton->shallow_gdscript_cache }) {
+			if (HashMap<String, Ref<GDScript>>::Iterator E = cache->find(path)) {
+				if (E->value == p_script) {
+					dropped.push_back(E->value);
+				}
+			}
+		}
+	}
+	if (!path.is_empty() && !path.contains("::")) {
+		GDScriptCache::remove_script(path);
+	}
 }
 
 // The lambda snapshot_get_lambda() described, with its captures and self, or
