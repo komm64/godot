@@ -10,7 +10,9 @@ name: komm64 Windows Build
 # 後で「dev binary と production binary で挙動差があった」debug 困難を避ける。
 #
 # Trigger:
-#   - workflow_dispatch: 手動 trigger (ad-hoc 検証用)
+#   - workflow_dispatch: 手動 trigger (ad-hoc 検証用)。ref に公式の commit / tag
+#     (例 ed1daf0bf = 4.7.2-stable) を入れると、その source をこの workflow で
+#     build する (fork 固有の shader gate は飛ばす)。debug_symbols で PDB 付き。
 #   - tag push (v*-komm64*): 自動 build + Release 作成
 #   - 4.6 push (= 通常 PR merge): build + cache populate (Release は作らない)
 #   - komm64/** branch push: feature branch 検証用 build
@@ -29,6 +31,15 @@ name: komm64 Windows Build
 
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit, tag or branch to build (empty = the selected branch)'
+        required: false
+        default: ''
+      debug_symbols:
+        description: 'Build with debug symbols (PDB files go into the artifacts)'
+        type: boolean
+        default: false
   push:
     branches:
       - '4.6'
@@ -47,7 +58,7 @@ env:
   # shipped binaries do not carry build-machine paths (#54).
   SCONS_FLAGS: >-
     module_text_server_fb_enabled=yes
-    debug_symbols=no
+    debug_symbols=${{ inputs.debug_symbols && 'yes' || 'no' }}
     "ccflags=/d1trimfile:${GITHUB_WORKSPACE}\\"
     "angle_libs=${{ github.workspace }}/"
     "accesskit_sdk_path=${{ github.workspace }}/accesskit-c-0.21.2/"
@@ -68,11 +79,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+          ref: ${{ inputs.ref }}
 
       - name: Restore build cache
         uses: ./.github/actions/godot-cache-restore
         with:
-          cache-name: komm64-windows-${{ matrix.target }}
+          cache-name: komm64-windows-${{ matrix.target }}${{ inputs.debug_symbols && '-sym' || '' }}
         continue-on-error: true
 
       - name: Setup Python and SCons
@@ -132,7 +144,7 @@ jobs:
       - name: Save build cache
         uses: ./.github/actions/godot-cache-save
         with:
-          cache-name: komm64-windows-${{ matrix.target }}
+          cache-name: komm64-windows-${{ matrix.target }}${{ inputs.debug_symbols && '-sym' || '' }}
         continue-on-error: true
 
       - name: Prepare artifact
@@ -148,6 +160,8 @@ jobs:
               cp "bin/godot.windows.${{ matrix.target }}.x86_64.exe" "out/windows_${kind}_x86_64.exe"
               cp "bin/godot.windows.${{ matrix.target }}.x86_64.console.exe" "out/windows_${kind}_x86_64_console.exe" ;;
           esac
+          # debug_symbols=yes: the PDBs, to read crash dumps of these exact binaries.
+          cp bin/*.pdb out/ 2>/dev/null || true
           ls -l out
 
       - name: Build path gate
@@ -181,7 +195,8 @@ jobs:
       # with backend render_mode_values mappings. Each new komm64 render_mode
       # / shader feature should add a line under the test_shader.gdshader.
       - name: Shader compile gate
-        if: matrix.target == 'editor'
+        # Only the fork's own source has these render modes (not a stock ref).
+        if: matrix.target == 'editor' && inputs.ref == ''
         shell: bash
         run: |
           set -e
